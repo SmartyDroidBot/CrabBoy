@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/emu-core",
+    "crates/gb-core",
+    "platforms/desktop",
+    "platforms/cli",
+    "platforms/wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+emu-core = { path = "crates/emu-core" }
+gb-core = { path = "crates/gb-core" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3

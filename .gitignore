@@ -1,0 +1,15 @@
+# Build artifacts
+/target
+/dist
+
+# Save files / battery RAM
+*.sav
+*.srm
+
+# Test ROMs are fetched by script, not committed
+roms/tests/*.gb
+roms/tests/*.gbc
+roms/tests/*.zip
+
+# Stuck Windows build scripts (leftover from an aborted Windows build)
+target_stuck_windows/

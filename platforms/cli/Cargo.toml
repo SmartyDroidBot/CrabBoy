@@ -1,0 +1,18 @@
+[package]
+name = "crab-cli"
+description = "Headless runner and test harness for CrabBoy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "test_runner"
+path = "src/bin/test_runner.rs"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+emu-core = { workspace = true }
+gb-core = { workspace = true }

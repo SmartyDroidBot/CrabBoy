@@ -1,0 +1,19 @@
+[package]
+name = "crab-wasm"
+description = "WebAssembly bindings for CrabBoy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+emu-core = { workspace = true }
+gb-core = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+# Build the WebAssembly bindings. Requires wasm-bindgen and a wasm32 target.
+wasm = ["dep:wasm-bindgen"]

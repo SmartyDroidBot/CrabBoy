@@ -1,0 +1,16 @@
+[package]
+name = "crab-desktop"
+description = "Desktop (egui) frontend for CrabBoy (multi-system)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "CrabBoy"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.28"
+rfd = "0.15"
+emu-core = { workspace = true }
+gb-core = { workspace = true }

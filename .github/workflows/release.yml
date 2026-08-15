@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: crab-linux
+          - os: windows-latest
+            artifact: crab-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release -p crab-desktop -p crab-cli
+
+      - name: Stage artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/CrabBoy.exe dist/
+          cp target/release/test_runner.exe target/release/probe.exe dist/
+          cp README.md LICENSE dist/
+
+      - name: Stage artifacts (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/CrabBoy dist/
+          cp target/release/test_runner target/release/probe dist/
+          cp README.md LICENSE dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build wasm package
+        run: |
+          cargo install wasm-pack --locked
+          wasm-pack build platforms/wasm --target web --out-dir ../../dist/web
+
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crab-wasm
+          path: dist/web/
+
+  release:
+    needs: [native, wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Bundle archives
+        run: |
+          mkdir -p uploads
+          tar -C dist/crab-linux -czf uploads/crab-linux.tar.gz .
+          (cd dist/crab-windows && zip -r ../../uploads/crab-windows.zip .)
+          (cd dist/crab-wasm && zip -r ../../uploads/crab-wasm.zip .)
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: uploads/*
+          generate_release_notes: true

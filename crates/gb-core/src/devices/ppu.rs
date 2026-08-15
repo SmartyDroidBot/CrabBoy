@@ -1,0 +1,366 @@
+pub const SCREEN_W: usize = 160;
+pub const SCREEN_H: usize = 144;
+
+#[derive(Clone, Copy)]
+pub struct Sprite {
+    pub x: i16,
+    pub y: u8,
+    pub tile: u8,
+    pub attr: u8,
+    pub height: u8,
+}
+
+pub struct Ppu {
+    pub ly: u8,
+    pub mode: u8,
+    pub dot: u32,
+    mode3_cycles: u32,
+    pub line_sprites: [Sprite; 10],
+    pub line_sprite_count: usize,
+    pub vblank_interrupts: u64,
+    pub frame_buffer: [u8; SCREEN_W * SCREEN_H],
+}
+
+impl Ppu {
+    pub fn new() -> Ppu {
+        Ppu {
+            ly: 0,
+            mode: 0,
+            dot: 0,
+            mode3_cycles: 172,
+            line_sprites: [Sprite {
+                x: 0,
+                y: 0,
+                tile: 0,
+                attr: 0,
+                height: 8,
+            }; 10],
+            line_sprite_count: 0,
+            vblank_interrupts: 0,
+            frame_buffer: [0; SCREEN_W * SCREEN_H],
+        }
+    }
+
+    pub fn reset(&mut self, io: &mut [u8; 0x80]) {
+        self.ly = 0;
+        self.mode = 0;
+        self.dot = 0;
+        io[0x44] = 0;
+    }
+
+    pub fn step(
+        &mut self,
+        cycles: u32,
+        io: &mut [u8; 0x80],
+        vram: &mut [u8; 0x2000],
+        oam: &mut [u8; 0xA0],
+    ) {
+        let lcdc = io[0x40];
+        if lcdc & 0x80 == 0 {
+            if self.ly != 0 || self.mode != 0 {
+                self.reset(io);
+            }
+            return;
+        }
+
+        self.dot += cycles;
+        // `dot` is the position within the current 456-dot line:
+        //   mode 2 (OAM):      dot in [0, 80)
+        //   mode 3 (render):   dot in [80, 80 + mode3_cycles)
+        //   mode 0 (HBlank):   dot in [80 + mode3_cycles, 456)
+        //   mode 1 (VBlank):   456 dots per line
+        loop {
+            match self.mode {
+                0 => {
+                    if self.dot >= 456 {
+                        self.dot -= 456;
+                        self.end_scanline(io, vram, oam);
+                    } else {
+                        break;
+                    }
+                }
+                1 => {
+                    if self.dot >= 456 {
+                        self.dot -= 456;
+                        self.ly = self.ly.wrapping_add(1);
+                        self.set_ly(io);
+                        if self.ly == 154 {
+                            self.ly = 0;
+                            self.set_ly(io);
+                            self.begin_scanline(io, vram, oam);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                2 => {
+                    if self.dot >= 80 {
+                        self.mode = 3;
+                        self.update_stat(io);
+                    } else {
+                        break;
+                    }
+                }
+                3 => {
+                    if self.dot >= 80 + self.mode3_cycles {
+                        self.render_line(io, vram, oam);
+                        self.mode = 0;
+                        self.update_stat(io);
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn end_scanline(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x2000], oam: &mut [u8; 0xA0]) {
+        self.ly = self.ly.wrapping_add(1);
+        self.set_ly(io);
+        if self.ly == 144 {
+            self.mode = 1;
+            self.update_stat(io);
+            io[0x0F] |= 0x01;
+            self.vblank_interrupts += 1;
+            if io[0x41] & 0x10 != 0 {
+                io[0x0F] |= 0x02;
+            }
+        } else {
+            self.begin_scanline(io, vram, oam);
+        }
+    }
+
+    fn begin_scanline(&mut self, io: &mut [u8; 0x80], _vram: &mut [u8; 0x2000], oam: &mut [u8; 0xA0]) {
+        self.scan_oam(io, oam);
+        self.mode = 2;
+        self.update_stat(io);
+    }
+
+    fn scan_oam(&mut self, io: &mut [u8; 0x80], oam: &mut [u8; 0xA0]) {
+        let lcdc = io[0x40];
+        let height = if lcdc & 0x04 != 0 { 16 } else { 8 };
+        let mut count = 0;
+        for i in 0..40 {
+            if count >= 10 {
+                break;
+            }
+            let o = i * 4;
+            let sy = oam[o];
+            let sx = oam[o + 1];
+            let tile = oam[o + 2];
+            let attr = oam[o + 3];
+            if sx == 0 || sx > 168 {
+                continue;
+            }
+            let screen_y = sy as i16 - 16;
+            if (self.ly as i16) >= screen_y && (self.ly as i16) < screen_y + height as i16 {
+                self.line_sprites[count] = Sprite {
+                    x: sx as i16 - 8,
+                    y: sy,
+                    tile,
+                    attr,
+                    height,
+                };
+                count += 1;
+            }
+        }
+        self.line_sprite_count = count;
+        self.mode3_cycles = 172 + 6 * count.min(10) as u32;
+    }
+
+    fn set_ly(&mut self, io: &mut [u8; 0x80]) {
+        io[0x44] = self.ly;
+        self.update_stat(io);
+    }
+
+    fn update_stat(&mut self, io: &mut [u8; 0x80]) {
+        let stat = io[0x41];
+        let coinc = self.ly == io[0x45];
+        let mut new_stat = (stat & 0xF8) | (self.mode & 0x03);
+        if coinc {
+            new_stat |= 0x04;
+            if stat & 0x40 != 0 {
+                io[0x0F] |= 0x02;
+            }
+        } else {
+            new_stat &= !0x04;
+        }
+        io[0x41] = new_stat;
+    }
+
+    fn tile_base(&self, io: &[u8; 0x80], tile_index: u8) -> usize {
+        let lcdc = io[0x40];
+        if lcdc & 0x10 != 0 {
+            (0x8000 + tile_index as usize * 16) & 0x1FFF
+        } else {
+            let signed = tile_index as i8 as i16;
+            ((0x9000i32 + signed as i32 * 16) & 0x1FFF) as usize
+        }
+    }
+
+    fn tile_pixels(&self, vram: &[u8; 0x2000], io: &[u8; 0x80], tile_index: u8, row: u8) -> [u8; 8] {
+        let base = self.tile_base(io, tile_index);
+        let lo = vram[base + row as usize * 2];
+        let hi = vram[base + row as usize * 2 + 1];
+        let mut out = [0u8; 8];
+        for px in 0..8 {
+            let bit = 7 - px;
+            let c = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+            out[px] = c;
+        }
+        out
+    }
+
+    fn render_bg(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+        let lcdc = io[0x40];
+        let scy = io[0x42] as usize;
+        let scx = io[0x43] as usize;
+        let map_base = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 };
+        let bgp = io[0x47];
+
+        let y = (self.ly as usize).wrapping_add(scy);
+        let tile_row = (y >> 3) & 31;
+        let row_in_tile = y & 7;
+
+        for px in 0..SCREEN_W {
+            let x = px.wrapping_add(scx);
+            let tile_col = (x >> 3) & 31;
+            let addr = map_base + tile_row * 32 + tile_col;
+            let tile_index = vram[addr];
+            let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
+            let cv = pixels[((x & 7))];
+            bg_color[px] = cv;
+            bg_shade[px] = (bgp >> (cv * 2)) & 3;
+        }
+    }
+
+    fn render_window(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+        let lcdc = io[0x40];
+        let wy = io[0x4A] as usize;
+        if (self.ly as usize) < wy {
+            return;
+        }
+        let wx = io[0x4B] as i32 - 7;
+        if wx > 159 {
+            return;
+        }
+        let map_base = if lcdc & 0x20 != 0 { 0x1C00 } else { 0x1800 };
+        let bgp = io[0x47];
+
+        let win_y = self.ly as usize - wy;
+        let tile_row = (win_y >> 3) & 31;
+        let row_in_tile = win_y & 7;
+
+        let mut win_col = 0usize;
+        for px in wx.max(0) as usize..SCREEN_W {
+            let tile_col = (win_col >> 3) & 31;
+            let addr = map_base + tile_row * 32 + tile_col;
+            let tile_index = vram[addr];
+            let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
+            let cv = pixels[((win_col & 7))];
+            bg_color[px] = cv;
+            bg_shade[px] = (bgp >> (cv * 2)) & 3;
+            win_col += 1;
+        }
+    }
+
+    fn render_sprites(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+        let mut sprites = [self.line_sprites[0]; 10];
+        for i in 0..self.line_sprite_count {
+            sprites[i] = self.line_sprites[i];
+        }
+        sprites[..self.line_sprite_count].sort_by_key(|s| s.x);
+
+        let lcdc = io[0x40];
+        let bg_enabled = lcdc & 0x01 != 0;
+
+        for i in 0..self.line_sprite_count {
+            let s = sprites[i];
+            let obp = if s.attr & 0x10 != 0 { io[0x49] } else { io[0x48] };
+            let priority = s.attr & 0x80 != 0;
+            let flip_x = s.attr & 0x20 != 0;
+            let flip_y = s.attr & 0x40 != 0;
+
+            let top = s.y as i16 - 16;
+            let row = self.ly as i16 - top;
+            let mut tile = s.tile;
+            if s.height == 16 {
+                if flip_y {
+                    if row < 8 {
+                        tile = (s.tile & !1) + 1;
+                    }
+                } else if row >= 8 {
+                    tile = (s.tile & !1) + 1;
+                }
+            }
+            let tile_row = if flip_y { 7 - (row & 7) } else { row & 7 };
+            // Sprite tiles are always indexed from 0x8000 (unsigned), independent of LCDC bit 4.
+            let base = (0x8000 + tile as usize * 16) & 0x1FFF;
+            let lo = vram[base + tile_row as usize * 2];
+            let hi = vram[base + tile_row as usize * 2 + 1];
+            let mut pixels = [0u8; 8];
+            for px in 0..8 {
+                let bit = 7 - px;
+                pixels[px] = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+            }
+
+            for p in 0..8 {
+                let px = s.x + p as i16;
+                if px < 0 || px >= SCREEN_W as i16 {
+                    continue;
+                }
+                let col = if flip_x { 7 - p } else { p };
+                let cv = pixels[col as usize];
+                if cv == 0 {
+                    continue;
+                }
+                if bg_enabled && priority && bg_color[px as usize] != 0 {
+                    continue;
+                }
+                bg_shade[px as usize] = (obp >> (cv * 2)) & 3;
+            }
+        }
+    }
+
+    fn render_line(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x2000], _oam: &mut [u8; 0xA0]) {
+        let lcdc = io[0x40];
+        let mut bg_shade = [0u8; SCREEN_W];
+        let mut bg_color = [0u8; SCREEN_W];
+
+        if lcdc & 0x01 != 0 {
+            self.render_bg(io, vram, &mut bg_shade, &mut bg_color);
+        }
+        if lcdc & 0x40 != 0 {
+            self.render_window(io, vram, &mut bg_shade, &mut bg_color);
+        }
+        if lcdc & 0x02 != 0 {
+            self.render_sprites(io, vram, &mut bg_shade, &mut bg_color);
+        }
+
+        let row = self.ly as usize * SCREEN_W;
+        self.frame_buffer[row..row + SCREEN_W].copy_from_slice(&bg_shade);
+    }
+}
+
+impl Default for Ppu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl emu_core::device::Device for Ppu {
+    fn kind(&self) -> &'static str {
+        "PPU"
+    }
+
+    fn reset(&mut self) {
+        *self = Ppu::new();
+    }
+
+    fn tick(&mut self, cycles: u32, bus: &mut dyn emu_core::bus::Bus) {
+        if let Some(gb) = bus.as_any_mut().downcast_mut::<crate::bus::Bus>() {
+            self.step(cycles, &mut gb.io, &mut gb.vram, &mut gb.oam);
+        }
+    }
+}
