@@ -4,7 +4,9 @@ use std::fmt;
 pub enum MbcType {
     RomOnly,
     Mbc1,
+    Mbc2,
     Mbc3,
+    Mbc5,
     Other,
 }
 
@@ -13,7 +15,9 @@ impl fmt::Display for MbcType {
         match self {
             MbcType::RomOnly => write!(f, "ROM only"),
             MbcType::Mbc1 => write!(f, "MBC1"),
+            MbcType::Mbc2 => write!(f, "MBC2"),
             MbcType::Mbc3 => write!(f, "MBC3"),
+            MbcType::Mbc5 => write!(f, "MBC5"),
             MbcType::Other => write!(f, "Unknown"),
         }
     }
@@ -54,9 +58,9 @@ impl Cartridge {
         let mbc = match mbc_code {
             0x00 => MbcType::RomOnly,
             0x01..=0x03 => MbcType::Mbc1,
+            0x05..=0x06 => MbcType::Mbc2,
             0x0F..=0x13 => MbcType::Mbc3,
-            0x05..=0x06 => MbcType::Other, // MBC2
-            0x19..=0x1E => MbcType::Other, // MBC5
+            0x19..=0x1E => MbcType::Mbc5,
             _ => MbcType::Other,
         };
         let rom_size_code = data[0x148];
@@ -69,6 +73,7 @@ impl Cartridge {
             0x05 => 64,
             0x06 => 128,
             0x07 => 256,
+            0x08 => 512,
             0x52 => 72,
             0x53 => 80,
             0x54 => 96,
@@ -91,6 +96,8 @@ impl Cartridge {
             0x05 => 0x10000,
             _ => 0,
         };
+        // MBC2 carries 512 x 4-bit built-in RAM regardless of the size field.
+        let ram_bytes = if mbc == MbcType::Mbc2 { 0x200 } else { ram_bytes };
         let has_battery = matches!(
             mbc_code,
             0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E
@@ -178,6 +185,10 @@ impl Cartridge {
         if self.mbc == MbcType::Mbc3 && self.rtc_selected {
             return self.rtc_latched[self.rtc_register as usize];
         }
+        if self.mbc == MbcType::Mbc2 {
+            let offset = ((addr - 0xA000) & 0x1FF) as usize;
+            return 0xF0 | (self.ram[offset] & 0x0F);
+        }
         let bank = match self.mbc {
             MbcType::Mbc1 => {
                 if self.bank_mode {
@@ -186,7 +197,7 @@ impl Cartridge {
                     0
                 }
             }
-            MbcType::Mbc3 => self.ram_bank,
+            MbcType::Mbc3 | MbcType::Mbc5 => self.ram_bank,
             _ => 0,
         };
         let offset = bank * 0x2000 + (addr as usize - 0xA000);
@@ -197,8 +208,38 @@ impl Cartridge {
         match self.mbc {
             MbcType::RomOnly => {}
             MbcType::Mbc1 => self.write_mbc1(addr, value),
+            MbcType::Mbc2 => self.write_mbc2(addr, value),
             MbcType::Mbc3 => self.write_mbc3(addr, value),
+            MbcType::Mbc5 => self.write_mbc5(addr, value),
             MbcType::Other => {}
+        }
+    }
+
+    fn write_mbc2(&mut self, addr: u16, value: u8) {
+        // Address bit 8 selects the function: clear -> RAM enable, set -> ROM
+        // bank select (4-bit). This is the only MBC that lets bank 0 be selected.
+        if addr & 0x0100 != 0 {
+            self.rom_bank = (value & 0x0F) as usize % self.num_rom_banks.max(1);
+        } else {
+            self.ram_enabled = (value & 0x0F) == 0x0A;
+        }
+    }
+
+    fn write_mbc5(&mut self, addr: u16, value: u8) {
+        match addr {
+            0x0000..=0x1FFF => self.ram_enabled = (value & 0x0F) == 0x0A,
+            0x2000..=0x2FFF => {
+                self.rom_bank = (self.rom_bank & 0x100) | value as usize;
+                self.rom_bank %= self.num_rom_banks.max(1);
+            }
+            0x3000..=0x3FFF => {
+                self.rom_bank = (self.rom_bank & 0x0FF) | (((value as usize) & 0x01) << 8);
+                self.rom_bank %= self.num_rom_banks.max(1);
+            }
+            0x4000..=0x5FFF => {
+                self.ram_bank = (value & 0x07) as usize % self.num_ram_banks.max(1);
+            }
+            _ => {}
         }
     }
 
@@ -269,6 +310,11 @@ impl Cartridge {
             self.rtc[self.rtc_register as usize] = value;
             return;
         }
+        if self.mbc == MbcType::Mbc2 {
+            let offset = ((addr - 0xA000) & 0x1FF) as usize;
+            self.ram[offset] = value & 0x0F; // MBC2 RAM is 4-bit
+            return;
+        }
         let bank = match self.mbc {
             MbcType::Mbc1 => {
                 if self.bank_mode {
@@ -277,7 +323,7 @@ impl Cartridge {
                     0
                 }
             }
-            MbcType::Mbc3 => self.ram_bank,
+            MbcType::Mbc3 | MbcType::Mbc5 => self.ram_bank,
             _ => 0,
         };
         let offset = bank * 0x2000 + (addr as usize - 0xA000);
@@ -363,5 +409,51 @@ mod tests {
         // back to RAM select (value <= 3)
         cart.write(0x4000, 0x00);
         assert!(!cart.rtc_selected);
+    }
+
+    #[test]
+    fn mbc2_rom_and_nibble_ram() {
+        let rom = make_rom(0x05, 0x00); // MBC2
+        let mut cart = Cartridge::load(&rom).unwrap();
+        assert_eq!(cart.ram_bytes(), 0x200);
+
+        // RAM disabled by default -> 0xFF.
+        assert_eq!(cart.read_ram(0xA000), 0xFF);
+
+        // Enable RAM via an address with bit 8 clear.
+        cart.write(0x0000, 0x0A);
+        assert!(cart.ram_enabled);
+
+        // Store a byte: only the low nibble is kept, upper nibble reads as 1s.
+        cart.write_ram(0xA005, 0xAB);
+        assert_eq!(cart.read_ram(0xA005), 0xF0 | 0x0B);
+        assert_eq!(cart.read_ram(0xA605), 0xF0 | 0x0B, "MBC2 RAM mirrors every 0x200");
+
+        // ROM bank selected via an address with bit 8 set.
+        cart.write(0x2100, 0x03);
+        assert_eq!(cart.rom_bank, 3);
+        cart.write(0x0000, 0x00); // bit 8 clear -> RAM enable write, not bank select
+        assert_eq!(cart.rom_bank, 3, "bank unchanged on RAM-enable write");
+    }
+
+    #[test]
+    fn mbc5_banking() {
+        let mut rom = make_rom(0x19, 0x03); // MBC5, 4 RAM banks
+        rom[0x148] = 0x08; // 512 ROM banks, enough for a 9-bit select
+        let mut cart = Cartridge::load(&rom).unwrap();
+
+        // ROM bank select in two parts (lower 8 bits + bit 9).
+        cart.write(0x2000, 0x34);
+        assert_eq!(cart.rom_bank, 0x34);
+        cart.write(0x3000, 0x01);
+        assert_eq!(cart.rom_bank, 0x134);
+
+        // RAM enable + bank select.
+        cart.write(0x0000, 0x0A);
+        cart.write(0x4000, 0x02);
+        cart.write_ram(0xA000, 0x7E);
+        assert_eq!(cart.read_ram(0xA000), 0x7E);
+        cart.write(0x4000, 0x03);
+        assert_eq!(cart.read_ram(0xA000), 0, "different RAM bank");
     }
 }
