@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CrabBoy</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <h1 class="title">CrabBoy</h1>
+
+    <label class="load">
+      <input id="rom-input" type="file" accept=".gb,.gbc,.rom" />
+      Load ROM (.gb)
+    </label>
+
+    <div class="screen-wrap">
+      <canvas id="screen" width="160" height="144"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="pause-btn">Pause</button>
+    </div>
+
+    <p class="hint">
+      Arrows = D-pad &middot; Z = A &middot; X = B &middot; Enter = Start &middot; Backspace = Select
+    </p>
+  </main>
+
+  <script type="module" src="./index.js"></script>
+</body>
+</html>

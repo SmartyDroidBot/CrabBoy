@@ -51,6 +51,20 @@ const GB_BUTTONS: [Button; 8] = [
     Button::Select,
 ];
 
+/// The 10 buttons a GBA exposes (adds L/R).
+const GBA_BUTTONS: [Button; 10] = [
+    Button::Up,
+    Button::Down,
+    Button::Left,
+    Button::Right,
+    Button::A,
+    Button::B,
+    Button::L,
+    Button::R,
+    Button::Start,
+    Button::Select,
+];
+
 #[derive(Clone, Copy)]
 struct Palette {
     colors: [[u8; 4]; 4],
@@ -125,7 +139,7 @@ struct CrabBoyApp {
 impl CrabBoyApp {
     fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>, audio: Option<(OutputStream, Sink)>) -> Self {
         let mut keymap = HashMap::new();
-        for b in GB_BUTTONS {
+        for b in GBA_BUTTONS {
             keymap.insert(b, default_key(b));
         }
         let mut app = CrabBoyApp {
@@ -165,67 +179,74 @@ impl CrabBoyApp {
                 return;
             }
         };
-        let cart = match Cartridge::load(&data) {
-            Ok(c) => c,
-            Err(e) => {
-                self.status = format!("Failed to load cartridge: {e}");
-                return;
-            }
-        };
-        let info = format!("{} ({})", cart.title, cart.mbc);
-        let battery = cart.has_battery();
-        let sav_path = sav_path_for(path);
-        self.rom_title = cart.title.trim().to_string();
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        let is_gba = ext.as_deref() == Some("gba");
 
-        let mut system: Box<dyn System> = gb_core::gb::Gb::system(cart);
-        if battery {
+        let sav_path = sav_path_for(path);
+
+        let system: Box<dyn System> = if is_gba {
+            let title = String::from_utf8_lossy(&data[0xA0..0xB0])
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            self.rom_title = if title.is_empty() { "GBA".to_string() } else { title };
+            let mut s = gba_core::Gba::system(data.clone());
             if let Some(sav) = &sav_path {
                 if let Ok(d) = std::fs::read(sav) {
-                    system.load_data(&d);
-                    self.status = format!("Loaded '{}' (battery save found)", info);
+                    s.load_data(&d);
                 }
             }
-            if let Some(rtc) = sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
-                if let Ok(d) = std::fs::read(&rtc) {
-                    system.load_rtc(&d);
+            s
+        } else {
+            let cart = match Cartridge::load(&data) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.status = format!("Failed to load cartridge: {e}");
+                    return;
+                }
+            };
+            let info = format!("{} ({})", cart.title, cart.mbc);
+            let battery = cart.has_battery();
+            self.rom_title = cart.title.trim().to_string();
+
+            let mut system: Box<dyn System> = gb_core::gb::Gb::system(cart);
+            if battery {
+                if let Some(sav) = &sav_path {
+                    if let Ok(d) = std::fs::read(sav) {
+                        system.load_data(&d);
+                        self.status = format!("Loaded '{}' (battery save found)", info);
+                    }
+                }
+                if let Some(rtc) = sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
+                    if let Ok(d) = std::fs::read(&rtc) {
+                        system.load_rtc(&d);
+                    }
                 }
             }
-        }
+            system
+        };
 
         self.rom_data = Some(data);
-        self.sav_path = sav_path;
         self.system = Some(system);
+        self.sav_path = sav_path;
         self.frame_count = 0;
         self.accum = 0.0;
         self.paused = false;
         if !self.status.starts_with("Loaded") {
-            self.status = format!("Loaded '{info}'");
+            self.status = format!("Loaded '{}'", self.rom_title);
         }
         ctx.request_repaint();
     }
 
     fn reset(&mut self) {
-        if let Some(data) = &self.rom_data {
-            if let Ok(cart) = Cartridge::load(data) {
-                let battery = cart.has_battery();
-                let mut system: Box<dyn System> = gb_core::gb::Gb::system(cart);
-                if battery {
-                    if let Some(sav) = &self.sav_path {
-                        if let Ok(d) = std::fs::read(sav) {
-                            system.load_data(&d);
-                        }
-                    }
-                    if let Some(rtc) = self.sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
-                        if let Ok(d) = std::fs::read(&rtc) {
-                            system.load_rtc(&d);
-                        }
-                    }
-                }
-                self.system = Some(system);
-                self.frame_count = 0;
-                self.accum = 0.0;
-                self.paused = false;
-            }
+        if let Some(system) = &mut self.system {
+            system.reset();
+            self.frame_count = 0;
+            self.accum = 0.0;
+            self.paused = false;
         }
     }
 
@@ -394,12 +415,14 @@ impl CrabBoyApp {
         }
 
         if let Some(system) = &mut self.system {
-            for b in GB_BUTTONS {
-                let held = self.keymap.get(&b).map(|k| keys.contains(k)).unwrap_or(false);
+            let is_gba = system.name() == "gba";
+            let buttons: &[Button] = if is_gba { &GBA_BUTTONS } else { &GB_BUTTONS };
+            for b in buttons {
+                let held = self.keymap.get(b).map(|k| keys.contains(k)).unwrap_or(false);
                 if held {
-                    system.press(b);
+                    system.press(*b);
                 } else {
-                    system.release(b);
+                    system.release(*b);
                 }
             }
         }
@@ -494,6 +517,8 @@ fn default_key(b: Button) -> egui::Key {
         Button::B => egui::Key::X,
         Button::Start => egui::Key::Enter,
         Button::Select => egui::Key::Backspace,
+        Button::L => egui::Key::A,
+        Button::R => egui::Key::S,
         _ => egui::Key::Space,
     }
 }
@@ -519,7 +544,7 @@ impl eframe::App for CrabBoyApp {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open ROM...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Game Boy ROM", &["gb", "gbc"])
+                            .add_filter("Game Boy / GBA ROM", &["gb", "gbc", "gba"])
                             .pick_file()
                         {
                             let p = path.to_string_lossy().to_string();
@@ -575,6 +600,7 @@ impl eframe::App for CrabBoyApp {
                     ui.label("Arrows: D-pad");
                     ui.label("Z: A    X: B");
                     ui.label("Enter: Start    Backspace: Select");
+                    ui.label("A: L (GBA)    S: R (GBA)");
                     ui.label("P: Pause    R: Reset    F: Fast-forward");
                     ui.label("F1-F4: Save state    Shift+F1-F4: Load state");
                     ui.label("F5: Quick save    F9: Quick load");

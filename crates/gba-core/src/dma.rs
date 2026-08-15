@@ -29,22 +29,22 @@ pub enum Timing {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Channel {
-    src: u32,
-    dst: u32,
-    count: u16,
-    control: u16,
-    enabled: bool,
+pub(crate) struct Channel {
+    pub(crate) src: u32,
+    pub(crate) dst: u32,
+    pub(crate) count: u16,
+    pub(crate) control: u16,
+    pub(crate) enabled: bool,
     /// Set once the transfer has been performed for a frame/event (used to
     /// implement repeat).
-    done: bool,
+    pub(crate) done: bool,
 }
 
 impl Channel {
     fn new() -> Self {
         Channel { src: 0, dst: 0, count: 0, control: 0, enabled: false, done: false }
     }
-    fn timing(&self) -> Timing {
+    pub(crate) fn timing(&self) -> Timing {
         match (self.control >> 11) & 3 {
             1 => Timing::VBlank,
             2 => Timing::HBlank,
@@ -52,28 +52,37 @@ impl Channel {
             _ => Timing::Immediate,
         }
     }
-    fn unit_32(&self) -> bool {
+    pub(crate) fn unit_32(&self) -> bool {
         ((self.control >> 9) & 3) == 1
     }
-    fn dst_adjust(&self) -> u8 {
+    pub(crate) fn dst_adjust(&self) -> u8 {
         ((self.control >> 5) & 3) as u8
     }
-    fn src_adjust(&self) -> u8 {
+    pub(crate) fn src_adjust(&self) -> u8 {
         ((self.control >> 7) & 3) as u8
     }
-    fn irq_enable(&self) -> bool {
+    pub(crate) fn irq_enable(&self) -> bool {
         self.control & IRQ != 0
     }
-    fn repeat(&self) -> bool {
+    pub(crate) fn repeat(&self) -> bool {
         self.control & REPEAT != 0
+    }
+}
+
+/// Address adjustment applied to a source/destination pointer after a transfer.
+pub(crate) fn adjust(addr: u32, unit: u32, mode: u8) -> u32 {
+    match mode {
+        1 => addr.wrapping_sub(unit),
+        2 => addr,
+        _ => addr.wrapping_add(unit),
     }
 }
 
 /// The four GBA DMA channels.
 pub struct Dma {
-    chans: [Channel; 4],
+    pub(crate) chans: [Channel; 4],
     /// Pending DMA IRQ flags (bits 4-7).
-    flags: u16,
+    pub(crate) flags: u16,
 }
 
 impl Default for Dma {
@@ -165,15 +174,15 @@ impl Dma {
                 for _ in 0..count {
                     let v = bus.read32(s);
                     bus.write32(d, v);
-                    s = Self::adjust(s, unit_bytes, src_adj);
-                    d = Self::adjust(d, unit_bytes, dst_adj);
+                    s = adjust(s, unit_bytes, src_adj);
+                    d = adjust(d, unit_bytes, dst_adj);
                 }
             } else {
                 for _ in 0..count {
                     let v = bus.read16(s);
                     bus.write16(d, v);
-                    s = Self::adjust(s, unit_bytes, src_adj);
-                    d = Self::adjust(d, unit_bytes, dst_adj);
+                    s = adjust(s, unit_bytes, src_adj);
+                    d = adjust(d, unit_bytes, dst_adj);
                 }
             }
             let _ = n;
@@ -189,14 +198,6 @@ impl Dma {
             ch.done = !ch.enabled;
             ch.src = s;
             ch.dst = d;
-        }
-    }
-
-    fn adjust(addr: u32, unit: u32, mode: u8) -> u32 {
-        match mode {
-            1 => addr.wrapping_sub(unit),
-            2 => addr,
-            _ => addr.wrapping_add(unit),
         }
     }
 }

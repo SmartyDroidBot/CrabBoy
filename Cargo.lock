@@ -993,6 +993,7 @@ dependencies = [
  "eframe",
  "emu-core",
  "gb-core",
+ "gba-core",
  "rfd",
  "rodio",
 ]

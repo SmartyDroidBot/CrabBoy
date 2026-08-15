@@ -359,6 +359,51 @@ impl Bus {
         self.io.raise_irq(self.dma.irq_flags());
     }
 
+    /// Run any enabled DMA channel whose start timing matches `timing`.
+    pub fn run_dma(&mut self, timing: crate::dma::Timing) {
+        let chans = self.dma.chans;
+        let mut flags = self.dma.flags;
+        for (i, mut ch) in chans.iter().copied().enumerate() {
+            if !ch.enabled || ch.done {
+                continue;
+            }
+            if ch.timing() != timing {
+                continue;
+            }
+            if timing == crate::dma::Timing::Special {
+                continue;
+            }
+            let unit = ch.unit_32();
+            let ub = if unit { 4u32 } else { 2u32 };
+            let sa = ch.src_adjust();
+            let da = ch.dst_adjust();
+            let mut s = ch.src;
+            let mut d = ch.dst;
+            for _ in 0..ch.count as usize {
+                if unit {
+                    let v = self.read32(s);
+                    self.write32(d, v);
+                } else {
+                    let v = self.read16(s);
+                    self.write16(d, v);
+                }
+                s = crate::dma::adjust(s, ub, sa);
+                d = crate::dma::adjust(d, ub, da);
+            }
+            if ch.irq_enable() {
+                flags |= 1 << (4 + i);
+            }
+            if !ch.repeat() {
+                ch.enabled = false;
+            }
+            ch.src = s;
+            ch.dst = d;
+            ch.done = !ch.enabled;
+            self.dma.chans[i] = ch;
+        }
+        self.dma.flags = flags;
+    }
+
     /// Pending interrupt flags (IF & IE).
     pub fn pending_irq(&self) -> u16 {
         self.io.pending_irq()

@@ -25,6 +25,24 @@ pub mod key {
 /// Interrupt flag bit for the keypad.
 pub const IRQ_KEYPAD: u16 = 1 << 14;
 
+/// Interrupt flag bits, one per source.
+pub mod irq {
+    pub const VBLANK: u16 = 1 << 0;
+    pub const HBLANK: u16 = 1 << 1;
+    pub const VCOUNT: u16 = 1 << 2;
+    pub const TIMER0: u16 = 1 << 3;
+    pub const TIMER1: u16 = 1 << 4;
+    pub const TIMER2: u16 = 1 << 5;
+    pub const TIMER3: u16 = 1 << 6;
+    pub const SERIAL: u16 = 1 << 7;
+    pub const DMA0: u16 = 1 << 8;
+    pub const DMA1: u16 = 1 << 9;
+    pub const DMA2: u16 = 1 << 10;
+    pub const DMA3: u16 = 1 << 11;
+    pub const KEYPAD: u16 = 1 << 14;
+    pub const GAME_PAK: u16 = 1 << 15;
+}
+
 /// I/O offset of `KEYINPUT` within the 0x04000000 region.
 const KEYINPUT: usize = 0x130;
 /// I/O offset of `KEYCNT`.
