@@ -1,0 +1,183 @@
+//! GBA I/O register model.
+//!
+//! Provides the registers a game reads and writes on startup and during play
+//! that are safe to model before the PPU/timers/DMA exist: the keypad, the
+//! interrupt enable/flag/master registers and the display-control reads. The
+//! PPU, timers, DMA, serial and APU write their own registers and are added in
+//! later phases; for now those accesses are stored as raw bytes and otherwise
+//! ignored.
+
+/// Keypad bits (active low: 0 = pressed).
+pub mod key {
+    pub const A: u16 = 1 << 0;
+    pub const B: u16 = 1 << 1;
+    pub const SELECT: u16 = 1 << 2;
+    pub const START: u16 = 1 << 3;
+    pub const RIGHT: u16 = 1 << 4;
+    pub const LEFT: u16 = 1 << 5;
+    pub const UP: u16 = 1 << 6;
+    pub const DOWN: u16 = 1 << 7;
+    pub const R: u16 = 1 << 8;
+    pub const L: u16 = 1 << 9;
+    pub const MASK: u16 = 0x03FF;
+}
+
+/// Interrupt flag bit for the keypad.
+pub const IRQ_KEYPAD: u16 = 1 << 14;
+
+/// I/O offset of `KEYINPUT` within the 0x04000000 region.
+const KEYINPUT: usize = 0x130;
+/// I/O offset of `KEYCNT`.
+const KEYCNT: usize = 0x132;
+/// I/O offsets of IE / IF / IME.
+const IE: usize = 0x200;
+const IF: usize = 0x202;
+const IME: usize = 0x204;
+
+/// The I/O registers of a GBA.
+pub struct Io {
+    /// Raw bytes for the whole 0x04000000..0x040003FF window. Registers with
+    /// special behaviour are mirrored into fields below and patched on access.
+    pub regs: [u8; 0x400],
+    /// Keypad state, bits 0-9 active low (0 = pressed).
+    keypad: u16,
+    /// Keypad interrupt control.
+    keycnt: u16,
+    /// Interrupt enable / flag / master.
+    ie: u16,
+    iflags: u16,
+    ime: bool,
+    /// Latched VCOUNT (driven by the PPU in later phases).
+    vcount: u16,
+}
+
+impl Default for Io {
+    fn default() -> Io {
+        let mut io = Io {
+            regs: [0; 0x400],
+            keypad: key::MASK,
+            keycnt: 0,
+            ie: 0,
+            iflags: 0,
+            ime: false,
+            vcount: 0,
+        };
+        io.regs[0x2] = 1; // DISPSTAT: V-Blank flag must start set so games don't hang.
+        io
+    }
+}
+
+impl Io {
+    pub fn new() -> Io {
+        Io::default()
+    }
+
+    /// A key was pressed (bit `k`, a `key::*` constant).
+    pub fn press(&mut self, k: u16) {
+        self.keypad &= !(k & key::MASK);
+        self.update_keypad_irq();
+    }
+
+    /// A key was released.
+    pub fn release(&mut self, k: u16) {
+        self.keypad |= k & key::MASK;
+        self.update_keypad_irq();
+    }
+
+    fn update_keypad_irq(&mut self) {
+        if self.keycnt & (1 << 14) == 0 {
+            return;
+        }
+        let watched = self.keycnt & key::MASK;
+        if watched == 0 {
+            return;
+        }
+        let pressed = !self.keypad & key::MASK & watched;
+        let and = self.keycnt & (1 << 15) != 0;
+        let hit = if and { pressed == watched } else { pressed != 0 };
+        if hit {
+            self.iflags |= IRQ_KEYPAD;
+        }
+    }
+
+    /// Read a 16-bit I/O register (offset within the 0x04000000 region).
+    pub fn read16(&self, offset: usize) -> u16 {
+        match offset {
+            KEYINPUT => self.keypad | 0xFC00,
+            KEYCNT => self.keycnt,
+            IE => self.ie,
+            IF => self.iflags,
+            IME => self.ime as u16,
+            0x06 => self.vcount,
+            _ => u16::from_le_bytes([self.regs[offset], self.regs[offset + 1]]),
+        }
+    }
+
+    /// Write a 16-bit I/O register.
+    pub fn write16(&mut self, offset: usize, value: u16) {
+        match offset {
+            KEYINPUT | 0x06 => {}
+            KEYCNT => {
+                self.keycnt = value;
+                self.regs[offset] = value as u8;
+                self.regs[offset + 1] = (value >> 8) as u8;
+            }
+            IE => {
+                self.ie = value;
+                self.regs[offset] = value as u8;
+                self.regs[offset + 1] = (value >> 8) as u8;
+            }
+            // IF is cleared by writing 1s.
+            IF => {
+                self.iflags &= !value;
+                self.regs[offset] = 0;
+                self.regs[offset + 1] = 0;
+            }
+            IME => {
+                self.ime = value & 1 != 0;
+                self.regs[offset] = self.ime as u8;
+                self.regs[offset + 1] = 0;
+            }
+            _ => {
+                self.regs[offset] = value as u8;
+                self.regs[offset + 1] = (value >> 8) as u8;
+            }
+        }
+    }
+
+    /// A 16-bit write that may split across a special register boundary is not
+    /// supported; treat any non-16-bit access as a raw byte store.
+    pub fn write8(&mut self, offset: usize, value: u8) {
+        self.regs[offset] = value;
+    }
+
+    /// Set the latched VCOUNT (called by the PPU each scanline).
+    pub fn set_vcount(&mut self, v: u16) {
+        self.vcount = v;
+    }
+
+    /// Latched VCOUNT.
+    pub fn vcount(&self) -> u16 {
+        self.vcount
+    }
+
+    /// Interrupt flags currently asserted (IF & IE).
+    pub fn pending_irq(&self) -> u16 {
+        self.iflags & self.ie
+    }
+
+    /// Clear a pending interrupt flag (writing 1 to IF clears it).
+    pub fn acknowledge(&mut self, flags: u16) {
+        self.iflags &= !flags;
+    }
+
+    /// Set an interrupt flag (from timers/DMA/PPU in later phases).
+    pub fn raise_irq(&mut self, flags: u16) {
+        self.iflags |= flags;
+    }
+
+    /// Raw IF value.
+    pub fn iflags(&self) -> u16 {
+        self.iflags
+    }
+}
