@@ -9,8 +9,10 @@
 # Test ROMs are fetched by script, not committed
 roms/tests/*.gb
 roms/tests/*.gbc
+roms/tests/*.gba
 roms/tests/*.zip
 roms/tests/*.ppm
+roms/tests/*.bin
 
 # Stuck Windows build scripts (leftover from an aborted Windows build)
 target_stuck_windows/

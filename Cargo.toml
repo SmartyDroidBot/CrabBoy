@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/emu-core",
     "crates/gb-core",
+    "crates/gba-core",
     "platforms/desktop",
     "platforms/cli",
     "platforms/wasm",
@@ -16,6 +17,7 @@ license = "MIT"
 [workspace.dependencies]
 emu-core = { path = "crates/emu-core" }
 gb-core = { path = "crates/gb-core" }
+gba-core = { path = "crates/gba-core" }
 
 [profile.dev]
 opt-level = 1
