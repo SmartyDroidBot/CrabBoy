@@ -104,13 +104,16 @@ impl Bus {
             }
             0xFF04 => {
                 self.io[0x04] = 0;
-                self.timer.div_counter = 0;
+                self.timer.on_div_write(&mut self.io);
             }
             0xFF05 => {
                 self.io[0x05] = value;
                 self.timer.on_tima_write();
             }
-            0xFF06 => self.io[0x06] = value,
+            0xFF06 => {
+                self.io[0x06] = value;
+                self.timer.on_tma_write(value);
+            }
             0xFF07 => {
                 self.io[0x07] = value;
                 self.timer.on_tac_write();
