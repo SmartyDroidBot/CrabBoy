@@ -26,11 +26,11 @@ pub struct Gba {
     pub ppu: Ppu,
     pub apu: Apu,
     /// Cycles consumed so far in the current line.
-    line_cycles: u32,
+    pub(crate) line_cycles: u32,
     /// Current scanline (0..227).
-    line: u32,
+    pub(crate) line: u32,
     /// Frames completed (for save states / info).
-    frame_count: u64,
+    pub(crate) frame_count: u64,
 }
 
 impl Gba {
@@ -233,17 +233,31 @@ impl emu_core::System for Gba {
     }
 
     fn battery_backed(&self) -> bool {
-        false
+        self.bus.save.battery_backed()
     }
 
     fn save_data(&self) -> Vec<u8> {
-        Vec::new()
+        self.bus.save.raw().to_vec()
     }
 
-    fn load_data(&mut self, _data: &[u8]) {}
+    fn load_data(&mut self, data: &[u8]) {
+        self.bus.save.load(data);
+    }
+
+    fn sram_changed(&mut self) -> bool {
+        self.bus.save.take_dirty()
+    }
 
     fn rtc_data(&self) -> Vec<u8> {
         Vec::new()
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        crate::state::save_state(self)
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        crate::state::load_state(self, data)
     }
 }
 
@@ -272,5 +286,28 @@ mod tests {
     fn audio_rate_is_32768() {
         let gba = Gba::new(vec![0; 0x4000]);
         assert_eq!(gba.audio_rate(), 32768);
+    }
+
+    #[test]
+    fn save_state_round_trip() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        gba.run_frame();
+        let saved = gba.save_state();
+        assert_eq!(&saved[0..4], crate::state::STATE_MAGIC);
+        // Run a bit further, then restore.
+        gba.run_frame();
+        gba.load_state(&saved).unwrap();
+        let again = gba.save_state();
+        assert_eq!(saved, again, "save(load(save())) must equal save()");
+    }
+
+    #[test]
+    fn save_state_rejects_bad_input() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        assert!(gba.load_state(b"").is_err());
+        assert!(gba.load_state(b"NOT_A_STATE").is_err());
+        let mut good = gba.save_state();
+        good[4] = 0xFF;
+        assert!(gba.load_state(&good).is_err(), "bad version rejected");
     }
 }

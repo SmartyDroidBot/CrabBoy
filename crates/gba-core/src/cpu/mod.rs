@@ -366,6 +366,51 @@ impl Cpu {
     }
 }
 
+/// Plain snapshot of the full CPU register file for save states.
+#[derive(Clone, Copy)]
+pub(crate) struct CpuSave {
+    pub regs: [u32; 16],
+    pub pc: u32,
+    pub cpsr: u32,
+    pub base_r8_12: [u32; 5],
+    pub fiq_r8_12: [u32; 5],
+    pub sp: [u32; 5],
+    pub lr: [u32; 5],
+    pub spsr: [u32; 5],
+    pub cycles: u32,
+    pub halted: bool,
+}
+
+impl Cpu {
+    pub(crate) fn save(&self) -> CpuSave {
+        CpuSave {
+            regs: self.regs,
+            pc: self.pc,
+            cpsr: self.cpsr,
+            base_r8_12: self.base_r8_12,
+            fiq_r8_12: self.fiq_r8_12,
+            sp: self.sp,
+            lr: self.lr,
+            spsr: self.spsr,
+            cycles: self.cycles,
+            halted: self.halted,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, s: CpuSave) {
+        self.regs = s.regs;
+        self.pc = s.pc;
+        self.cpsr = s.cpsr;
+        self.base_r8_12 = s.base_r8_12;
+        self.fiq_r8_12 = s.fiq_r8_12;
+        self.sp = s.sp;
+        self.lr = s.lr;
+        self.spsr = s.spsr;
+        self.cycles = s.cycles;
+        self.halted = s.halted;
+    }
+}
+
 impl Default for Cpu {
     fn default() -> Self {
         Self::new()

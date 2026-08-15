@@ -199,3 +199,39 @@ impl Io {
         self.iflags
     }
 }
+
+/// Plain snapshot of the IO registers for save states.
+#[derive(Clone, Copy)]
+pub(crate) struct IoSave {
+    pub regs: [u8; 0x400],
+    pub keypad: u16,
+    pub keycnt: u16,
+    pub ie: u16,
+    pub iflags: u16,
+    pub ime: bool,
+    pub vcount: u16,
+}
+
+impl Io {
+    pub(crate) fn snapshot(&self) -> IoSave {
+        IoSave {
+            regs: self.regs,
+            keypad: self.keypad,
+            keycnt: self.keycnt,
+            ie: self.ie,
+            iflags: self.iflags,
+            ime: self.ime,
+            vcount: self.vcount,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, s: IoSave) {
+        self.regs = s.regs;
+        self.keypad = s.keypad;
+        self.keycnt = s.keycnt;
+        self.ie = s.ie;
+        self.iflags = s.iflags;
+        self.ime = s.ime;
+        self.vcount = s.vcount;
+    }
+}

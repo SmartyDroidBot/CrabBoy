@@ -35,6 +35,8 @@ pub const SRAM_SIZE: usize = 0x10000;
 /// Default 32 MB cartridge ROM mask.
 const ROM_MASK: usize = 0x1FF_FFFF;
 
+pub use crate::save::{SaveCartridge, SaveType};
+
 /// The memory regions the bus decodes an address into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Region {
@@ -75,7 +77,8 @@ pub struct Bus {
     pub palram: [u8; PALRAM_SIZE],
     pub vram: [u8; VRAM_SIZE],
     pub oam: [u8; OAM_SIZE],
-    pub sram: [u8; SRAM_SIZE],
+    /// Battery-backed save cartridge (SRAM/FLASH/EEPROM).
+    pub save: SaveCartridge,
     /// Cartridge ROM.
     pub rom: Vec<u8>,
     /// I/O registers.
@@ -102,7 +105,7 @@ impl Bus {
             palram: [0; PALRAM_SIZE],
             vram: [0; VRAM_SIZE],
             oam: [0; OAM_SIZE],
-            sram: [0; SRAM_SIZE],
+            save: SaveCartridge::new(),
             rom,
             io: Io::new(),
             dma: Dma::new(),
@@ -184,7 +187,7 @@ impl Bus {
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)],
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)],
             Region::Rom => self.rom[(addr as usize & ROM_MASK) % self.rom.len()],
-            Region::Sram => self.sram[Self::index_in(addr, SRAM_SIZE - 1)],
+            Region::Sram => self.save.read8(Self::index_in(addr, 0x1FFFF)),
         }) as u32
     }
 
@@ -235,8 +238,8 @@ impl Bus {
                 (self.rom[i] as u32) | (self.rom[i + 1] as u32) << 8
             }
             Region::Sram => {
-                let i = base & (SRAM_SIZE - 1);
-                (self.sram[i] as u32) | (self.sram[i + 1] as u32) << 8
+                let i = base & 0x1FFFF;
+                self.save.read16(i) as u32
             }
         }
     }
@@ -265,7 +268,7 @@ impl Bus {
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)] = value as u8,
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
-            Region::Sram => self.sram[Self::index_in(addr, SRAM_SIZE - 1)] = value as u8,
+            Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
             Region::Rom | Region::Bios => {}
         }
     }
@@ -315,9 +318,8 @@ impl Bus {
                 self.oam[i + 1] = (value >> 8) as u8;
             }
             Region::Sram => {
-                let i = base & (SRAM_SIZE - 1);
-                self.sram[i] = value as u8;
-                self.sram[i + 1] = (value >> 8) as u8;
+                let i = base & 0x1FFFF;
+                self.save.write16(i, value as u16);
             }
             Region::Rom | Region::Bios => {}
         }

@@ -12,6 +12,8 @@ pub mod gba;
 pub mod io;
 pub mod ppu;
 pub mod rtc;
+pub mod save;
+pub mod state;
 pub mod timer;
 
 pub use apu::Apu;
