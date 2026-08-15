@@ -8,6 +8,7 @@ pub mod cartridge;
 pub mod cpu;
 pub mod devices;
 pub mod gb;
+mod state;
 
 pub use bus::Bus;
 pub use cartridge::Cartridge;

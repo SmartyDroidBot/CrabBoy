@@ -15,6 +15,30 @@ fn sav_path_for(rom: &str) -> Option<String> {
     Some(format!("{}.sav", stem.to_string_lossy()))
 }
 
+/// Derive the `.rtc` path from a `.sav` path (e.g. `game.sav` -> `game.rtc`).
+fn rtc_path_for(sav: &str) -> Option<String> {
+    let p = std::path::Path::new(sav);
+    if p.extension()? != "sav" {
+        return None;
+    }
+    let stem = p.with_extension("");
+    Some(format!("{}.rtc", stem.to_string_lossy()))
+}
+
+/// Derive a save-state slot path from a `.sav` path. `suffix` is e.g.
+/// `".state0"` or `".stateq"` (quicksave), yielding `game.state0` / `game.stateq`.
+fn state_path_for(sav: &str, suffix: &str) -> Option<String> {
+    let p = std::path::Path::new(sav);
+    if p.extension()? != "sav" {
+        return None;
+    }
+    let stem = p.with_extension("");
+    Some(format!("{}{suffix}", stem.to_string_lossy()))
+}
+
+/// File suffixes for the four state slots plus the quicksave slot.
+const STATE_SLOTS: [&str; 5] = [".state0", ".state1", ".state2", ".state3", ".stateq"];
+
 /// The 8 buttons a Game Boy exposes (subset of emu_core::Button).
 const GB_BUTTONS: [Button; 8] = [
     Button::Up,
@@ -26,10 +50,6 @@ const GB_BUTTONS: [Button; 8] = [
     Button::Start,
     Button::Select,
 ];
-
-fn key_name(key: egui::Key) -> String {
-    format!("{:?}", key)
-}
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -83,7 +103,6 @@ struct CrabBoyApp {
     system: Option<Box<dyn System>>,
     sav_path: Option<String>,
     keymap: HashMap<Button, egui::Key>,
-    capture: Option<Button>,
     prev_keys: HashSet<egui::Key>,
     paused: bool,
     fast_forward: bool,
@@ -97,13 +116,14 @@ struct CrabBoyApp {
     last_fps: Instant,
     fps_frames: u64,
     status: String,
-    held_keys_str: String,
-    sink: Sink,
+    rom_title: String,
+    last_title: String,
+    audio: Option<(OutputStream, Sink)>,
     audio_rate: u32,
 }
 
 impl CrabBoyApp {
-    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>, sink: Sink) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>, audio: Option<(OutputStream, Sink)>) -> Self {
         let mut keymap = HashMap::new();
         for b in GB_BUTTONS {
             keymap.insert(b, default_key(b));
@@ -113,7 +133,6 @@ impl CrabBoyApp {
             system: None,
             sav_path: None,
             keymap,
-            capture: None,
             prev_keys: HashSet::new(),
             paused: false,
             fast_forward: false,
@@ -127,8 +146,9 @@ impl CrabBoyApp {
             last_fps: Instant::now(),
             fps_frames: 0,
             status: "No ROM loaded".to_string(),
-            held_keys_str: String::new(),
-            sink,
+            rom_title: String::new(),
+            last_title: String::new(),
+            audio,
             audio_rate: 8192,
         };
         if let Some(path) = rom_path {
@@ -155,6 +175,7 @@ impl CrabBoyApp {
         let info = format!("{} ({})", cart.title, cart.mbc);
         let battery = cart.has_battery();
         let sav_path = sav_path_for(path);
+        self.rom_title = cart.title.trim().to_string();
 
         let mut system: Box<dyn System> = gb_core::gb::Gb::system(cart);
         if battery {
@@ -162,6 +183,11 @@ impl CrabBoyApp {
                 if let Ok(d) = std::fs::read(sav) {
                     system.load_data(&d);
                     self.status = format!("Loaded '{}' (battery save found)", info);
+                }
+            }
+            if let Some(rtc) = sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
+                if let Ok(d) = std::fs::read(&rtc) {
+                    system.load_rtc(&d);
                 }
             }
         }
@@ -189,6 +215,11 @@ impl CrabBoyApp {
                             system.load_data(&d);
                         }
                     }
+                    if let Some(rtc) = self.sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
+                        if let Ok(d) = std::fs::read(&rtc) {
+                            system.load_rtc(&d);
+                        }
+                    }
                 }
                 self.system = Some(system);
                 self.frame_count = 0;
@@ -198,28 +229,103 @@ impl CrabBoyApp {
         }
     }
 
-    fn save_state(&self) {
-        if let (Some(system), Some(sav)) = (&self.system, &self.sav_path) {
-            if system.battery_backed() {
-                let data = system.save_data();
-                if !data.is_empty() {
-                    if let Err(e) = std::fs::write(sav, &data) {
-                        eprintln!("failed to write save {sav}: {e}");
-                    }
+    /// Write battery SRAM and (if present) the MBC3 RTC to disk. Called only
+    /// when `sram_changed()` reports the game wrote its save data, plus on exit
+    /// and reset, so `.sav`/`.rtc` reflect the game's own saves rather than a
+    /// wall-clock timer.
+    fn flush_save(&mut self) {
+        let Some(system) = &mut self.system else { return };
+        if !system.battery_backed() {
+            return;
+        }
+        let data = system.save_data();
+        if let Some(sav) = &self.sav_path {
+            if !data.is_empty() {
+                if let Err(e) = std::fs::write(sav, &data) {
+                    eprintln!("failed to write save {sav}: {e}");
+                }
+            }
+        }
+        let rtc = system.rtc_data();
+        if !rtc.is_empty() {
+            if let Some(p) = self.sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
+                if let Err(e) = std::fs::write(&p, &rtc) {
+                    eprintln!("failed to write RTC {p}: {e}");
                 }
             }
         }
     }
 
+    fn save_slot(&mut self, suffix: &str) {
+        let (Some(system), Some(sav)) = (&self.system, &self.sav_path) else {
+            self.status = "No ROM loaded".to_string();
+            return;
+        };
+        let data = system.save_state();
+        if data.is_empty() {
+            self.status = "Save states not supported for this system".to_string();
+            return;
+        }
+        if let Some(path) = state_path_for(sav, suffix) {
+            match std::fs::write(&path, &data) {
+                Ok(_) => self.status = format!("Saved state {suffix}"),
+                Err(e) => self.status = format!("Save failed: {e}"),
+            }
+        }
+    }
+
+    fn load_slot(&mut self, suffix: &str) {
+        let (Some(system), Some(sav)) = (&mut self.system, &self.sav_path) else {
+            self.status = "No ROM loaded".to_string();
+            return;
+        };
+        let Some(path) = state_path_for(sav, suffix) else {
+            return;
+        };
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                self.status = format!("No state in slot {suffix}");
+                return;
+            }
+        };
+        match system.load_state(&data) {
+            Ok(_) => {
+                self.status = format!("Loaded state {suffix}");
+                // Loading restores SRAM/RTC; refresh the .sav/.rtc files to match.
+                self.flush_save();
+            }
+            Err(e) => self.status = format!("Load failed: {e}"),
+        }
+    }
+
     fn run_frame(&mut self) {
-        if let Some(system) = &mut self.system {
+        let dirty = if let Some(system) = &mut self.system {
             system.run_frame();
             self.frame_count += 1;
             let audio = system.take_audio();
             if !audio.samples.is_empty() {
-                let src = SamplesBuffer::new(2, self.audio_rate, audio.samples);
-                self.sink.append(src);
+                let rate = system.audio_rate();
+                if rate != self.audio_rate {
+                    // Sample rate changed (e.g. CGB double-speed toggle); drop
+                    // the old sink and open a fresh one at the new rate.
+                    self.audio.take();
+                    self.audio = rodio::OutputStream::try_default()
+                        .ok()
+                        .and_then(|(stream, handle)| Sink::try_new(&handle).ok().map(|sink| (stream, sink)));
+                    self.audio_rate = rate;
+                }
+                if let Some((_, sink)) = &self.audio {
+                    let src = SamplesBuffer::new(2, self.audio_rate, audio.samples);
+                    sink.append(src);
+                }
             }
+            system.sram_changed()
+        } else {
+            false
+        };
+        if dirty {
+            self.flush_save();
         }
     }
 
@@ -244,6 +350,21 @@ impl CrabBoyApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(
                 (period - self.accum).max(0.001),
             ));
+        }
+    }
+
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = if self.rom_title.is_empty() {
+            "CrabBoy".to_string()
+        } else {
+            format!(
+                "CrabBoy \u{2014} {} \u{2014} {:.0} FPS \u{2014} Frame {}",
+                self.rom_title, self.fps, self.frame_count
+            )
+        };
+        if title != self.last_title {
+            self.last_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
     }
 
@@ -272,13 +393,6 @@ impl CrabBoyApp {
             }
         }
 
-        if let Some(act) = self.capture {
-            if let Some(&k) = newly.first() {
-                self.keymap.insert(act, k);
-                self.capture = None;
-            }
-        }
-
         if let Some(system) = &mut self.system {
             for b in GB_BUTTONS {
                 let held = self.keymap.get(&b).map(|k| keys.contains(k)).unwrap_or(false);
@@ -290,39 +404,38 @@ impl CrabBoyApp {
             }
         }
 
+        let shift = ctx.input(|i| i.modifiers.shift);
         for &k in &newly {
             match k {
                 egui::Key::P => self.paused = !self.paused,
                 egui::Key::R => self.reset(),
                 egui::Key::F => self.fast_forward = !self.fast_forward,
+                egui::Key::F1 => self.state_key(0, shift),
+                egui::Key::F2 => self.state_key(1, shift),
+                egui::Key::F3 => self.state_key(2, shift),
+                egui::Key::F4 => self.state_key(3, shift),
+                egui::Key::F5 => self.save_slot(".stateq"),
+                egui::Key::F9 => self.load_slot(".stateq"),
                 _ => {}
             }
         }
 
         self.prev_keys = keys;
-        let mut parts: Vec<String> = Vec::new();
-        for k in &self.prev_keys {
-            let acts: Vec<String> = GB_BUTTONS
-                .iter()
-                .filter(|b| self.keymap.get(b) == Some(k))
-                .map(|b| b.label().to_string())
-                .collect();
-            let acts = if acts.is_empty() {
-                "-".to_string()
-            } else {
-                acts.join(",")
-            };
-            parts.push(format!("{}:{}", key_name(*k), acts));
-        }
-        parts.sort();
-        self.held_keys_str = parts.join("  ");
     }
 
-    fn shade_image(&self, shades: &[u8]) -> egui::ColorImage {
-        let mut img = egui::ColorImage::new([GB_W, GB_H], egui::Color32::BLACK);
+    fn shade_image(&self, shades: &[u8], w: usize, h: usize) -> egui::ColorImage {
+        let mut img = egui::ColorImage::new([w, h], egui::Color32::BLACK);
         for (i, &shade) in shades.iter().enumerate() {
             let c = self.palette.colors[(shade & 3) as usize];
             img.pixels[i] = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+        }
+        img
+    }
+
+    fn rgb_image(&self, rgb: &[u8], w: usize, h: usize) -> egui::ColorImage {
+        let mut img = egui::ColorImage::new([w, h], egui::Color32::BLACK);
+        for (i, px) in rgb.chunks_exact(3).enumerate() {
+            img.pixels[i] = egui::Color32::from_rgb(px[0], px[1], px[2]);
         }
         img
     }
@@ -332,51 +445,40 @@ impl CrabBoyApp {
             ui.label("No ROM loaded. Use the file picker or drag & drop a .gb file.");
             return;
         };
-        let frame = system.framebuffer();
-        let img = self.shade_image(frame);
+        let frame = system.frame();
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let img = match &frame.rgb {
+            Some(rgb) => self.rgb_image(rgb, w, h),
+            None => self.shade_image(&frame.shades, w, h),
+        };
         let tex = self.screen_texture.get_or_insert_with(|| {
-            ui.ctx().load_texture(
-                "gb-screen",
-                img.clone(),
-                egui::TextureOptions::NEAREST,
-            )
+            ui.ctx().load_texture("gb-screen", img.clone(), egui::TextureOptions::NEAREST)
         });
         tex.set(img, egui::TextureOptions::NEAREST);
         let avail = ui.available_size();
-        let scale = (avail.x / GB_W as f32).min(avail.y / GB_H as f32);
-        let size = egui::vec2(GB_W as f32 * scale, GB_H as f32 * scale);
+        let scale = (avail.x / w as f32).min(avail.y / h as f32);
+        let size = egui::vec2(w as f32 * scale, h as f32 * scale);
         ui.image((tex.id(), size));
     }
 
-    fn controls_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Controls");
-        for b in GB_BUTTONS {
-            let name = self.keymap.get(&b).map(|k| key_name(*k)).unwrap_or_else(|| "-".into());
-            let label = if self.capture == Some(b) {
-                "Press a key...".to_string()
-            } else {
-                name
-            };
-            if ui
-                .button(format!("{}: {}", b.label(), label))
-                .on_hover_text("Click to rebind")
-                .clicked()
-            {
-                self.capture = Some(b);
-            }
-        }
-        if self.capture.is_none() {
-            ui.separator();
-            ui.label("Shortcuts: P = pause, R = reset, F = fast-forward");
-        }
-    }
-
     fn palette_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Palette");
         for (name, pal) in PALETTES {
             if ui.selectable_label(self.palette_name == name, name).clicked() {
                 self.palette = pal;
                 self.palette_name = name.to_string();
+            }
+        }
+    }
+
+    /// Handle a state-slot key (F1-F4): save normally, load with Shift held.
+    fn state_key(&mut self, slot: usize, shift: bool) {
+        if slot < 4 {
+            let suffix = STATE_SLOTS[slot];
+            if shift {
+                self.load_slot(suffix);
+            } else {
+                self.save_slot(suffix);
             }
         }
     }
@@ -414,51 +516,80 @@ impl eframe::App for CrabBoyApp {
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open ROM...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Game Boy ROM", &["gb", "gbc"])
-                        .pick_file()
-                    {
-                        let p = path.to_string_lossy().to_string();
-                        self.load_rom(&p, ctx);
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open ROM...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Game Boy ROM", &["gb", "gbc"])
+                            .pick_file()
+                        {
+                            let p = path.to_string_lossy().to_string();
+                            self.load_rom(&p, ctx);
+                        }
+                        ui.close_menu();
                     }
-                }
-                if ui.button("Reset").clicked() {
-                    self.reset();
-                }
-                ui.separator();
-                ui.toggle_value(&mut self.paused, "Pause");
-                ui.toggle_value(&mut self.fast_forward, "Fast-forward");
-                ui.separator();
-                ui.label(format!(
-                    "FPS: {:.0}   Frame: {}",
-                    self.fps, self.frame_count
-                ));
-            });
-        });
-
-        egui::TopBottomPanel::top("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                if !self.held_keys_str.is_empty() {
+                    if ui.button("Reset").clicked() {
+                        self.reset();
+                        ui.close_menu();
+                    }
                     ui.separator();
-                    ui.monospace(format!("held: {}", self.held_keys_str));
-                }
+                    ui.menu_button("Save State", |ui| {
+                        for (i, suffix) in STATE_SLOTS.iter().enumerate() {
+                            let label = if i == 4 {
+                                "Quick (F5)"
+                            } else {
+                                &format!("Slot {} (F{})", i + 1, i + 1)
+                            };
+                            if ui.button(label).clicked() {
+                                self.save_slot(suffix);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.menu_button("Load State", |ui| {
+                        for (i, suffix) in STATE_SLOTS.iter().enumerate() {
+                            let label = if i == 4 {
+                                "Quick (F9)"
+                            } else {
+                                &format!("Slot {} (Shift+F{})", i + 1, i + 1)
+                            };
+                            if ui.button(label).clicked() {
+                                self.load_slot(suffix);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.paused, "Pause");
+                    ui.checkbox(&mut self.fast_forward, "Fast-forward");
+                    ui.separator();
+                    self.palette_ui(ui);
+                });
+                ui.menu_button("Help", |ui| {
+                    ui.label("Controls:");
+                    ui.label("Arrows: D-pad");
+                    ui.label("Z: A    X: B");
+                    ui.label("Enter: Start    Backspace: Select");
+                    ui.label("P: Pause    R: Reset    F: Fast-forward");
+                    ui.label("F1-F4: Save state    Shift+F1-F4: Load state");
+                    ui.label("F5: Quick save    F9: Quick load");
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(&self.status);
+                });
             });
         });
-
-        egui::SidePanel::right("controls")
-            .default_width(190.0)
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
-                self.controls_ui(ui);
-                ui.add_space(8.0);
-                self.palette_ui(ui);
-            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_screen(ui);
         });
+
+        self.update_title(ctx);
 
         let dropped: Vec<String> = ctx.input(|i| {
             i.raw
@@ -471,11 +602,11 @@ impl eframe::App for CrabBoyApp {
             self.load_rom(&path, ctx);
         }
 
-        if self.frame_count.is_multiple_of(3600) {
-            self.save_state();
-        }
-
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_save();
     }
 }
 
@@ -493,17 +624,20 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([GB_W as f32 * 4.0, GB_H as f32 * 4.0 + 60.0])
+            .with_min_inner_size([GB_W as f32 * 2.0, GB_H as f32 * 2.0 + 40.0])
             .with_title("CrabBoy Emulator"),
         ..Default::default()
     };
-    let sink = OutputStream::try_default()
+    let audio = OutputStream::try_default()
         .ok()
-        .and_then(|(_stream, handle)| Sink::try_new(&handle).ok());
-    let sink = sink.expect("failed to open audio output stream");
+        .and_then(|(stream, handle)| Sink::try_new(&handle).ok().map(|sink| (stream, sink)));
+    if audio.is_none() {
+        eprintln!("warning: no audio output device found; running silently");
+    }
 
     eframe::run_native(
         "CrabBoy Emulator",
         options,
-        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, sink)))),
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, audio)))),
     )
 }

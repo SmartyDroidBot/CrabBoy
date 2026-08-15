@@ -27,21 +27,28 @@ impl fmt::Display for MbcType {
 pub struct Cartridge {
     pub title: String,
     pub mbc: MbcType,
+    /// Header byte 0x143: bit 7 (0x80) = CGB-only, bit 6 (0x40) = CGB-compatible.
+    /// Non-zero means the cartridge requests CGB mode.
+    pub(crate) cgb_flag: u8,
     pub rom: Vec<u8>,
     pub ram: Vec<u8>,
-    num_rom_banks: usize,
-    num_ram_banks: usize,
-    rom_bank: usize,
-    ram_bank: usize,
-    bank_mode: bool,
-    ram_enabled: bool,
-    has_battery: bool,
-    rtc_selected: bool,
-    rtc_register: u8,
-    rtc: [u8; 5],
-    rtc_latched: [u8; 5],
-    rtc_latch: u8,
-    rtc_cycles: u32,
+    pub(crate) num_rom_banks: usize,
+    pub(crate) num_ram_banks: usize,
+    pub(crate) rom_bank: usize,
+    pub(crate) ram_bank: usize,
+    pub(crate) bank_mode: bool,
+    pub(crate) ram_enabled: bool,
+    pub(crate) has_battery: bool,
+    pub(crate) has_rtc: bool,
+    pub(crate) rtc_selected: bool,
+    pub(crate) rtc_register: u8,
+    pub(crate) rtc: [u8; 5],
+    pub(crate) rtc_latched: [u8; 5],
+    pub(crate) rtc_latch: u8,
+    pub(crate) rtc_cycles: u32,
+    /// Set whenever battery RAM or the RTC changes and the frontend has not yet
+    /// flushed it to disk. Cleared by [`Cartridge::sram_changed`].
+    pub(crate) sram_dirty: bool,
 }
 
 impl Cartridge {
@@ -102,10 +109,12 @@ impl Cartridge {
             mbc_code,
             0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E
         );
+        let has_rtc = matches!(mbc_code, 0x0F | 0x10);
 
         Ok(Cartridge {
             title,
             mbc,
+            cgb_flag: data[0x143],
             rom: data.to_vec(),
             ram: vec![0; ram_bytes],
             num_rom_banks,
@@ -115,17 +124,53 @@ impl Cartridge {
             bank_mode: false,
             ram_enabled: false,
             has_battery,
+            has_rtc,
             rtc_selected: false,
             rtc_register: 0,
             rtc: [0; 5],
             rtc_latched: [0; 5],
             rtc_latch: 0,
             rtc_cycles: 0,
+            sram_dirty: false,
         })
     }
 
     pub fn has_battery(&self) -> bool {
         self.has_battery
+    }
+
+    /// Whether the cartridge requests CGB (Game Boy Color) mode.
+    pub fn is_cgb(&self) -> bool {
+        self.cgb_flag != 0
+    }
+
+    /// Returns `true` once if battery RAM or the RTC changed since the last
+    /// check, clearing the dirty flag. Frontends call this to know when to flush
+    /// the `.sav`/`.rtc` files, so saves happen only when the game actually
+    /// writes its save data rather than on a wall-clock timer.
+    pub fn sram_changed(&mut self) -> bool {
+        let dirty = self.sram_dirty;
+        self.sram_dirty = false;
+        dirty
+    }
+
+    /// Raw bytes of the MBC3 RTC registers (5 bytes + day-carry in bit 7 of
+    /// byte 4), or empty when the cartridge has no real-time clock.
+    pub fn rtc_data(&self) -> Vec<u8> {
+        if self.has_rtc {
+            self.rtc.to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn load_rtc(&mut self, data: &[u8]) {
+        if !self.has_rtc {
+            return;
+        }
+        let n = data.len().min(self.rtc.len());
+        self.rtc[..n].copy_from_slice(&data[..n]);
+        self.rtc_latched = self.rtc;
     }
 
     /// Advance the MBC3 real-time clock by `cycles` T-cycles (4.19 MHz).
@@ -308,11 +353,13 @@ impl Cartridge {
         }
         if self.mbc == MbcType::Mbc3 && self.rtc_selected {
             self.rtc[self.rtc_register as usize] = value;
+            self.sram_dirty = true;
             return;
         }
         if self.mbc == MbcType::Mbc2 {
             let offset = ((addr - 0xA000) & 0x1FF) as usize;
             self.ram[offset] = value & 0x0F; // MBC2 RAM is 4-bit
+            self.sram_dirty = true;
             return;
         }
         let bank = match self.mbc {
@@ -329,6 +376,7 @@ impl Cartridge {
         let offset = bank * 0x2000 + (addr as usize - 0xA000);
         if let Some(slot) = self.ram.get_mut(offset) {
             *slot = value;
+            self.sram_dirty = true;
         }
     }
 }
@@ -434,6 +482,52 @@ mod tests {
         assert_eq!(cart.rom_bank, 3);
         cart.write(0x0000, 0x00); // bit 8 clear -> RAM enable write, not bank select
         assert_eq!(cart.rom_bank, 3, "bank unchanged on RAM-enable write");
+    }
+
+    #[test]
+    fn sram_dirty_flag_tracks_writes() {
+        let mut rom = make_rom(0x13, 0x03); // MBC3+RAM+BATTERY
+        let mut cart = Cartridge::load(&rom).unwrap();
+
+        // Nothing written yet -> not dirty.
+        assert!(!cart.sram_changed());
+
+        // Writes are gated until RAM is enabled; a gated write must NOT mark dirty.
+        cart.write_ram(0xA000, 0xAA);
+        assert!(!cart.sram_changed());
+
+        cart.write(0x0000, 0x0A);
+        cart.write_ram(0xA000, 0x11);
+        assert!(cart.sram_changed(), "enabled RAM write marks dirty");
+        assert!(!cart.sram_changed(), "flag clears after check");
+
+        cart.write_ram(0xA001, 0x22);
+        assert!(cart.sram_changed());
+    }
+
+    #[test]
+    fn rtc_persistence_round_trip() {
+        let mut rom = make_rom(0x0F, 0x02); // MBC3+TIMER+BATTERY
+        let mut cart = Cartridge::load(&rom).unwrap();
+        assert_eq!(cart.rtc_data().len(), 5, "timer cartridge exposes RTC");
+
+        cart.write(0x0000, 0x0A);
+        cart.write(0x4000, 0x09); // select RTC register 1
+        cart.write_ram(0xA000, 0x3C); // minutes = 60 -> 0
+        assert_eq!(cart.rtc[1], 0x3C);
+        assert!(cart.sram_changed(), "RTC write marks dirty");
+
+        let saved = cart.rtc_data();
+        // Re-load into a fresh cartridge.
+        let mut cart2 = Cartridge::load(&rom).unwrap();
+        assert!(cart2.rtc_data().iter().all(|&b| b == 0), "fresh RTC is zeroed");
+        cart2.load_rtc(&saved);
+        assert_eq!(cart2.rtc[1], 0x3C, "RTC restored");
+
+        // A plain RAM+MBC3 cartridge (no timer) exposes no RTC.
+        let rom2 = make_rom(0x13, 0x03);
+        let cart3 = Cartridge::load(&rom2).unwrap();
+        assert!(cart3.rtc_data().is_empty());
     }
 
     #[test]

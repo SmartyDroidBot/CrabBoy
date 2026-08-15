@@ -13,13 +13,13 @@ pub struct Timer {
     /// 16-bit counter, advanced once per T-cycle.
     pub div_counter: u16,
     /// Monotonic absolute T-cycle count, used to time the reload deadline.
-    abs_cycles: u64,
+    pub(crate) abs_cycles: u64,
     /// Absolute cycle at which the pending TMA reload is applied.
-    reload_deadline: u64,
+    pub(crate) reload_deadline: u64,
     /// Value to load into TIMA when the pending reload fires.
-    reload_value: u8,
+    pub(crate) reload_value: u8,
     /// Whether a reload is pending (TIMA reads 0 and the reload window is open).
-    reload_pending: bool,
+    pub(crate) reload_pending: bool,
 }
 
 impl Timer {

@@ -47,9 +47,10 @@ fn main() {
         let b5 = emu.bus.read(0xFFB5);
         let lcdc = emu.bus.read(0xFF40);
         let ly = emu.bus.read(0xFF44);
+        let key1 = emu.bus.read(0xFF4D);
         println!(
-            "f={} FFF8={:02X} FFF9={:02X} FFB5={:02X} LCDC={:02X} LY={} vblank={}",
-            f, f8, f9, b5, lcdc, ly, emu.bus.ppu.vblank_interrupts
+            "f={} FFF8={:02X} FFF9={:02X} FFB5={:02X} LCDC={:02X} LY={} KEY1={:02X} vblank={}",
+            f, f8, f9, b5, lcdc, ly, key1, emu.bus.ppu.vblank_interrupts
         );
     }
     eprintln!("=== vblank gap samples: {} ===", stamps.len().saturating_sub(1));

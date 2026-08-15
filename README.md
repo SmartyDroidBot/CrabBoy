@@ -1,13 +1,14 @@
 # CrabBoy
 
-A multi-system emulator framework in Rust. Currently hosts a **Game Boy (DMG)**
-core; the crate layout is designed to welcome more consoles (e.g. GBA) later.
+A multi-system emulator framework in Rust. Currently hosts a **Game Boy / Game
+Boy Color** core (a CGB machine that runs both DMG and CGB cartridges); the
+crate layout is designed to welcome more consoles (e.g. GBA) later.
 
 ```
 crates/
   emu-core/        Platform-agnostic traits & types (System, Device, Bus, Host,
                    Frame, Audio, Button)
-  gb-core/         Game Boy (DMG) emulator core, no GUI/OS/wasm deps
+  gb-core/         Game Boy / Game Boy Color emulator core, no GUI/OS/wasm deps
 platforms/
   desktop/         egui desktop app ("CrabBoy") — load a .gb and play
   cli/             Headless tools: test_runner, probe
@@ -35,6 +36,18 @@ cargo test --workspace
 All contributors (humans and AI agents) must follow
 [`guidelines.md`](guidelines.md) — including the pre-commit testing checklist
 and the EU-style commit message format.
+
+## Known Issues
+
+- **Audio playback is usable but not perfect.** The audio driver can introduce
+  subtle gaps or stutter at sink boundaries, and the music/menu track can sound
+  slightly off (the title "jingle" at the logo is audible but was previously
+  inaudible due to a mixer gain bug — now fixed). A more thorough audio-sink
+  hardening pass (buffer priming, keep-ahead refill, silence padding on
+  starvation) is planned but deferred.
+- **CGB double-speed audio** is emitted at 16384 Hz (the native CGB APU rate
+  when the CPU switches to double speed). The desktop app recreates its audio
+  sink when the rate changes; other frontends must honour `System::audio_rate()`.
 
 ## Design
 

@@ -20,8 +20,25 @@ pub struct Gb {
 
 impl Gb {
     pub fn new(cart: Cartridge) -> Gb {
-        let bus = Bus::new(cart);
-        let cpu = Cpu::new();
+        let mut bus = Bus::new(cart);
+        let mut cpu = Cpu::new();
+        if bus.is_cgb {
+            // The CGB boot ROM leaves the CPU in CGB mode with A=$11 (which
+            // games like Crystal probe to detect the console) and the related
+            // register state; the DMG defaults (A=$01, F=$B0, ...) apply only
+            // to plain Game Boy carts. See SameBoy's cgb_boot.asm.
+            cpu.a = 0x11;
+            cpu.f = 0x80;
+            cpu.b = 0x00;
+            cpu.c = 0x00;
+            cpu.d = 0xFF;
+            cpu.e = 0x00;
+            cpu.h = 0x00;
+            cpu.l = 0x0D;
+            // KEY0: write the cartridge's CGB compatibility flag, as the boot
+            // ROM does when leaving full CGB mode.
+            bus.io[0x4C] = bus.cart.cgb_flag;
+        }
         Gb { cpu, bus }
     }
 
@@ -61,9 +78,13 @@ impl Gb {
 
     /// Execute one instruction (or idle cycle), returning cycles consumed.
     pub fn step(&mut self) -> u32 {
-        // STOP halts the CPU (and LCD) until a button is pressed.
+        // STOP halts the CPU (and LCD) until a button is pressed. On CGB
+        // hardware, STOP with KEY1 bit 0 set toggles double speed instead.
         if self.cpu.stopped {
-            if self.bus.joypad.state != 0xFF {
+            if self.bus.is_cgb && self.bus.io[0x4D] & 1 != 0 {
+                self.bus.double_speed = !self.bus.double_speed;
+                self.cpu.stopped = false;
+            } else if self.bus.joypad.state != 0xFF {
                 self.cpu.stopped = false;
             } else {
                 self.bus.step(4);
@@ -149,7 +170,11 @@ impl Gb {
 
 impl emu_core::System for Gb {
     fn name(&self) -> &'static str {
-        "gb"
+        if self.bus.is_cgb {
+            "gbc"
+        } else {
+            "gb"
+        }
     }
 
     fn info(&self) -> String {
@@ -183,20 +208,31 @@ impl emu_core::System for Gb {
     }
 
     fn frame_cycles(&self) -> u32 {
-        FRAME_CYCLES
+        self.bus.frame_cycles()
     }
 
     fn frame(&self) -> emu_core::Frame {
         let shades = self.framebuffer();
-        emu_core::Frame {
+        let mut f = emu_core::Frame {
             width: SCREEN_W,
             height: SCREEN_H,
             shades: shades.to_vec(),
-        }
+            rgb: None,
+        };
+        f.rgb = Some(self.bus.ppu.rgb_buffer.clone());
+        f
     }
 
     fn framebuffer(&self) -> &[u8] {
         Gb::framebuffer(self)
+    }
+
+    fn audio_rate(&self) -> u32 {
+        if self.bus.double_speed {
+            16384
+        } else {
+            8192
+        }
     }
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
@@ -218,6 +254,26 @@ impl emu_core::System for Gb {
         }
         let n = data.len().min(bytes);
         self.bus.cart.ram[..n].copy_from_slice(&data[..n]);
+    }
+
+    fn sram_changed(&mut self) -> bool {
+        self.bus.cart.sram_changed()
+    }
+
+    fn rtc_data(&self) -> Vec<u8> {
+        self.bus.cart.rtc_data()
+    }
+
+    fn load_rtc(&mut self, data: &[u8]) {
+        self.bus.cart.load_rtc(data);
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        crate::state::save_state(&self.cpu, &self.bus)
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        crate::state::load_state(&mut self.cpu, &mut self.bus, data)
     }
 }
 
@@ -306,5 +362,342 @@ mod tests {
         emu.press_button(BUTTON_A);
         emu.step();
         assert!(!emu.cpu.stopped, "STOP exits on a button press");
+    }
+
+    fn hash(buf: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in buf {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    fn run(n: usize, emu: &mut Gb) {
+        use emu_core::System;
+        for _ in 0..n {
+            emu.run_frame();
+        }
+    }
+
+    #[test]
+    fn save_state_round_trip_is_exact() {
+        use emu_core::System;
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+
+        // Control: 60 + 37 + 37 frames with no save/load.
+        let mut control = Gb::new(cart.clone());
+        run(60, &mut control);
+        run(37, &mut control);
+        run(37, &mut control);
+
+        // Test: save at 60, run 37, restore, run 37 more (then 37 more).
+        let mut test = Gb::new(cart);
+        run(60, &mut test);
+        let saved = test.save_state();
+        run(37, &mut test);
+        test.load_state(&saved).unwrap();
+        run(37, &mut test);
+        run(37, &mut test);
+
+        assert_eq!(control.framebuffer(), test.framebuffer(), "framebuffer differs");
+        assert_eq!(
+            hash(&control.bus.serial_buf),
+            hash(&test.bus.serial_buf),
+            "serial buffer differs"
+        );
+        assert_eq!(control.cpu.pc, test.cpu.pc, "PC differs");
+        assert_eq!(control.cpu.sp, test.cpu.sp, "SP differs");
+        assert_eq!(control.bus.io, test.bus.io, "IO registers differ");
+        assert_eq!(control.bus.vram, test.bus.vram, "VRAM differs");
+        assert_eq!(control.bus.wram, test.bus.wram, "WRAM differs");
+        assert_eq!(control.bus.oam, test.bus.oam, "OAM differs");
+        assert_eq!(control.bus.hram, test.bus.hram, "HRAM differs");
+        assert_eq!(
+            control.bus.ppu.frame_buffer,
+            test.bus.ppu.frame_buffer,
+            "PPU frame buffer differs"
+        );
+        assert_eq!(control.bus.ppu.ly, test.bus.ppu.ly, "LY differs");
+        assert_eq!(control.bus.ppu.dot, test.bus.ppu.dot, "PPU dot differs");
+    }
+
+    #[test]
+    fn save_state_rejects_garbage_and_unknown_version() {
+        use emu_core::System;
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let mut emu = Gb::new(cart);
+        run(5, &mut emu);
+
+        assert!(emu.load_state(b"").is_err(), "empty input rejected");
+        assert!(
+            emu.load_state(b"NOT_A_STATE").is_err(),
+            "bad magic rejected"
+        );
+        assert!(
+            emu.load_state(&[0u8; 64]).is_err(),
+            "all-zero payload rejected"
+        );
+
+        // Corrupt the version byte of an otherwise valid state.
+        let mut good = emu.save_state();
+        good[4] = 0xFF;
+        assert!(emu.load_state(&good).is_err(), "unknown version rejected");
+
+        // Truncate a valid state at every length below full; all must fail.
+        let full = emu.save_state();
+        for len in 0..full.len() {
+            assert!(
+                emu.load_state(&full[..len]).is_err(),
+                "truncated state (len {len}) must be rejected"
+            );
+        }
+        // Trailing garbage must also be rejected.
+        let mut padded = full.clone();
+        padded.push(0xAA);
+        assert!(emu.load_state(&padded).is_err(), "trailing bytes rejected");
+    }
+
+    #[test]
+    fn save_state_idempotent_round_trip() {
+        use emu_core::System;
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let mut emu = Gb::new(cart);
+        run(10, &mut emu);
+
+        let s1 = emu.save_state();
+        emu.load_state(&s1).unwrap();
+        let s2 = emu.save_state();
+        assert_eq!(s1, s2, "save(load(save())) must equal save()");
+    }
+
+    #[test]
+    fn battery_save_tracks_game_writes() {
+        use emu_core::System;
+        // MBC3 + RAM + battery (4KB SRAM) via a minimal header.
+        let mut data = vec![0u8; 0x8000];
+        data[0x147] = 0x13;
+        data[0x149] = 0x02; // 1 SRAM bank
+        let mut emu = Gb::new(Cartridge::load(&data).unwrap());
+
+        assert!(emu.battery_backed());
+        assert!(!emu.sram_changed(), "clean at start");
+        assert_eq!(emu.save_data().len(), 0x2000, "SRAM buffer exists");
+        assert_eq!(emu.save_data()[0], 0, "SRAM starts zeroed");
+
+        // Enable RAM and have the "game" write a save byte.
+        emu.bus.write(0x0000, 0x0A);
+        emu.bus.write(0xA000, 0x5A);
+
+        assert!(emu.sram_changed(), "write marks dirty");
+        assert!(!emu.sram_changed(), "flag clears after check");
+        assert_eq!(emu.save_data()[0], 0x5A, "save reflects the write");
+
+        // Round-trip into a fresh machine.
+        let saved = emu.save_data();
+        let mut emu2 = Gb::new(Cartridge::load(&data).unwrap());
+        emu2.load_data(&saved);
+        assert_eq!(emu2.save_data()[0], 0x5A, "loaded save matches");
+    }
+
+    fn cgb_cart() -> Cartridge {
+        let mut data = vec![0u8; 0x8000];
+        data[0x143] = 0x80; // CGB-only
+        Cartridge::load(&data).unwrap()
+    }
+
+    #[test]
+    fn cgb_boot_registers_match_cgb_boot_rom() {
+        let emu = Gb::new(cgb_cart());
+        assert!(emu.bus.is_cgb, "0x80 header -> CGB mode");
+        assert_eq!(emu.cpu.a, 0x11, "A=$11 marks CGB hardware to the game");
+        assert_eq!(emu.cpu.f, 0x80, "CGB boot leaves F=$80");
+        assert_eq!(emu.cpu.c, 0x00);
+        assert_eq!(emu.cpu.d, 0xFF);
+        assert_eq!(emu.cpu.e, 0x00);
+        assert_eq!(emu.cpu.h, 0x00);
+        assert_eq!(emu.cpu.l, 0x0D);
+        assert_eq!(emu.bus.io[0x4C], 0x80, "KEY0 = cart CGB flag");
+    }
+
+    #[test]
+    fn dmg_boot_registers_stay_dmg() {
+        let emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        assert!(!emu.bus.is_cgb, "plain cart stays in DMG mode");
+        assert_eq!(emu.cpu.a, 0x01, "DMG boot leaves A=$01");
+        assert_eq!(emu.cpu.f, 0xB0, "DMG boot leaves F=$B0");
+        assert_eq!(emu.bus.io[0x4C], 0x00);
+    }
+
+    #[test]
+    fn cgb_vram_banking() {
+        let mut emu = Gb::new(cgb_cart());
+        emu.bus.write(0x8000, 0x11); // bank 0
+        emu.bus.write(0xFF4F, 0x01); // VBK = 1
+        emu.bus.write(0x8000, 0x22); // bank 1
+        assert_eq!(emu.bus.vram[0x0000], 0x11, "bank 0 stored");
+        assert_eq!(emu.bus.vram[0x2000], 0x22, "bank 1 stored");
+        emu.bus.write(0xFF4F, 0x00);
+        assert_eq!(emu.bus.read(0x8000), 0x11, "bank 0 read");
+        emu.bus.write(0xFF4F, 0x01);
+        assert_eq!(emu.bus.read(0x8000), 0x22, "bank 1 read");
+    }
+
+    #[test]
+    fn cgb_wram_banking() {
+        let mut emu = Gb::new(cgb_cart());
+        emu.bus.write(0xD000, 0xAA); // default SVBK -> bank 1
+        emu.bus.write(0xFF70, 0x02);
+        emu.bus.write(0xD000, 0xBB);
+        emu.bus.write(0xFF70, 0x01);
+        assert_eq!(emu.bus.read(0xD000), 0xAA);
+        emu.bus.write(0xFF70, 0x02);
+        assert_eq!(emu.bus.read(0xD000), 0xBB);
+        // C000–CFFF is always bank 0.
+        emu.bus.write(0xFF70, 0x05);
+        emu.bus.write(0xC000, 0xCC);
+        assert_eq!(emu.bus.read(0xC000), 0xCC);
+        // E000 mirrors the active bank, F000 mirrors the banked D000 region.
+        emu.bus.write(0xFF70, 0x03);
+        emu.bus.write(0xD000, 0x12);
+        assert_eq!(emu.bus.read(0xF000), 0x12, "F000 mirrors D000 bank");
+        assert_eq!(emu.bus.read(0xE000), emu.bus.read(0xC000), "E000 mirrors C000");
+        // SVBK 0 acts as bank 1.
+        emu.bus.write(0xFF70, 0x00);
+        assert_eq!(emu.bus.read(0xD000), 0xAA);
+    }
+
+    #[test]
+    fn cgb_key1_double_speed_switch_on_stop() {
+        use emu_core::System;
+        let mut emu = Gb::new(cgb_cart());
+        emu.bus.cart.rom[0x0100] = 0x10; // STOP
+        emu.bus.cart.rom[0x0101] = 0x00; // padding
+        assert_eq!(emu.frame_cycles(), 70224);
+        assert_eq!(emu.audio_rate(), 8192);
+        emu.bus.write(0xFF4D, 0x01); // request double speed
+        emu.step(); // STOP executes
+        emu.step(); // STOP -> speed switch, no button wait
+        assert!(!emu.cpu.stopped, "STOP with KEY1 toggles speed instead of halting");
+        assert!(emu.bus.double_speed);
+        assert_eq!(emu.frame_cycles(), 140448);
+        assert_eq!(emu.audio_rate(), 16384);
+        assert_eq!(emu.bus.read(0xFF4D) & 0x80, 0x80, "bit 7 reflects current speed");
+        // Toggle back.
+        emu.bus.cart.rom[0x0100] = 0x10;
+        emu.cpu.pc = 0x0100;
+        emu.bus.write(0xFF4D, 0x01);
+        emu.step();
+        emu.step();
+        assert!(!emu.bus.double_speed, "second STOP returns to normal speed");
+        assert_eq!(emu.frame_cycles(), 70224);
+    }
+
+    #[test]
+    fn cgb_palette_write_auto_increment_and_read() {
+        let mut emu = Gb::new(cgb_cart());
+        emu.bus.write(0xFF68, 0x80); // BG index 0, auto-increment
+        emu.bus.write(0xFF69, 0x34);
+        emu.bus.write(0xFF69, 0x56);
+        assert_eq!(emu.bus.read(0xFF68) & 0x3F, 2, "auto-increment advances index");
+        assert_eq!(emu.bus.ppu.bg_pal[0], 0x34);
+        assert_eq!(emu.bus.ppu.bg_pal[1], 0x56);
+        emu.bus.write(0xFF68, 0x01); // index 1, no auto-increment
+        assert_eq!(emu.bus.read(0xFF69), 0x56, "BCPD reads the indexed byte");
+        emu.bus.write(0xFF6A, 0x84); // OBJ index 4, auto-increment
+        emu.bus.write(0xFF6B, 0xAB);
+        assert_eq!(emu.bus.ppu.obj_pal[4], 0xAB);
+        assert_eq!(emu.bus.read(0xFF6A) & 0x3F, 5);
+    }
+
+    #[test]
+    fn cgb_hdma_general_purpose_transfer() {
+        let mut emu = Gb::new(cgb_cart());
+        for i in 0..0x20 {
+            emu.bus.wram[i] = i as u8 + 1;
+        }
+        emu.bus.write(0xFF51, 0xC0);
+        emu.bus.write(0xFF52, 0x00);
+        emu.bus.write(0xFF53, 0x80);
+        emu.bus.write(0xFF54, 0x00);
+        emu.bus.write(0xFF55, 0x01); // 32 bytes, general-purpose
+        for i in 0..0x20 {
+            assert_eq!(emu.bus.vram[i], i as u8 + 1, "HDMA copied byte {i}");
+        }
+        assert_eq!(emu.bus.read(0xFF55), 0xFF, "HDMA5 reads FF when complete");
+    }
+
+    #[test]
+    fn cgb_hdma_hblank_transfer() {
+        use emu_core::System;
+        let mut emu = Gb::new(cgb_cart());
+        for i in 0..0x40 {
+            emu.bus.wram[i] = i as u8;
+        }
+        emu.bus.write(0xFF51, 0xC0);
+        emu.bus.write(0xFF52, 0x00);
+        emu.bus.write(0xFF53, 0x80);
+        emu.bus.write(0xFF54, 0x00);
+        emu.bus.write(0xFF55, 0x83); // HBlank DMA, 64 bytes
+        run(2, &mut emu);
+        assert_eq!(emu.bus.read(0xFF55), 0xFF, "HBlank HDMA completed");
+        for i in 0..0x40 {
+            assert_eq!(emu.bus.vram[i], i as u8);
+        }
+    }
+
+    #[test]
+    fn cgb_dmg_game_uses_boot_default_palette() {
+        use emu_core::System;
+        // A plain DMG cart still renders colour through the boot palettes.
+        let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        assert!(!emu.bus.is_cgb, "plain cart stays in DMG mode");
+        // Tile 0 (LCDC bit 4 set -> base 0x8000, tile 0 at 0x0000) = colour 3.
+        for i in 0..0x10 {
+            emu.bus.vram[i] = 0xFF;
+        }
+        emu.bus.vram[0x1800] = 0;
+        emu.bus.io[0x47] = 0xFF; // BGP maps colour 3 -> shade 3
+        run(1, &mut emu);
+        let rgb = emu.frame().rgb.expect("DMG-mode-on-CGB yields colour");
+        // Row 1 is the first rendered row (line 0 is the boot HBlank); shade 3
+        // -> BG palette 0 entry 3 = boot palette 29 (black).
+        assert_eq!(&rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn cgb_cart_renders_from_palette_ram() {
+        use emu_core::System;
+        let mut emu = Gb::new(cgb_cart());
+        for i in 0..0x10 {
+            emu.bus.vram[i] = 0xFF;
+        }
+        emu.bus.vram[0x1800] = 0;
+        // BG palette 0 colour 3 = pure red ($001F).
+        emu.bus.write(0xFF68, 0x86);
+        emu.bus.write(0xFF69, 0x1F);
+        emu.bus.write(0xFF69, 0x00);
+        assert_eq!(emu.bus.ppu.bg_pal[6], 0x1F, "palette RAM write landed");
+        run(1, &mut emu);
+        let rgb = emu.frame().rgb.unwrap();
+        // Row 1 is the first rendered row; colour 3 -> BG palette 0 entry 3 (red).
+        assert_eq!(&rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3], &[255, 0, 0], "CGB renders palette RAM colour");
+    }
+
+    #[test]
+    fn cgb_save_state_round_trip() {
+        use emu_core::System;
+        let mut control = Gb::new(cgb_cart());
+        let mut test = Gb::new(cgb_cart());
+        run(5, &mut control);
+        run(5, &mut test);
+        let saved = test.save_state();
+        run(3, &mut test);
+        test.load_state(&saved).unwrap();
+        assert_eq!(control.bus.vram, test.bus.vram, "VRAM matches");
+        assert_eq!(control.bus.wram, test.bus.wram, "WRAM matches");
+        assert_eq!(control.bus.ppu.bg_pal, test.bus.ppu.bg_pal, "BG palettes match");
+        assert_eq!(control.bus.ppu.obj_pal, test.bus.ppu.obj_pal, "OBJ palettes match");
+        assert_eq!(control.bus.double_speed, test.bus.double_speed, "speed matches");
     }
 }

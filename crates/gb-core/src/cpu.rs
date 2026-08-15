@@ -18,7 +18,7 @@ pub struct Cpu {
     pub ei_pending: bool,
     pub halted: bool,
     pub stopped: bool,
-    halt_bug: bool,
+    pub(crate) halt_bug: bool,
     pub timer_interrupts: u64,
 }
 

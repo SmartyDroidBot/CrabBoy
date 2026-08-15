@@ -45,6 +45,13 @@ pub trait System {
         &[]
     }
 
+    /// Audio output sample rate in Hz. Frontends should feed `take_audio()`
+    /// samples to their sink at this rate. The rate can change between frames
+    /// (e.g. GBC double-speed mode raises the APU rate from 8192 to 16384).
+    fn audio_rate(&self) -> u32 {
+        8192
+    }
+
     /// Drain audio samples produced since the last call (interleaved stereo).
     /// Returns an empty buffer for systems without audio.
     fn take_audio(&mut self) -> AudioBuffer {
@@ -59,4 +66,30 @@ pub trait System {
 
     /// Load raw save-data bytes (must match `save_data` shape).
     fn load_data(&mut self, data: &[u8]);
+
+    /// Returns `true` once if battery-backed state (SRAM or a clock) changed
+    /// since the last call, clearing the flag. Frontends use this to flush
+    /// `.sav`/`.rtc` files exactly when the game writes its save data, instead
+    /// of on a wall-clock timer. Default: `false` (no dirty tracking).
+    fn sram_changed(&mut self) -> bool {
+        false
+    }
+
+    /// Raw bytes of a real-time clock (empty if the system has none).
+    fn rtc_data(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Load raw real-time-clock bytes (see [`System::rtc_data`]).
+    fn load_rtc(&mut self, _data: &[u8]) {}
+
+    /// Serialize the entire machine state (save state). Empty when unsupported.
+    fn save_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Restore a machine state produced by [`System::save_state`].
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
+        Err("save states not supported by this system".to_string())
+    }
 }

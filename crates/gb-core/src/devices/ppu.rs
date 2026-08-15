@@ -14,13 +14,22 @@ pub struct Ppu {
     pub ly: u8,
     pub mode: u8,
     pub dot: u32,
-    mode3_cycles: u32,
-    prev_mode: u8,
-    prev_coinc: bool,
+    pub(crate) mode3_cycles: u32,
+    pub(crate) prev_mode: u8,
+    pub(crate) prev_coinc: bool,
     pub line_sprites: [Sprite; 10],
     pub line_sprite_count: usize,
     pub vblank_interrupts: u64,
     pub frame_buffer: [u8; SCREEN_W * SCREEN_H],
+    /// True when rendering with CGB colour semantics (the loaded cartridge
+    /// requests CGB mode). Monochrome games use DMG-mode-on-CGB instead.
+    pub cgb: bool,
+    /// Background palette RAM: 8 palettes × 4 colours × 2 bytes (RGB555).
+    pub(crate) bg_pal: [u8; 64],
+    /// Object palette RAM: 8 palettes × 4 colours × 2 bytes (RGB555).
+    pub(crate) obj_pal: [u8; 64],
+    /// Full-colour RGB888 framebuffer (SCREEN_W * SCREEN_H * 3 bytes).
+    pub(crate) rgb_buffer: Vec<u8>,
 }
 
 impl Ppu {
@@ -42,6 +51,10 @@ impl Ppu {
             line_sprite_count: 0,
             vblank_interrupts: 0,
             frame_buffer: [0; SCREEN_W * SCREEN_H],
+            cgb: false,
+            bg_pal: [0; 64],
+            obj_pal: [0; 64],
+            rgb_buffer: vec![0; SCREEN_W * SCREEN_H * 3],
         }
     }
 
@@ -54,11 +67,64 @@ impl Ppu {
         io[0x44] = 0;
     }
 
+    /// Resolve the address of a palette register (0xFF68–0xFF6B) read.
+    pub(crate) fn read_pal_reg(&self, addr: u16, io: &[u8; 0x80]) -> u8 {
+        let index = match addr {
+            0xFF68 => io[0x68] & 0x3F,
+            0xFF69 => {
+                let i = io[0x68] & 0x3F;
+                return self.bg_pal[i as usize];
+            }
+            0xFF6A => io[0x6A] & 0x3F,
+            0xFF6B => {
+                let i = io[0x6A] & 0x3F;
+                return self.obj_pal[i as usize];
+            }
+            _ => 0,
+        };
+        // 0xFF68 / 0xFF6A return the current index.
+        index | 0x40 | 0x80
+    }
+
+    pub(crate) fn write_bg_pal(&mut self, value: u8, io: &mut [u8; 0x80]) {
+        let i = io[0x68] & 0x3F;
+        self.bg_pal[i as usize] = value;
+        if io[0x68] & 0x80 != 0 {
+            io[0x68] = 0x80 | ((i + 1) & 0x3F);
+        }
+    }
+
+    pub(crate) fn write_obj_pal(&mut self, value: u8, io: &mut [u8; 0x80]) {
+        let i = io[0x6A] & 0x3F;
+        self.obj_pal[i as usize] = value;
+        if io[0x6A] & 0x80 != 0 {
+            io[0x6A] = 0x80 | ((i + 1) & 0x3F);
+        }
+    }
+
+    /// Decode a palette RAM entry into RGB888. `pal_idx` is 0–7 for the BG
+    /// palettes or 8–15 for the OBJ palettes; `col` is the 2-bit colour index.
+    fn palette_rgb(&self, pal_idx: u8, col: u8) -> [u8; 3] {
+        let (ram, p) = if pal_idx >= 8 {
+            (self.obj_pal, pal_idx - 8)
+        } else {
+            (self.bg_pal, pal_idx)
+        };
+        let i = (p as usize & 7) * 8 + (col as usize & 3) * 2;
+        let lo = ram[i];
+        let hi = ram[i + 1];
+        let c15 = (hi as u16 & 0x7F) << 8 | lo as u16;
+        let r = ((c15 & 0x1F) * 255 / 31) as u8;
+        let g = (((c15 >> 5) & 0x1F) * 255 / 31) as u8;
+        let b = (((c15 >> 10) & 0x1F) * 255 / 31) as u8;
+        [r, g, b]
+    }
+
     pub fn step(
         &mut self,
         cycles: u32,
         io: &mut [u8; 0x80],
-        vram: &mut [u8; 0x2000],
+        vram: &mut [u8; 0x4000],
         oam: &mut [u8; 0xA0],
     ) {
         let lcdc = io[0x40];
@@ -121,7 +187,7 @@ impl Ppu {
         }
     }
 
-    fn end_scanline(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x2000], oam: &mut [u8; 0xA0]) {
+    fn end_scanline(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x4000], oam: &mut [u8; 0xA0]) {
         self.ly = self.ly.wrapping_add(1);
         self.set_ly(io);
         if self.ly == 144 {
@@ -134,7 +200,7 @@ impl Ppu {
         }
     }
 
-    fn begin_scanline(&mut self, io: &mut [u8; 0x80], _vram: &mut [u8; 0x2000], oam: &mut [u8; 0xA0]) {
+    fn begin_scanline(&mut self, io: &mut [u8; 0x80], _vram: &mut [u8; 0x4000], oam: &mut [u8; 0xA0]) {
         self.scan_oam(io, oam);
         self.mode = 2;
         self.update_stat(io);
@@ -222,26 +288,35 @@ impl Ppu {
         }
     }
 
-    fn tile_pixels(&self, vram: &[u8; 0x2000], io: &[u8; 0x80], tile_index: u8, row: u8) -> [u8; 8] {
-        let base = self.tile_base(io, tile_index);
+    fn tile_pixels(
+        &self,
+        vram: &[u8; 0x4000],
+        io: &[u8; 0x80],
+        tile_index: u8,
+        row: u8,
+        bank: usize,
+    ) -> [u8; 8] {
+        let base = self.tile_base(io, tile_index) + bank * 0x2000;
         let lo = vram[base + row as usize * 2];
         let hi = vram[base + row as usize * 2 + 1];
         let mut out = [0u8; 8];
-        for px in 0..8 {
+        for (px, c) in out.iter_mut().enumerate() {
             let bit = 7 - px;
-            let c = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
-            out[px] = c;
+            *c = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
         }
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_bg(
         &self,
         io: &[u8; 0x80],
-        vram: &[u8; 0x2000],
-        bg_shade: &mut [u8; SCREEN_W],
+        vram: &[u8; 0x4000],
         bg_color: &mut [u8; SCREEN_W],
-        cache: &mut [Option<[u8; 8]>; 256],
+        bg_shade: &mut [u8; SCREEN_W],
+        bg_pal: &mut [u8; SCREEN_W],
+        bg_prio: &mut [u8; SCREEN_W],
+        cache: &mut [Option<[u8; 8]>; 512],
     ) {
         let lcdc = io[0x40];
         let scy = io[0x42] as usize;
@@ -258,22 +333,44 @@ impl Ppu {
             let tile_col = (x >> 3) & 31;
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
-            let pixels = *cache[tile_index as usize].get_or_insert_with(|| {
-                self.tile_pixels(vram, io, tile_index, row_in_tile as u8)
+            let attr = if self.cgb { vram[0x2000 + addr] } else { 0 };
+            let bank = if self.cgb { (attr as usize >> 3) & 1 } else { 0 };
+            let pal = if self.cgb { attr & 7 } else { 0 };
+            let row = if self.cgb && attr & 0x40 != 0 {
+                7 - row_in_tile as u8
+            } else {
+                row_in_tile as u8
+            };
+            let pixels = *cache[bank * 256 + tile_index as usize].get_or_insert_with(|| {
+                self.tile_pixels(vram, io, tile_index, row, bank)
             });
-            let cv = pixels[x & 7];
+            let col = if self.cgb && attr & 0x20 != 0 {
+                7 - (x & 7) as u8
+            } else {
+                (x & 7) as u8
+            };
+            let cv = pixels[col as usize];
             bg_color[px] = cv;
-            bg_shade[px] = (bgp >> (cv * 2)) & 3;
+            bg_pal[px] = pal;
+            bg_prio[px] = if self.cgb { attr >> 7 } else { 0 };
+            if self.cgb {
+                bg_shade[px] = cv;
+            } else {
+                bg_shade[px] = (bgp >> (cv * 2)) & 3;
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_window(
         &self,
         io: &[u8; 0x80],
-        vram: &[u8; 0x2000],
-        bg_shade: &mut [u8; SCREEN_W],
+        vram: &[u8; 0x4000],
         bg_color: &mut [u8; SCREEN_W],
-        cache: &mut [Option<[u8; 8]>; 256],
+        bg_shade: &mut [u8; SCREEN_W],
+        bg_pal: &mut [u8; SCREEN_W],
+        bg_prio: &mut [u8; SCREEN_W],
+        cache: &mut [Option<[u8; 8]>; 512],
     ) {
         let lcdc = io[0x40];
         let wy = io[0x4A] as usize;
@@ -291,26 +388,49 @@ impl Ppu {
         let tile_row = (win_y >> 3) & 31;
         let row_in_tile = win_y & 7;
 
-        let mut win_col = 0usize;
-        for px in wx.max(0) as usize..SCREEN_W {
+        for (win_col, px) in (wx.max(0) as usize..SCREEN_W).enumerate() {
             let tile_col = (win_col >> 3) & 31;
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
-            let pixels = *cache[tile_index as usize].get_or_insert_with(|| {
-                self.tile_pixels(vram, io, tile_index, row_in_tile as u8)
+            let attr = if self.cgb { vram[0x2000 + addr] } else { 0 };
+            let bank = if self.cgb { (attr as usize >> 3) & 1 } else { 0 };
+            let pal = if self.cgb { attr & 7 } else { 0 };
+            let row = if self.cgb && attr & 0x40 != 0 {
+                7 - row_in_tile as u8
+            } else {
+                row_in_tile as u8
+            };
+            let pixels = *cache[bank * 256 + tile_index as usize].get_or_insert_with(|| {
+                self.tile_pixels(vram, io, tile_index, row, bank)
             });
-            let cv = pixels[win_col & 7];
+            let col = if self.cgb && attr & 0x20 != 0 {
+                7 - (win_col & 7) as u8
+            } else {
+                (win_col & 7) as u8
+            };
+            let cv = pixels[col as usize];
             bg_color[px] = cv;
-            bg_shade[px] = (bgp >> (cv * 2)) & 3;
-            win_col += 1;
+            bg_pal[px] = pal;
+            bg_prio[px] = if self.cgb { attr >> 7 } else { 0 };
+            if self.cgb {
+                bg_shade[px] = cv;
+            } else {
+                bg_shade[px] = (bgp >> (cv * 2)) & 3;
+            }
         }
     }
 
-    fn render_sprites(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+    fn render_sprites(
+        &self,
+        io: &[u8; 0x80],
+        vram: &[u8; 0x4000],
+        bg_color: &[u8; SCREEN_W],
+        bg_prio: &[u8; SCREEN_W],
+        shade: &mut [u8; SCREEN_W],
+        pal: &mut [u8; SCREEN_W],
+    ) {
         let mut sprites = [self.line_sprites[0]; 10];
-        for i in 0..self.line_sprite_count {
-            sprites[i] = self.line_sprites[i];
-        }
+        sprites[..self.line_sprite_count].copy_from_slice(&self.line_sprites[..self.line_sprite_count]);
         sprites[..self.line_sprite_count].sort_by_key(|s| s.x);
 
         let lcdc = io[0x40];
@@ -321,10 +441,18 @@ impl Ppu {
         // front, letting the front-most sprite overwrite the others.
         for i in (0..self.line_sprite_count).rev() {
             let s = sprites[i];
-            let obp = if s.attr & 0x10 != 0 { io[0x49] } else { io[0x48] };
-            let priority = s.attr & 0x80 != 0;
             let flip_x = s.attr & 0x20 != 0;
             let flip_y = s.attr & 0x40 != 0;
+            let priority = s.attr & 0x80 != 0;
+            // OBJ palette: CGB uses attr bits 0-2; DMG selects OBJ palette 0/1
+            // via attr bit 4 (mapped onto CGB OBJ palettes 0/1).
+            let pal_num = if self.cgb {
+                8 + (s.attr & 7)
+            } else if s.attr & 0x10 != 0 {
+                9
+            } else {
+                8
+            };
 
             let top = s.y as i16 - 16;
             let row = self.ly as i16 - top;
@@ -340,15 +468,17 @@ impl Ppu {
             }
             let tile_row = if flip_y { 7 - (row & 7) } else { row & 7 };
             // Sprite tiles are always indexed from 0x8000 (unsigned), independent of LCDC bit 4.
-            let base = (0x8000 + tile as usize * 16) & 0x1FFF;
+            let bank = if self.cgb { (s.attr as usize >> 3) & 1 } else { 0 };
+            let base = ((0x8000 + tile as usize * 16) & 0x1FFF) | (bank * 0x2000);
             let lo = vram[base + tile_row as usize * 2];
             let hi = vram[base + tile_row as usize * 2 + 1];
             let mut pixels = [0u8; 8];
-            for px in 0..8 {
+            for (px, c) in pixels.iter_mut().enumerate() {
                 let bit = 7 - px;
-                pixels[px] = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+                *c = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
             }
 
+            let obp = if s.attr & 0x10 != 0 { io[0x49] } else { io[0x48] };
             for p in 0..8 {
                 let px = s.x + p as i16;
                 if px < 0 || px >= SCREEN_W as i16 {
@@ -359,32 +489,72 @@ impl Ppu {
                 if cv == 0 {
                     continue;
                 }
-                if bg_enabled && priority && bg_color[px as usize] != 0 {
+                // BG priority: in CGB, an attr BG-priority tile hides OBJ; in
+                // DMG-mode, the OBJ priority bit does so when BG is non-zero.
+                if self.cgb {
+                    if bg_prio[px as usize] != 0 && bg_color[px as usize] != 0 {
+                        continue;
+                    }
+                } else if bg_enabled && priority && bg_color[px as usize] != 0 {
                     continue;
                 }
-                bg_shade[px as usize] = (obp >> (cv * 2)) & 3;
+                if self.cgb {
+                    shade[px as usize] = cv;
+                } else {
+                    shade[px as usize] = (obp >> (cv * 2)) & 3;
+                }
+                pal[px as usize] = pal_num;
             }
         }
     }
 
-    fn render_line(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x2000], _oam: &mut [u8; 0xA0]) {
+    fn render_line(&mut self, io: &mut [u8; 0x80], vram: &mut [u8; 0x4000], _oam: &mut [u8; 0xA0]) {
         let lcdc = io[0x40];
-        let mut bg_shade = [0u8; SCREEN_W];
         let mut bg_color = [0u8; SCREEN_W];
-        let mut tile_cache = [None; 256];
+        let mut bg_shade = [0u8; SCREEN_W];
+        let mut bg_pal = [0u8; SCREEN_W];
+        let mut bg_prio = [0u8; SCREEN_W];
+        let mut shade = [0u8; SCREEN_W];
+        let mut pal = [0u8; SCREEN_W];
+        let mut tile_cache = [None; 512];
 
         if lcdc & 0x01 != 0 {
-            self.render_bg(io, vram, &mut bg_shade, &mut bg_color, &mut tile_cache);
+            self.render_bg(
+                io,
+                vram,
+                &mut bg_color,
+                &mut bg_shade,
+                &mut bg_pal,
+                &mut bg_prio,
+                &mut tile_cache,
+            );
         }
         if lcdc & 0x40 != 0 {
-            self.render_window(io, vram, &mut bg_shade, &mut bg_color, &mut tile_cache);
+            self.render_window(
+                io,
+                vram,
+                &mut bg_color,
+                &mut bg_shade,
+                &mut bg_pal,
+                &mut bg_prio,
+                &mut tile_cache,
+            );
         }
+        shade.copy_from_slice(&bg_shade);
+        pal.copy_from_slice(&bg_pal);
         if lcdc & 0x02 != 0 {
-            self.render_sprites(io, vram, &mut bg_shade, &mut bg_color);
+            self.render_sprites(io, vram, &bg_color, &bg_prio, &mut shade, &mut pal);
         }
 
         let row = self.ly as usize * SCREEN_W;
-        self.frame_buffer[row..row + SCREEN_W].copy_from_slice(&bg_shade);
+        for px in 0..SCREEN_W {
+            self.frame_buffer[row + px] = shade[px];
+            let c = self.palette_rgb(pal[px], shade[px]);
+            let o = (row + px) * 3;
+            self.rgb_buffer[o] = c[0];
+            self.rgb_buffer[o + 1] = c[1];
+            self.rgb_buffer[o + 2] = c[2];
+        }
     }
 }
 
@@ -414,10 +584,10 @@ impl emu_core::device::Device for Ppu {
 mod tests {
     use super::*;
 
-    fn stepping_ppu() -> ([u8; 0x80], [u8; 0x2000], [u8; 0xA0], Ppu) {
+    fn stepping_ppu() -> ([u8; 0x80], [u8; 0x4000], [u8; 0xA0], Ppu) {
         let mut io = [0u8; 0x80];
         io[0x40] = 0x80; // LCD on
-        let vram = [0u8; 0x2000];
+        let vram = [0u8; 0x4000];
         let oam = [0u8; 0xA0];
         (io, vram, oam, Ppu::new())
     }
