@@ -15,6 +15,8 @@ pub struct Ppu {
     pub mode: u8,
     pub dot: u32,
     mode3_cycles: u32,
+    prev_mode: u8,
+    prev_coinc: bool,
     pub line_sprites: [Sprite; 10],
     pub line_sprite_count: usize,
     pub vblank_interrupts: u64,
@@ -28,6 +30,8 @@ impl Ppu {
             mode: 0,
             dot: 0,
             mode3_cycles: 172,
+            prev_mode: 0,
+            prev_coinc: false,
             line_sprites: [Sprite {
                 x: 0,
                 y: 0,
@@ -45,6 +49,8 @@ impl Ppu {
         self.ly = 0;
         self.mode = 0;
         self.dot = 0;
+        self.prev_mode = 0;
+        self.prev_coinc = false;
         io[0x44] = 0;
     }
 
@@ -123,9 +129,6 @@ impl Ppu {
             self.update_stat(io);
             io[0x0F] |= 0x01;
             self.vblank_interrupts += 1;
-            if io[0x41] & 0x10 != 0 {
-                io[0x0F] |= 0x02;
-            }
         } else {
             self.begin_scanline(io, vram, oam);
         }
@@ -177,12 +180,32 @@ impl Ppu {
     fn update_stat(&mut self, io: &mut [u8; 0x80]) {
         let stat = io[0x41];
         let coinc = self.ly == io[0x45];
+
+        // STAT interrupt on mode transitions: mode 2 -> OAM (0x20),
+        // mode 1 -> VBlank (0x10), mode 0 -> HBlank (0x08). Mode 3 never fires.
+        if self.mode != self.prev_mode {
+            let bit = match self.mode {
+                2 => 0x20,
+                1 => 0x10,
+                0 => 0x08,
+                _ => 0,
+            };
+            if bit != 0 && stat & bit != 0 {
+                io[0x0F] |= 0x02;
+            }
+        }
+
+        // STAT interrupt on the rising edge of LY == LYC (0x40).
+        if coinc && !self.prev_coinc && stat & 0x40 != 0 {
+            io[0x0F] |= 0x02;
+        }
+
+        self.prev_mode = self.mode;
+        self.prev_coinc = coinc;
+
         let mut new_stat = (stat & 0xF8) | (self.mode & 0x03);
         if coinc {
             new_stat |= 0x04;
-            if stat & 0x40 != 0 {
-                io[0x0F] |= 0x02;
-            }
         } else {
             new_stat &= !0x04;
         }
@@ -275,7 +298,10 @@ impl Ppu {
         let lcdc = io[0x40];
         let bg_enabled = lcdc & 0x01 != 0;
 
-        for i in 0..self.line_sprite_count {
+        // Higher-priority sprites (smaller x; on an x tie, earlier in OAM) must
+        // be drawn on top, so iterate from the back of the sorted list to the
+        // front, letting the front-most sprite overwrite the others.
+        for i in (0..self.line_sprite_count).rev() {
             let s = sprites[i];
             let obp = if s.attr & 0x10 != 0 { io[0x49] } else { io[0x48] };
             let priority = s.attr & 0x80 != 0;
@@ -362,5 +388,46 @@ impl emu_core::device::Device for Ppu {
         if let Some(gb) = bus.as_any_mut().downcast_mut::<crate::bus::Bus>() {
             self.step(cycles, &mut gb.io, &mut gb.vram, &mut gb.oam);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stepping_ppu() -> ([u8; 0x80], [u8; 0x2000], [u8; 0xA0], Ppu) {
+        let mut io = [0u8; 0x80];
+        io[0x40] = 0x80; // LCD on
+        let vram = [0u8; 0x2000];
+        let oam = [0u8; 0xA0];
+        (io, vram, oam, Ppu::new())
+    }
+
+    #[test]
+    fn stat_oam_interrupt_fires_on_mode_two_entry() {
+        let (mut io, mut vram, mut oam, mut ppu) = stepping_ppu();
+        io[0x41] = 0x20; // enable OAM (mode 2) STAT interrupt
+        io[0x0F] = 0;
+        ppu.step(456, &mut io, &mut vram, &mut oam); // complete the first line
+        assert_ne!(io[0x0F] & 0x02, 0, "OAM STAT interrupt fires entering mode 2");
+    }
+
+    #[test]
+    fn stat_oam_interrupt_does_not_fire_when_disabled() {
+        let (mut io, mut vram, mut oam, mut ppu) = stepping_ppu();
+        io[0x41] = 0x00; // no STAT interrupts enabled
+        io[0x0F] = 0;
+        ppu.step(456, &mut io, &mut vram, &mut oam);
+        assert_eq!(io[0x0F] & 0x02, 0, "no STAT interrupt when disabled");
+    }
+
+    #[test]
+    fn stat_lyc_interrupt_fires_on_coincidence_edge() {
+        let (mut io, mut vram, mut oam, mut ppu) = stepping_ppu();
+        io[0x45] = 1; // LYC = 1
+        io[0x41] = 0x40; // enable LYC STAT interrupt
+        io[0x0F] = 0;
+        ppu.step(456, &mut io, &mut vram, &mut oam); // LY goes 0 -> 1
+        assert_ne!(io[0x0F] & 0x02, 0, "LYC STAT interrupt fires on coincidence edge");
     }
 }
