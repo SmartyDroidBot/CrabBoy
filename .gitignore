@@ -10,6 +10,7 @@
 roms/tests/*.gb
 roms/tests/*.gbc
 roms/tests/*.zip
+roms/tests/*.ppm
 
 # Stuck Windows build scripts (leftover from an aborted Windows build)
 target_stuck_windows/

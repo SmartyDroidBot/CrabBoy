@@ -100,12 +100,12 @@ struct CrabBoyApp {
 }
 
 impl CrabBoyApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>) -> Self {
         let mut keymap = HashMap::new();
         for b in GB_BUTTONS {
             keymap.insert(b, default_key(b));
         }
-        CrabBoyApp {
+        let mut app = CrabBoyApp {
             rom_data: None,
             system: None,
             sav_path: None,
@@ -125,7 +125,11 @@ impl CrabBoyApp {
             fps_frames: 0,
             status: "No ROM loaded".to_string(),
             held_keys_str: String::new(),
+        };
+        if let Some(path) = rom_path {
+            app.load_rom(&path, &cc.egui_ctx);
         }
+        app
     }
 
     fn load_rom(&mut self, path: &str, ctx: &egui::Context) {
@@ -466,6 +470,16 @@ impl eframe::App for CrabBoyApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let rom_path: Option<String> = {
+        let mut args = std::env::args();
+        let mut path = None;
+        while let Some(a) = args.next() {
+            if a == "--rom" {
+                path = args.next();
+            }
+        }
+        path
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([GB_W as f32 * 4.0, GB_H as f32 * 4.0 + 60.0])
@@ -475,6 +489,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "CrabBoy Emulator",
         options,
-        Box::new(|cc| Ok(Box::new(CrabBoyApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path)))),
     )
 }

@@ -68,3 +68,31 @@ GBA.
 - **Pokémon Red title-screen freeze**: `joypad.rs` had the P1 row-select bits
   inverted (bit4/P14 = D-pad, bit5/P15 = buttons). Swapped the two row-select
   conditions and updated the affected tests. Fixed the START check at `0x12F8`.
+
+## Post-restructure verification (all 3 frontends + Red.gb)
+
+All verified against `roms/tests/Red.gb`. Results recorded from Windows (msvc)
+and WSL Ubuntu (Linux), plus the WASM target.
+
+| Frontend / check | Result |
+| --- | --- |
+| `cargo build --workspace` (Win) | OK |
+| `cargo test --workspace` (Win) | 12/12 |
+| `cargo build --workspace` (Linux) | OK |
+| `cargo test --workspace` (Linux) | 12/12 |
+| CLI `probe` (Win + Linux) | vblank gap samples **544** on both |
+| CLI `test_runner` (Win + Linux) | identical final state: `LCDC=CB LY=72 vblank=545 shades=[22330,248,208,254]` |
+| Cross-platform PPM | Windows == Linux **byte-identical** (SHA256 `8E5FD757…DE5BB`) |
+| Desktop (Win) `--rom Red.gb` | launches, alive 6s, clean kill |
+| Desktop (Linux) | builds/links OK; GUI runtime not verifiable (headless, no `$DISPLAY`) |
+| WASM build (Win + Linux) | `wasm-bindgen`/wasm-pack flow compiles; `wasm32` target |
+| WASM runtime (Node, Win) | `new Gb(Red.gb)` + input script + 560 frames; framebuffer **pixel-identical** to native (frame 559 hash `eb53d00e`, with `START@400`) |
+
+Notable findings:
+- WASM and native are **deterministic and pixel-identical** with the same input
+  script — proving the WASM bindings hook the same emulator logic.
+- Desktop now accepts an optional `--rom <path>` arg (auto-load) so it can be
+  launched/tested directly.
+- Initial WASM/harness divergence was a bug in the test script (`run.js` had the
+  press/release flag inverted), not in the emulator or bindings.
+- `roms/tests/*.ppm` added to `.gitignore` (generated framebuffer anchors).
