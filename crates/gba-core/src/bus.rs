@@ -12,7 +12,10 @@
 //! phase.
 
 use crate::cpu::Bus as CpuBus;
+use crate::dma::Dma;
 use crate::io::Io;
+use crate::rtc::Rtc;
+use crate::timer::Timers;
 
 /// BIOS size (16 KB).
 pub const BIOS_SIZE: usize = 0x4000;
@@ -77,6 +80,12 @@ pub struct Bus {
     pub rom: Vec<u8>,
     /// I/O registers.
     pub io: Io,
+    /// DMA channels.
+    pub dma: Dma,
+    /// Timers.
+    pub timers: Timers,
+    /// Real-time clock (serial I/O).
+    pub rtc: Rtc,
     /// Wait-state cycles added by accesses during the current instruction.
     cycles: u32,
     /// If `true`, the previous access was a sequential ROM access (prefetch
@@ -96,6 +105,9 @@ impl Bus {
             sram: [0; SRAM_SIZE],
             rom,
             io: Io::new(),
+            dma: Dma::new(),
+            timers: Timers::new(),
+            rtc: Rtc::new(),
             cycles: 0,
             last_seq: false,
         }
@@ -200,6 +212,10 @@ impl Bus {
             }
             Region::Io => {
                 let off = base & 0x3FF;
+                if off == 0x120 {
+                    // RTC serial data: bit 0 is the RTC output pin during reads.
+                    return (self.io.read16(off) & !1) as u32 | self.rtc.read_sio_bit() as u32;
+                }
                 self.io.read16(off) as u32
             }
             Region::Palram => {
@@ -276,6 +292,12 @@ impl Bus {
             Region::Io => {
                 let off = base & 0x3FF;
                 self.io.write16(off, value as u16);
+                match off {
+                    0xB0..=0xDF => self.dma.write16(off, value as u16),
+                    0x100..=0x110 => self.write_timer(off, value as u16),
+                    0x120 | 0x122 => self.rtc.write_sio(value as u16),
+                    _ => {}
+                }
             }
             Region::Palram => {
                 let i = base & (PALRAM_SIZE - 1);
@@ -316,7 +338,28 @@ impl Bus {
         self.io.release(k);
     }
 
-    /// Interrupt flags currently pending (IF & IE).
+    /// Forward a timer register write.
+    fn write_timer(&mut self, offset: usize, value: u16) {
+        match offset {
+            0x100 => self.timers.write_cnt_l(0, value),
+            0x102 => self.timers.write_cnt_h(0, value),
+            0x104 => self.timers.write_cnt_l(1, value),
+            0x106 => self.timers.write_cnt_h(1, value),
+            0x108 => self.timers.write_cnt_l(2, value),
+            0x10A => self.timers.write_cnt_h(2, value),
+            0x10C => self.timers.write_cnt_l(3, value),
+            0x10E => self.timers.write_cnt_h(3, value),
+            _ => {}
+        }
+    }
+
+    /// Raise timer/DMA overflow IRQs into the IO flags.
+    pub fn sync_dev_irq(&mut self) {
+        self.io.raise_irq(self.timers.irq_flags());
+        self.io.raise_irq(self.dma.irq_flags());
+    }
+
+    /// Pending interrupt flags (IF & IE).
     pub fn pending_irq(&self) -> u16 {
         self.io.pending_irq()
     }

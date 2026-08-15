@@ -7,8 +7,11 @@
 pub mod apu;
 pub mod bus;
 pub mod cpu;
+pub mod dma;
 pub mod io;
 pub mod ppu;
+pub mod rtc;
+pub mod timer;
 
 pub use apu::Apu;
 pub use bus::Bus;
