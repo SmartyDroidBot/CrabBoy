@@ -54,6 +54,7 @@ impl Bus {
             serial_remaining: 0,
         };
         bus.io[0x00] = 0xCF;
+        bus.io[0x40] = 0x91; // post-boot LCDC: LCD on, BG+OBJ enabled
         bus
     }
 

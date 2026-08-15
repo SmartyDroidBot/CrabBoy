@@ -634,9 +634,11 @@ impl Cpu {
             }
             0x76 => {
                 let pending = bus.io[0x0F] & bus.ie & 0x1F;
-                if !self.ime && pending != 0 {
+                if !self.ime && !self.ei_pending && pending != 0 {
                     // HALT bug: with IME disabled and an interrupt pending, the
                     // CPU does not halt; the byte after HALT is executed twice.
+                    // An EI immediately before HALT suppresses the bug: HALT then
+                    // halts and enables IME, so the pending interrupt is serviced.
                     self.halt_bug = true;
                     4
                 } else {
