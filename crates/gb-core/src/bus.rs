@@ -75,7 +75,7 @@ impl Bus {
             0xFF02 => self.io[0x02] | 0x7E,
             0xFF04..=0xFF07 => self.io[(addr - 0xFF00) as usize],
             0xFF0F => self.io[0x0F] | 0xE0,
-            0xFF10..=0xFF3F => 0x00,
+            0xFF10..=0xFF3F => self.apu.read(addr, &self.io),
             0xFF40..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
@@ -116,7 +116,10 @@ impl Bus {
                 self.timer.on_tac_write();
             }
             0xFF0F => self.io[0x0F] = value | 0xE0,
-            0xFF10..=0xFF3F => {}
+            0xFF10..=0xFF3F => {
+                let io = &mut self.io;
+                self.apu.write(addr, value, io);
+            }
             0xFF46 => self.dma(value),
             0xFF44 => { /* LY is read-only on real hardware; writes ignored */ }
             0xFF40..=0xFF4B => self.io[(addr - 0xFF00) as usize] = value,
@@ -172,14 +175,18 @@ impl Bus {
         let Bus {
             timer,
             ppu,
+            apu,
             io,
             vram,
             oam,
             ..
         } = self;
+        let mut wave_ram = [0u8; 16];
+        wave_ram.copy_from_slice(&io[0x30..0x40]);
         timer.step(cycles, io);
         self.cart.rtc_tick(cycles);
         ppu.step(cycles, io, vram, oam);
+        apu.step(cycles, io, &wave_ram);
     }
 
     pub fn frame(&self) -> &[u8] {

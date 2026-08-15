@@ -1,6 +1,6 @@
 //! The frontend-facing system abstraction.
 
-use crate::{input::Button, video::Frame};
+use crate::{audio::AudioBuffer, input::Button, video::Frame};
 
 /// A complete console as seen by a frontend.
 ///
@@ -37,6 +37,12 @@ pub trait System {
 
     /// Current framebuffer as 2-bit shades (`0..=3`) per pixel.
     fn frame(&self) -> Frame;
+
+    /// Drain audio samples produced since the last call (interleaved stereo).
+    /// Returns an empty buffer for systems without audio.
+    fn take_audio(&mut self) -> AudioBuffer {
+        AudioBuffer::new()
+    }
 
     /// Whether the cartridge has battery-backed save RAM.
     fn battery_backed(&self) -> bool;

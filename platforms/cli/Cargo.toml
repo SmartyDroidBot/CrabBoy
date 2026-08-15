@@ -13,6 +13,10 @@ path = "src/bin/test_runner.rs"
 name = "probe"
 path = "src/bin/probe.rs"
 
+[[bin]]
+name = "wav"
+path = "src/bin/wav.rs"
+
 [dependencies]
 emu-core = { workspace = true }
 gb-core = { workspace = true }

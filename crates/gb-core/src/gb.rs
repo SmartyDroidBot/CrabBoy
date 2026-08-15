@@ -195,6 +195,10 @@ impl emu_core::System for Gb {
         }
     }
 
+    fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
+        std::mem::take(&mut self.bus.apu.buffer)
+    }
+
     fn battery_backed(&self) -> bool {
         self.battery_backed()
     }

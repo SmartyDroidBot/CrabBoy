@@ -1,6 +1,7 @@
 use eframe::egui;
 use emu_core::{Button, System};
 use gb_core::cartridge::Cartridge;
+use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -97,10 +98,12 @@ struct CrabBoyApp {
     fps_frames: u64,
     status: String,
     held_keys_str: String,
+    sink: Sink,
+    audio_rate: u32,
 }
 
 impl CrabBoyApp {
-    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>, sink: Sink) -> Self {
         let mut keymap = HashMap::new();
         for b in GB_BUTTONS {
             keymap.insert(b, default_key(b));
@@ -125,6 +128,8 @@ impl CrabBoyApp {
             fps_frames: 0,
             status: "No ROM loaded".to_string(),
             held_keys_str: String::new(),
+            sink,
+            audio_rate: 8192,
         };
         if let Some(path) = rom_path {
             app.load_rom(&path, &cc.egui_ctx);
@@ -210,6 +215,11 @@ impl CrabBoyApp {
         if let Some(system) = &mut self.system {
             system.run_frame();
             self.frame_count += 1;
+            let audio = system.take_audio();
+            if !audio.samples.is_empty() {
+                let src = SamplesBuffer::new(2, self.audio_rate, audio.samples);
+                self.sink.append(src);
+            }
         }
     }
 
@@ -486,9 +496,14 @@ fn main() -> eframe::Result<()> {
             .with_title("CrabBoy Emulator"),
         ..Default::default()
     };
+    let sink = OutputStream::try_default()
+        .ok()
+        .and_then(|(_stream, handle)| Sink::try_new(&handle).ok());
+    let sink = sink.expect("failed to open audio output stream");
+
     eframe::run_native(
         "CrabBoy Emulator",
         options,
-        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path)))),
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, sink)))),
     )
 }

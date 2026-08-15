@@ -58,6 +58,12 @@ mod bindings {
             self.emu.frame().shades.into_boxed_slice()
         }
 
+        /// Drain audio produced since the last call as interleaved stereo f32
+        /// samples in `-1.0..=1.0` (sample rate 8192 Hz).
+        pub fn take_audio(&mut self) -> Vec<f32> {
+            self.emu.take_audio().samples
+        }
+
         /// Press (or release) a button by its GB bitmask (see gb_core::joypad).
         pub fn set_button(&mut self, button: u8, pressed: bool) {
             if let Some(b) = button_from_mask(button) {

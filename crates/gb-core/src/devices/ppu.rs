@@ -252,7 +252,7 @@ impl Ppu {
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
             let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
-            let cv = pixels[((x & 7))];
+            let cv = pixels[x & 7];
             bg_color[px] = cv;
             bg_shade[px] = (bgp >> (cv * 2)) & 3;
         }
@@ -281,7 +281,7 @@ impl Ppu {
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
             let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
-            let cv = pixels[((win_col & 7))];
+            let cv = pixels[win_col & 7];
             bg_color[px] = cv;
             bg_shade[px] = (bgp >> (cv * 2)) & 3;
             win_col += 1;
