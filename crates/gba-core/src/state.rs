@@ -183,11 +183,11 @@ pub fn save_state(gba: &Gba) -> Vec<u8> {
     w.u16(io.vcount);
 
     // Main memory.
-    w.bytes(&gba.bus.ewram);
-    w.bytes(&gba.bus.iwram);
-    w.bytes(&gba.bus.vram);
-    w.bytes(&gba.bus.palram);
-    w.bytes(&gba.bus.oam);
+    w.bytes(gba.bus.ewram.as_ref());
+    w.bytes(gba.bus.iwram.as_ref());
+    w.bytes(gba.bus.vram.as_ref());
+    w.bytes(gba.bus.palram.as_ref());
+    w.bytes(gba.bus.oam.as_ref());
 
     // Save cartridge.
     w.u8(save_type_to_u8(gba.bus.save.kind()));

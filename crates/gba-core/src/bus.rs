@@ -35,6 +35,97 @@ pub const SRAM_SIZE: usize = 0x10000;
 /// Default 32 MB cartridge ROM mask.
 const ROM_MASK: usize = 0x1FF_FFFF;
 
+use std::ops::{Deref, DerefMut, Index, IndexMut};
+
+/// A fixed-size memory region, heap-allocated with no stack temporary.
+///
+/// Large regions (VRAM, EWRAM, save cartridges) must not be embedded inline in
+/// the emulator structs: in debug builds Rust materialises a returned value as
+/// a temporary on the caller's stack, and a ~670 KB `Gba` overflows the 1 MB
+/// default thread stack the moment a ROM is constructed. `Box::new_zeroed`
+/// allocates the `[T; N]` directly on the heap, so the region never touches the
+/// stack while keeping the exact size baked into the type via const generics.
+pub struct Mem<T, const N: usize>(Box<[T; N]>);
+
+impl<T, const N: usize> Mem<T, N> {
+    /// Allocate a zero-initialised region directly on the heap.
+    pub fn zeroed() -> Self {
+        // SAFETY: zero bytes are a valid value for any `T` we instantiate this
+        // with (u8/u16), and `assume_init` hands us a fully-owned `[T; N]`.
+        Mem(unsafe { Box::<[T; N]>::new_zeroed().assume_init() })
+    }
+
+    /// Allocate a region filled with a repeated byte.
+    pub fn filled(v: T) -> Self
+    where
+        T: Copy,
+    {
+        let mut m = Self::zeroed();
+        m.0.iter_mut().for_each(|b| *b = v);
+        m
+    }
+}
+
+impl<T, const N: usize> Index<usize> for Mem<T, N> {
+    type Output = T;
+    #[inline]
+    fn index(&self, i: usize) -> &T {
+        &self.0[i]
+    }
+}
+
+impl<T, const N: usize> IndexMut<usize> for Mem<T, N> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        &mut self.0[i]
+    }
+}
+
+macro_rules! impl_index_range {
+    ($($r:ty),+ $(,)?) => {$(
+        impl<T, const N: usize> Index<$r> for Mem<T, N> {
+            type Output = [T];
+            #[inline]
+            fn index(&self, i: $r) -> &[T] {
+                &self.0[i]
+            }
+        }
+        impl<T, const N: usize> IndexMut<$r> for Mem<T, N> {
+            #[inline]
+            fn index_mut(&mut self, i: $r) -> &mut [T] {
+                &mut self.0[i]
+            }
+        }
+    )+};
+}
+
+impl_index_range!(
+    std::ops::Range<usize>,
+    std::ops::RangeFrom<usize>,
+    std::ops::RangeTo<usize>,
+    std::ops::RangeFull,
+    std::ops::RangeInclusive<usize>,
+);
+
+impl<T, const N: usize> Deref for Mem<T, N> {
+    type Target = [T; N];
+    fn deref(&self) -> &[T; N] {
+        &self.0
+    }
+}
+
+impl<T, const N: usize> DerefMut for Mem<T, N> {
+    fn deref_mut(&mut self) -> &mut [T; N] {
+        &mut self.0
+    }
+}
+
+impl<T, const N: usize> AsRef<[T]> for Mem<T, N> {
+    fn as_ref(&self) -> &[T] {
+        &self.0[..]
+    }
+}
+
 pub use crate::save::{SaveCartridge, SaveType};
 
 /// The memory regions the bus decodes an address into.
@@ -72,11 +163,11 @@ impl Region {
 pub struct Bus {
     /// Optional BIOS image (executed when present; else the region reads as 0).
     pub bios: Vec<u8>,
-    pub ewram: [u8; EWRAM_SIZE],
-    pub iwram: [u8; IWRAM_SIZE],
-    pub palram: [u8; PALRAM_SIZE],
-    pub vram: [u8; VRAM_SIZE],
-    pub oam: [u8; OAM_SIZE],
+    pub ewram: Mem<u8, EWRAM_SIZE>,
+    pub iwram: Mem<u8, IWRAM_SIZE>,
+    pub palram: Mem<u8, PALRAM_SIZE>,
+    pub vram: Mem<u8, VRAM_SIZE>,
+    pub oam: Mem<u8, OAM_SIZE>,
     /// Battery-backed save cartridge (SRAM/FLASH/EEPROM).
     pub save: SaveCartridge,
     /// Cartridge ROM.
@@ -100,11 +191,11 @@ impl Bus {
     pub fn new(rom: Vec<u8>) -> Bus {
         Bus {
             bios: Vec::new(),
-            ewram: [0; EWRAM_SIZE],
-            iwram: [0; IWRAM_SIZE],
-            palram: [0; PALRAM_SIZE],
-            vram: [0; VRAM_SIZE],
-            oam: [0; OAM_SIZE],
+            ewram: Mem::zeroed(),
+            iwram: Mem::zeroed(),
+            palram: Mem::zeroed(),
+            vram: Mem::zeroed(),
+            oam: Mem::zeroed(),
             save: SaveCartridge::new(),
             rom,
             io: Io::new(),

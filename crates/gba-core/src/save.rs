@@ -32,13 +32,15 @@ enum Cmd {
     Bank,
 }
 
+use crate::bus::Mem;
+
 /// The battery-backed save cartridge.
 pub struct SaveCartridge {
     pub kind: SaveType,
     /// Detected automatically on first access.
     detected: bool,
-    flash: [u8; FLASH_SIZE],
-    sram: [u8; SRAM_SIZE],
+    flash: Mem<u8, FLASH_SIZE>,
+    sram: Mem<u8, SRAM_SIZE>,
     bank: usize,
     cmd: Cmd,
     id_mode: bool,
@@ -51,8 +53,8 @@ impl Default for SaveCartridge {
         SaveCartridge {
             kind: SaveType::None,
             detected: false,
-            flash: [0xFF; FLASH_SIZE],
-            sram: [0; SRAM_SIZE],
+            flash: Mem::filled(0xFF),
+            sram: Mem::zeroed(),
             bank: 0,
             cmd: Cmd::Idle,
             id_mode: false,
@@ -74,8 +76,8 @@ impl SaveCartridge {
     /// The save region as raw bytes (FLASH or SRAM).
     pub fn raw(&self) -> &[u8] {
         match self.kind {
-            SaveType::Flash => &self.flash,
-            SaveType::Sram => &self.sram,
+            SaveType::Flash => self.flash.as_ref(),
+            SaveType::Sram => self.sram.as_ref(),
             _ => &[],
         }
     }
