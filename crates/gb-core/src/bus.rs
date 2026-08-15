@@ -29,6 +29,9 @@ pub struct Bus {
     pub timer: Timer,
     pub apu: crate::devices::apu::Apu,
     pub serial_buf: Vec<u8>,
+    dma_source: u16,
+    dma_remaining: u32,
+    serial_remaining: u32,
 }
 
 impl Bus {
@@ -46,9 +49,16 @@ impl Bus {
             timer: Timer::new(),
             apu: crate::devices::apu::Apu::new(),
             serial_buf: Vec::new(),
+            dma_source: 0,
+            dma_remaining: 0,
+            serial_remaining: 0,
         };
         bus.io[0x00] = 0xCF;
         bus
+    }
+
+    pub fn dma_active(&self) -> bool {
+        self.dma_remaining > 0
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -87,7 +97,9 @@ impl Bus {
             0xFF02 => {
                 self.io[0x02] = value;
                 if value & 0x80 != 0 {
-                    self.serial_buf.push(self.io[0x01]);
+                    // Start a serial transfer: 8 bits at 8192 Hz (normal) or
+                    // 16384 Hz (fast), i.e. 4096 or 2048 T-cycles per byte.
+                    self.serial_remaining = if value & 0x01 != 0 { 2048 } else { 4096 };
                 }
             }
             0xFF04 => {
@@ -117,10 +129,10 @@ impl Bus {
 
     fn dma(&mut self, value: u8) {
         self.io[0x46] = value;
-        let src = (value as usize) << 8;
-        for i in 0..0xA0 {
-            self.oam[i] = self.read_transfer(src + i);
-        }
+        // The DMA copies 0xA0 bytes from the source page to OAM over 160
+        // M-cycles, during which the CPU is held. The copy runs in `step()`.
+        self.dma_source = (value as u16) << 8;
+        self.dma_remaining = 160;
     }
 
     fn read_transfer(&self, addr: usize) -> u8 {
@@ -134,8 +146,29 @@ impl Bus {
         }
     }
 
-    /// Advance the clocked devices by `cycles`.
+    /// Advance the clocked devices by `cycles` T-cycles.
     pub fn step(&mut self, cycles: u32) {
+        // DMA: one OAM byte is transferred per M-cycle (4 T-cycles) while active.
+        if self.dma_remaining > 0 {
+            let transferred = self.dma_remaining;
+            for _ in 0..cycles.min(transferred * 4) / 4 {
+                let idx = (160 - self.dma_remaining) as usize;
+                self.oam[idx] = self.read_transfer(self.dma_source as usize + idx);
+                self.dma_remaining -= 1;
+            }
+        }
+
+        // Serial: transfer completes when its cycle budget is exhausted.
+        if self.serial_remaining > 0 {
+            self.serial_remaining = self.serial_remaining.saturating_sub(cycles);
+            if self.serial_remaining == 0 {
+                self.io[0x01] = 0xFF; // received byte
+                self.io[0x02] &= !0x80; // transfer complete
+                self.io[0x0F] |= 0x08; // serial interrupt
+                self.serial_buf.push(self.io[0x01]);
+            }
+        }
+
         let Bus {
             timer,
             ppu,
@@ -145,6 +178,7 @@ impl Bus {
             ..
         } = self;
         timer.step(cycles, io);
+        self.cart.rtc_tick(cycles);
         ppu.step(cycles, io, vram, oam);
     }
 
@@ -180,5 +214,46 @@ impl emu_core::Bus for Bus {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cartridge::Cartridge;
+
+    fn bus_with_rom() -> Bus {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x147] = 0x00;
+        Bus::new(Cartridge::load(&rom).unwrap())
+    }
+
+    #[test]
+    fn dma_copies_oam_over_160_mcycles() {
+        let mut bus = bus_with_rom();
+        for i in 0..0xA0 {
+            bus.wram[i] = (i % 256) as u8;
+        }
+        bus.write(0xFF46, 0xC0); // source = 0xC000 (WRAM)
+        assert!(bus.dma_active());
+        bus.step(640); // 160 M-cycles * 4
+        assert!(!bus.dma_active(), "DMA completes after 640 T-cycles");
+        for i in 0..0xA0 {
+            assert_eq!(bus.oam[i], (i % 256) as u8, "byte {i} transferred");
+        }
+    }
+
+    #[test]
+    fn serial_transfer_completes_and_interrupts() {
+        let mut bus = bus_with_rom();
+        bus.io[0x01] = 0xAB;
+        bus.io[0x0F] = 0;
+        bus.write(0xFF02, 0x80); // start transfer (normal speed)
+        bus.step(4095);
+        assert_eq!(bus.io[0x0F] & 0x08, 0, "not done yet before 4096 cycles");
+        bus.step(1);
+        assert_ne!(bus.io[0x0F] & 0x08, 0, "serial interrupt raised at 4096 cycles");
+        assert_eq!(bus.io[0x02] & 0x80, 0, "transfer-complete bit cleared");
+        assert_eq!(bus.io[0x01], 0xFF, "SB reflects received byte");
     }
 }

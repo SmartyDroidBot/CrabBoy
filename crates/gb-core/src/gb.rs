@@ -95,12 +95,21 @@ impl Gb {
         // may be enabled. This is also why `EI; DI` leaves IME disabled.
         let was_ei = self.cpu.ei_pending;
         let cycles = self.cpu.execute(&mut self.bus);
+        self.bus.step(cycles);
+
+        // DMA holds the CPU for 160 M-cycles; drain any transfer that started
+        // during this instruction (or is still in flight) before continuing.
+        let mut total = cycles;
+        while self.bus.dma_active() {
+            self.bus.step(4);
+            total += 4;
+        }
+
         if was_ei && self.cpu.ei_pending {
             self.cpu.ime = true;
             self.cpu.ei_pending = false;
         }
-        self.bus.step(cycles);
-        cycles
+        total
     }
 
     /// Current framebuffer as 2-bit shades (`0..=3`) per pixel.

@@ -37,6 +37,7 @@ pub struct Cartridge {
     rtc: [u8; 5],
     rtc_latched: [u8; 5],
     rtc_latch: u8,
+    rtc_cycles: u32,
 }
 
 impl Cartridge {
@@ -112,11 +113,45 @@ impl Cartridge {
             rtc: [0; 5],
             rtc_latched: [0; 5],
             rtc_latch: 0,
+            rtc_cycles: 0,
         })
     }
 
     pub fn has_battery(&self) -> bool {
         self.has_battery
+    }
+
+    /// Advance the MBC3 real-time clock by `cycles` T-cycles (4.19 MHz).
+    pub fn rtc_tick(&mut self, cycles: u32) {
+        if self.mbc != MbcType::Mbc3 {
+            return;
+        }
+        const CYCLES_PER_SECOND: u32 = 4_194_304;
+        self.rtc_cycles += cycles;
+        while self.rtc_cycles >= CYCLES_PER_SECOND {
+            self.rtc_cycles -= CYCLES_PER_SECOND;
+            self.rtc[0] += 1;
+            if self.rtc[0] >= 60 {
+                self.rtc[0] = 0;
+                self.rtc[1] += 1;
+                if self.rtc[1] >= 60 {
+                    self.rtc[1] = 0;
+                    self.rtc[2] += 1;
+                    if self.rtc[2] >= 24 {
+                        self.rtc[2] = 0;
+                        // Day counter spans 9 bits across rtc[3] and bit 0 of rtc[4].
+                        let mut day = (self.rtc[4] & 0x01) as u16 * 256 | self.rtc[3] as u16;
+                        day = day.wrapping_add(1);
+                        if day > 0x1FF {
+                            day = 0;
+                            self.rtc[4] |= 0x80; // day counter carry
+                        }
+                        self.rtc[3] = (day & 0xFF) as u8;
+                        self.rtc[4] = (self.rtc[4] & 0xFE) | ((day >> 8) & 1) as u8;
+                    }
+                }
+            }
+        }
     }
 
     pub fn ram_bytes(&self) -> usize {
