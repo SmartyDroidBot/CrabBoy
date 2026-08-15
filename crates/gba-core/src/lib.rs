@@ -7,6 +7,8 @@
 pub mod bus;
 pub mod cpu;
 pub mod io;
+pub mod ppu;
 
 pub use bus::Bus;
 pub use cpu::Cpu;
+pub use ppu::Ppu;
