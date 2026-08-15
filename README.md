@@ -30,6 +30,12 @@ Run all unit tests:
 cargo test --workspace
 ```
 
+## Contributing
+
+All contributors (humans and AI agents) must follow
+[`guidelines.md`](guidelines.md) — including the pre-commit testing checklist
+and the EU-style commit message format.
+
 ## Design
 
 - `emu_core::System` is the uniform interface every console core implements, so
