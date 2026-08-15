@@ -55,7 +55,7 @@ mod bindings {
 
         /// Current 160x144 framebuffer as 2-bit shades (0..=3) per pixel.
         pub fn framebuffer(&self) -> Box<[u8]> {
-            self.emu.frame().shades.into_boxed_slice()
+            self.emu.framebuffer().to_vec().into_boxed_slice()
         }
 
         /// Drain audio produced since the last call as interleaved stereo f32

@@ -235,7 +235,14 @@ impl Ppu {
         out
     }
 
-    fn render_bg(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+    fn render_bg(
+        &self,
+        io: &[u8; 0x80],
+        vram: &[u8; 0x2000],
+        bg_shade: &mut [u8; SCREEN_W],
+        bg_color: &mut [u8; SCREEN_W],
+        cache: &mut [Option<[u8; 8]>; 256],
+    ) {
         let lcdc = io[0x40];
         let scy = io[0x42] as usize;
         let scx = io[0x43] as usize;
@@ -251,14 +258,23 @@ impl Ppu {
             let tile_col = (x >> 3) & 31;
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
-            let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
+            let pixels = *cache[tile_index as usize].get_or_insert_with(|| {
+                self.tile_pixels(vram, io, tile_index, row_in_tile as u8)
+            });
             let cv = pixels[x & 7];
             bg_color[px] = cv;
             bg_shade[px] = (bgp >> (cv * 2)) & 3;
         }
     }
 
-    fn render_window(&self, io: &[u8; 0x80], vram: &[u8; 0x2000], bg_shade: &mut [u8; SCREEN_W], bg_color: &mut [u8; SCREEN_W]) {
+    fn render_window(
+        &self,
+        io: &[u8; 0x80],
+        vram: &[u8; 0x2000],
+        bg_shade: &mut [u8; SCREEN_W],
+        bg_color: &mut [u8; SCREEN_W],
+        cache: &mut [Option<[u8; 8]>; 256],
+    ) {
         let lcdc = io[0x40];
         let wy = io[0x4A] as usize;
         if (self.ly as usize) < wy {
@@ -280,7 +296,9 @@ impl Ppu {
             let tile_col = (win_col >> 3) & 31;
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
-            let pixels = self.tile_pixels(vram, io, tile_index, row_in_tile as u8);
+            let pixels = *cache[tile_index as usize].get_or_insert_with(|| {
+                self.tile_pixels(vram, io, tile_index, row_in_tile as u8)
+            });
             let cv = pixels[win_col & 7];
             bg_color[px] = cv;
             bg_shade[px] = (bgp >> (cv * 2)) & 3;
@@ -353,12 +371,13 @@ impl Ppu {
         let lcdc = io[0x40];
         let mut bg_shade = [0u8; SCREEN_W];
         let mut bg_color = [0u8; SCREEN_W];
+        let mut tile_cache = [None; 256];
 
         if lcdc & 0x01 != 0 {
-            self.render_bg(io, vram, &mut bg_shade, &mut bg_color);
+            self.render_bg(io, vram, &mut bg_shade, &mut bg_color, &mut tile_cache);
         }
         if lcdc & 0x40 != 0 {
-            self.render_window(io, vram, &mut bg_shade, &mut bg_color);
+            self.render_window(io, vram, &mut bg_shade, &mut bg_color, &mut tile_cache);
         }
         if lcdc & 0x02 != 0 {
             self.render_sprites(io, vram, &mut bg_shade, &mut bg_color);

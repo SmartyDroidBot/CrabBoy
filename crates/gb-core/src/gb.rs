@@ -195,6 +195,10 @@ impl emu_core::System for Gb {
         }
     }
 
+    fn framebuffer(&self) -> &[u8] {
+        Gb::framebuffer(self)
+    }
+
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
         std::mem::take(&mut self.bus.apu.buffer)
     }

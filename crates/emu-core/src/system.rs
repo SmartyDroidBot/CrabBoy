@@ -38,6 +38,13 @@ pub trait System {
     /// Current framebuffer as 2-bit shades (`0..=3`) per pixel.
     fn frame(&self) -> Frame;
 
+    /// Zero-copy view of the current framebuffer (`0..=3` per pixel). Avoids the
+    /// allocation in [`System::frame`] on the hot path. Returns `&[]` when the
+    /// system exposes no framebuffer here.
+    fn framebuffer(&self) -> &[u8] {
+        &[]
+    }
+
     /// Drain audio samples produced since the last call (interleaved stereo).
     /// Returns an empty buffer for systems without audio.
     fn take_audio(&mut self) -> AudioBuffer {

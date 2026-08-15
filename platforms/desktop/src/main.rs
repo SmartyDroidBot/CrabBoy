@@ -332,8 +332,8 @@ impl CrabBoyApp {
             ui.label("No ROM loaded. Use the file picker or drag & drop a .gb file.");
             return;
         };
-        let frame = system.frame();
-        let img = self.shade_image(&frame.shades);
+        let frame = system.framebuffer();
+        let img = self.shade_image(frame);
         let tex = self.screen_texture.get_or_insert_with(|| {
             ui.ctx().load_texture(
                 "gb-screen",

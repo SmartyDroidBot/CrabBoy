@@ -154,7 +154,9 @@ impl Cpu {
         self.halt_bug = false;
         let pc = self.pc;
         let op = self.fetch8(bus);
-        if std::env::var("GB_TRACE").is_ok() {
+        // Only query the environment once; tracing is a debug-only aid.
+        static TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE_ENABLED.get_or_init(|| std::env::var("GB_TRACE").is_ok()) {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TRACE_N: AtomicU32 = AtomicU32::new(0);
             let n = TRACE_N.fetch_add(1, Ordering::Relaxed);
