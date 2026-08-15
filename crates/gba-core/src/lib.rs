@@ -5,6 +5,7 @@
 //! implement [`emu_core::System`].
 
 pub mod apu;
+pub mod bios;
 pub mod bus;
 pub mod cpu;
 pub mod dma;

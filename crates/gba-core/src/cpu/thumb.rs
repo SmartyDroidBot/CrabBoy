@@ -43,7 +43,12 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         24 => ldm_stm(cpu, bus, inst),
         26 | 27 => {
             if inst & 0xFF00 == 0xDF00 {
-                cpu.swi(cpu.pc);
+                let num = inst & 0xFF;
+                if crate::bios::is_known(num) {
+                    cpu.swi_bios(cpu.pc, num);
+                } else {
+                    cpu.swi(cpu.pc);
+                }
                 cpu.add_cycles(3);
             } else {
                 branch_cond(cpu, inst);

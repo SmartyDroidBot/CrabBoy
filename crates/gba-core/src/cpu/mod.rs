@@ -95,6 +95,13 @@ pub struct Cpu {
     cycles: u32,
     /// True while the CPU is halted (SWI 0x02 `Halt`).
     pub halted: bool,
+    /// A BIOS SWI recorded by the decoders, dispatched by the system once the
+    /// instruction has finished executing. `None` when no SWI was executed.
+    bios_call: Option<u32>,
+    /// Link value (return address) saved alongside `bios_call`, used if the
+    /// call is not a recognised BIOS routine and we fall back to the SVC
+    /// exception.
+    bios_lr: u32,
 }
 
 /// Index of a banked register file within `sp`/`lr`/`spsr`.
@@ -125,6 +132,8 @@ impl Cpu {
             spsr: [0; 5],
             cycles: 0,
             halted: false,
+            bios_call: None,
+            bios_lr: 0,
         }
     }
 
@@ -306,6 +315,24 @@ impl Cpu {
         self.take_exception(VECTOR_SWI, mode::SVC, lr_value, false);
     }
 
+    /// Record a BIOS SWI to be dispatched by the system after the instruction
+    /// finishes. `lr_value` is the return address to fall back to if the call
+    /// is not a recognised BIOS routine.
+    pub(crate) fn swi_bios(&mut self, lr_value: u32, num: u32) {
+        self.bios_call = Some(num);
+        self.bios_lr = lr_value;
+    }
+
+    /// Take the recorded BIOS SWI number, clearing the pending flag.
+    pub(crate) fn take_bios_call(&mut self) -> Option<u32> {
+        self.bios_call.take()
+    }
+
+    /// The saved return address for the current BIOS SWI.
+    pub(crate) fn bios_lr(&self) -> u32 {
+        self.bios_lr
+    }
+
     /// IRQ exception.
     pub fn irq(&mut self, lr_value: u32) {
         self.take_exception(VECTOR_IRQ, mode::IRQ, lr_value, false);
@@ -408,6 +435,8 @@ impl Cpu {
         self.spsr = s.spsr;
         self.cycles = s.cycles;
         self.halted = s.halted;
+        self.bios_call = None;
+        self.bios_lr = 0;
     }
 }
 

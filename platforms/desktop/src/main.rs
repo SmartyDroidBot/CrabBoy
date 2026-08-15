@@ -188,7 +188,7 @@ impl CrabBoyApp {
         let sav_path = sav_path_for(path);
 
         let system: Box<dyn System> = if is_gba {
-            let title = String::from_utf8_lossy(&data[0xA0..0xB0])
+            let title = String::from_utf8_lossy(&data[0xA0..data.len().min(0xB0)])
                 .trim_end_matches('\0')
                 .trim()
                 .to_string();
@@ -465,7 +465,7 @@ impl CrabBoyApp {
 
     fn draw_screen(&mut self, ui: &mut egui::Ui) {
         let Some(system) = &self.system else {
-            ui.label("No ROM loaded. Use the file picker or drag & drop a .gb file.");
+            ui.label("No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file.");
             return;
         };
         let frame = system.frame();

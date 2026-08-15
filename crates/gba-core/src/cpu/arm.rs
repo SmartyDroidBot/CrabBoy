@@ -215,7 +215,12 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     }
     // SWI
     if inst & 0x0F00_0000 == 0x0F00_0000 {
-        cpu.swi(cpu.pc);
+        let num = inst & 0x00FF_FFFF;
+        if crate::bios::is_known(num) {
+            cpu.swi_bios(cpu.pc, num);
+        } else {
+            cpu.swi(cpu.pc);
+        }
         cpu.add_cycles(3);
         return;
     }

@@ -36,12 +36,13 @@ pub struct Gba {
 impl Gba {
     pub fn new(rom: Vec<u8>) -> Gba {
         let mut cpu = Cpu::new();
-        // Power-on state: the CPU starts in SVC mode at the BIOS reset vector.
-        // Without a BIOS dump we jump straight to the cartridge header (which
-        // copies itself to IWRAM via the fixed BIOS `CpuSet`/`Copy` SWIs); to
-        // let un-BIOS'd games boot we leave PC at 0x0000 and rely on the game's
-        // entry. Most games start by branching to their entry point from 0.
-        cpu.set_pc(0);
+        // Power-on state. The real GBA starts in SVC mode at the BIOS reset
+        // vector, which copies the cart header to IWRAM and branches to the
+        // cartridge entry point. Without a BIOS dump we skip straight to the
+        // cartridge at 0x08000000 (the ROM's first word is its entry branch)
+        // and give it the stack pointer the BIOS would have set up.
+        cpu.set_pc(0x0800_0000);
+        cpu.set_reg(13, 0x0300_7F00);
         let bus = Bus::new(rom);
         Gba { cpu, bus, ppu: Ppu::new(), apu: Apu::new(), line_cycles: 0, line: 0, frame_count: 0 }
     }
@@ -160,6 +161,12 @@ impl Gba {
         self.bus.begin_step();
         let instr = self.cpu.execute(&mut self.bus);
         let total = instr + self.bus.cycles();
+        // Dispatch a BIOS SWI (if any) now that the instruction has finished.
+        if let Some(num) = self.cpu.take_bios_call() {
+            if !crate::bios::run(&mut self.cpu, &mut self.bus, num) {
+                self.cpu.swi(self.cpu.bios_lr());
+            }
+        }
         // Immediate DMA fires as soon as its channel is enabled.
         self.bus.run_dma(Timing::Immediate);
         self.advance(total);
@@ -309,5 +316,18 @@ mod tests {
         let mut good = gba.save_state();
         good[4] = 0xFF;
         assert!(gba.load_state(&good).is_err(), "bad version rejected");
+    }
+
+    #[test]
+    fn boots_from_cartridge_entry() {
+        // A ROM whose entry is an unconditional branch to itself (B .).
+        let mut rom = vec![0u8; 0x2000];
+        rom[0..4].copy_from_slice(&0xEAFFFFFEu32.to_le_bytes());
+        let mut gba = Gba::new(rom);
+        // The CPU must begin executing at the cartridge base.
+        assert_eq!(gba.cpu.pc(), 0x0800_0000);
+        gba.step();
+        // The branch at 0x08000000 loops back to itself (B .).
+        assert_eq!(gba.cpu.pc(), 0x0800_0000);
     }
 }
