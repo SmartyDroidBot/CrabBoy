@@ -17,6 +17,8 @@ pub struct Cpu {
     pub ime: bool,
     pub ei_pending: bool,
     pub halted: bool,
+    pub stopped: bool,
+    halt_bug: bool,
     pub timer_interrupts: u64,
 }
 
@@ -36,6 +38,8 @@ impl Cpu {
             ime: false,
             ei_pending: false,
             halted: false,
+            stopped: false,
+            halt_bug: false,
             timer_interrupts: 0,
         }
     }
@@ -144,6 +148,10 @@ impl Cpu {
 
     /// Execute one instruction, returning the number of machine cycles used.
     pub fn execute(&mut self, bus: &mut Bus) -> u32 {
+        // If a bugged HALT ran on the previous step, the byte after it must be
+        // fetched again: rewind PC by one after this instruction completes.
+        let was_bugged = self.halt_bug;
+        self.halt_bug = false;
         let pc = self.pc;
         let op = self.fetch8(bus);
         if std::env::var("GB_TRACE").is_ok() {
@@ -165,7 +173,13 @@ impl Cpu {
                 );
             }
         }
-        self.exec_opcode(op, bus)
+        let cycles = self.exec_opcode(op, bus);
+        // HALT bug: the instruction following a bugged HALT runs twice, so PC is
+        // rewound after it (the flag was captured at the top of this call).
+        if was_bugged {
+            self.pc = self.pc.wrapping_sub(1);
+        }
+        cycles
     }
 
     #[allow(unused_assignments)]
@@ -223,7 +237,9 @@ impl Cpu {
                 4
             }
             0x10 => {
-                // STOP: treated as NOP for compatibility.
+                // STOP: consume the padding byte, then stop until a button press.
+                self.fetch8(bus);
+                self.stopped = true;
                 4
             }
             0x11 => {
@@ -617,9 +633,9 @@ impl Cpu {
             0x76 => {
                 let pending = bus.io[0x0F] & bus.ie & 0x1F;
                 if !self.ime && pending != 0 {
-                    // HALT bug: when IME is disabled and an interrupt is pending,
-                    // PC is not incremented and the CPU continues instead of halting.
-                    self.pc = self.pc.wrapping_sub(1);
+                    // HALT bug: with IME disabled and an interrupt pending, the
+                    // CPU does not halt; the byte after HALT is executed twice.
+                    self.halt_bug = true;
                     4
                 } else {
                     self.halted = true;
@@ -1072,7 +1088,12 @@ impl Cpu {
                 let sub = self.fetch8(bus);
                 self.exec_cb(sub, bus)
             }
-            _ => unreachable!(),
+            // Undefined opcodes act as 2-byte NOPs on real DMG hardware: they
+            // consume the following byte and do nothing else (4 cycles).
+            _ => {
+                self.fetch8(bus);
+                4
+            }
         }
     }
 
@@ -1685,5 +1706,60 @@ mod tests {
         cpu.execute(&mut bus);
         assert_eq!(cpu.a, 0xBA);
         assert_eq!(cpu.pc, 0x0102);
+    }
+
+    #[test]
+    fn undefined_opcode_is_two_byte_nop() {
+        let (mut cpu, mut bus) = cpu_with_bus();
+        bus.cart.rom[0x0100] = 0xD3; // undefined
+        bus.cart.rom[0x0101] = 0xAA; // consumed padding
+        bus.cart.rom[0x0102] = 0x00; // nop
+        assert_eq!(cpu.execute(&mut bus), 4);
+        assert_eq!(cpu.pc, 0x0102, "undefined opcode consumes the padding byte");
+        assert_eq!(cpu.execute(&mut bus), 4);
+        assert_eq!(cpu.pc, 0x0103);
+    }
+
+    #[test]
+    fn halt_bug_executes_following_instruction_twice() {
+        let (mut cpu, mut bus) = cpu_with_bus();
+        bus.ie = 0x01;
+        bus.io[0x0F] = 0x01; // vblank pending, IME off -> HALT bug
+        cpu.ime = false;
+        bus.cart.rom[0x0100] = 0x76; // halt
+        bus.cart.rom[0x0101] = 0x04; // inc b
+        bus.cart.rom[0x0102] = 0x00; // nop
+        cpu.b = 0x05;
+
+        cpu.execute(&mut bus); // halt (bug branch)
+        assert!(!cpu.halted);
+        assert!(cpu.halt_bug);
+
+        cpu.execute(&mut bus); // inc b, first run
+        assert_eq!(cpu.b, 0x06);
+
+        cpu.execute(&mut bus); // inc b, second run (PC rewound)
+        assert_eq!(cpu.b, 0x07);
+        assert_eq!(cpu.pc, 0x0102, "continues at the byte after the doubled instruction");
+    }
+
+    #[test]
+    fn halt_without_pending_interrupt_halts() {
+        let (mut cpu, mut bus) = cpu_with_bus();
+        bus.cart.rom[0x0100] = 0x76; // halt
+        cpu.execute(&mut bus);
+        assert!(cpu.halted);
+        assert!(!cpu.halt_bug);
+    }
+
+    #[test]
+    fn stop_sets_stopped_and_consumes_padding() {
+        let (mut cpu, mut bus) = cpu_with_bus();
+        bus.cart.rom[0x0100] = 0x10; // stop
+        bus.cart.rom[0x0101] = 0x00; // padding
+        bus.cart.rom[0x0102] = 0x00; // nop
+        cpu.execute(&mut bus);
+        assert!(cpu.stopped);
+        assert_eq!(cpu.pc, 0x0102, "STOP consumes its padding byte");
     }
 }

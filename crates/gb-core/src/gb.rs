@@ -61,10 +61,18 @@ impl Gb {
 
     /// Execute one instruction (or idle cycle), returning cycles consumed.
     pub fn step(&mut self) -> u32 {
-        let ie = self.bus.ie;
-        let pending = ie & self.bus.io[0x0F] & 0x1F;
+        // STOP halts the CPU (and LCD) until a button is pressed.
+        if self.cpu.stopped {
+            if self.bus.joypad.state != 0xFF {
+                self.cpu.stopped = false;
+            } else {
+                self.bus.step(4);
+                return 4;
+            }
+        }
 
         if self.cpu.halted {
+            let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
             if pending != 0 {
                 self.cpu.halted = false;
             } else {
@@ -73,18 +81,24 @@ impl Gb {
             }
         }
 
-        if self.cpu.ei_pending {
-            self.cpu.ime = true;
-            self.cpu.ei_pending = false;
-        }
-
+        let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
         if self.cpu.ime && pending != 0 {
             let cycles = self.cpu.take_interrupt(&mut self.bus);
             self.bus.step(cycles);
             return cycles;
         }
 
+        // EI enables interrupts only *after* the instruction following EI runs,
+        // so `EI; RET` returns before an interrupt fires. Capture whether an EI
+        // executed on the previous step: if it did (and DI has not since cleared
+        // the pending flag), the following instruction has now completed and IME
+        // may be enabled. This is also why `EI; DI` leaves IME disabled.
+        let was_ei = self.cpu.ei_pending;
         let cycles = self.cpu.execute(&mut self.bus);
+        if was_ei && self.cpu.ei_pending {
+            self.cpu.ime = true;
+            self.cpu.ei_pending = false;
+        }
         self.bus.step(cycles);
         cycles
     }
@@ -226,5 +240,54 @@ mod tests {
         assert_eq!(emu.bus.read(0xFF00) & 0x0F, 0x07, "DOWN reads as dpad bit3");
         emu.press_button(BUTTON_RIGHT);
         assert_eq!(emu.bus.read(0xFF00) & 0x0F, 0x06, "DOWN+RIGHT");
+    }
+
+    #[test]
+    fn ei_enables_interrupts_after_next_instruction() {
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let mut emu = Gb::new(cart);
+        emu.bus.ie = 0x01;
+        emu.bus.io[0x0F] = 0x01; // vblank pending
+        emu.bus.cart.rom[0x0100] = 0xFB; // EI
+        emu.bus.cart.rom[0x0101] = 0x00; // NOP
+
+        emu.step(); // EI
+        assert!(!emu.cpu.ime, "IME not yet enabled right after EI");
+        assert_eq!(emu.cpu.pc, 0x0101);
+
+        emu.step(); // NOP (the instruction following EI)
+        assert!(emu.cpu.ime, "IME enabled after the instruction following EI");
+        assert_eq!(emu.cpu.pc, 0x0102, "NOP ran; interrupt not serviced before it");
+
+        emu.step(); // now the pending interrupt fires
+        assert_eq!(emu.cpu.pc, 0x0040, "interrupt serviced once IME is set");
+    }
+
+    #[test]
+    fn di_cancels_pending_ei() {
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let mut emu = Gb::new(cart);
+        emu.bus.ie = 0x01;
+        emu.bus.io[0x0F] = 0x01;
+        emu.bus.cart.rom[0x0100] = 0xFB; // EI
+        emu.bus.cart.rom[0x0101] = 0xF3; // DI
+        emu.step(); // EI
+        emu.step(); // DI
+        assert!(!emu.cpu.ime, "DI cancels the pending EI");
+    }
+
+    #[test]
+    fn stopped_cpu_wakes_on_button_press() {
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let mut emu = Gb::new(cart);
+        emu.bus.cart.rom[0x0100] = 0x10; // STOP
+        emu.bus.cart.rom[0x0101] = 0x00; // padding
+        emu.step();
+        assert!(emu.cpu.stopped);
+        emu.step();
+        assert!(emu.cpu.stopped, "still stopped with no button held");
+        emu.press_button(BUTTON_A);
+        emu.step();
+        assert!(!emu.cpu.stopped, "STOP exits on a button press");
     }
 }
