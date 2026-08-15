@@ -17,6 +17,10 @@ path = "src/bin/probe.rs"
 name = "wav"
 path = "src/bin/wav.rs"
 
+[[bin]]
+name = "run_accuracy"
+path = "src/bin/run_accuracy.rs"
+
 [dependencies]
 emu-core = { workspace = true }
 gb-core = { workspace = true }

@@ -49,12 +49,37 @@ fn shade_to_rgb(shade: u8) -> (u8, u8, u8) {
 }
 
 fn dump_ppm(emu: &Gb, path: &str) {
+    dump_ppm_palette(emu, path, shade_to_rgb);
+}
+
+/// Grayscale dump using the same [0, 85, 170, 255] shade map as `pyboy_ref.py`,
+/// so the two PPMs can be compared byte-for-byte.
+fn dump_ppm_grayscale(emu: &Gb, path: &str) {
     let frame = emu.framebuffer();
     let mut s = String::new();
     s.push_str("P3\n160 144\n255\n");
     for y in 0..144usize {
         for x in 0..160usize {
-            let (r, g, b) = shade_to_rgb(frame[y * 160 + x]);
+            let v = match frame[y * 160 + x] & 3 {
+                0 => 0,
+                1 => 85,
+                2 => 170,
+                _ => 255,
+            };
+            s.push_str(&format!("{v} {v} {v} "));
+        }
+        s.push('\n');
+    }
+    std::fs::write(path, s).expect("write ppm");
+}
+
+fn dump_ppm_palette(emu: &Gb, path: &str, map: fn(u8) -> (u8, u8, u8)) {
+    let frame = emu.framebuffer();
+    let mut s = String::new();
+    s.push_str("P3\n160 144\n255\n");
+    for y in 0..144usize {
+        for x in 0..160usize {
+            let (r, g, b) = map(frame[y * 160 + x]);
             s.push_str(&format!("{r} {g} {b} "));
         }
         s.push('\n');
@@ -71,6 +96,7 @@ fn main() -> ExitCode {
     let mut emu = Gb::new(cart);
 
     let dump_path = std::env::var("GB_DUMP").ok();
+    let grayscale = std::env::var("GB_DUMP_GRAYSCALE").ok();
     let dump_frame: Option<u32> = std::env::var("GB_DUMP_FRAME")
         .ok()
         .and_then(|v| v.parse().ok());
@@ -128,7 +154,11 @@ fn main() -> ExitCode {
         if let Some(p) = &dump_path {
             if let Some(frame) = dump_frame {
                 if f == frame {
-                    dump_ppm(&emu, p);
+                    if grayscale.is_some() {
+                        dump_ppm_grayscale(&emu, p);
+                    } else {
+                        dump_ppm(&emu, p);
+                    }
                 }
             }
         }
@@ -143,6 +173,20 @@ fn main() -> ExitCode {
         }
         if s.contains("fail") || s.contains("Fail") {
             println!("FAILED: {s}");
+            return ExitCode::FAILURE;
+        }
+        // Mooneye Test Suite protocol: on completion the test loads the result
+        // into registers B/C/D/E/H/L and then loops forever on a `JR` to itself.
+        //   pass: B=3 C=5 D=8 E=13 H=21 L=34 (Fibonacci)
+        //   fail: B=C=D=E=H=L=0x42
+        // Emulators are encouraged to read these registers.
+        let regs = [emu.cpu.b, emu.cpu.c, emu.cpu.d, emu.cpu.e, emu.cpu.h, emu.cpu.l];
+        if regs == [3, 5, 8, 13, 21, 34] {
+            println!("PASSED (mooneye registers)");
+            return ExitCode::SUCCESS;
+        }
+        if regs == [0x42, 0x42, 0x42, 0x42, 0x42, 0x42] {
+            println!("FAILED (mooneye registers)");
             return ExitCode::FAILURE;
         }
     }
