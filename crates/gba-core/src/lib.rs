@@ -4,11 +4,13 @@
 //! system through the `Gba` type once implemented (see `gba`), which will
 //! implement [`emu_core::System`].
 
+pub mod apu;
 pub mod bus;
 pub mod cpu;
 pub mod io;
 pub mod ppu;
 
+pub use apu::Apu;
 pub use bus::Bus;
 pub use cpu::Cpu;
 pub use ppu::Ppu;
