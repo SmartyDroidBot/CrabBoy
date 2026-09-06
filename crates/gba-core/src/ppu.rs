@@ -52,12 +52,17 @@ pub struct Ppu {
     bg_prio: [[u8; SCREEN_W]; 4],
     obj_color: [u16; SCREEN_W],
     obj_prio: [u8; SCREEN_W],
+    obj_semi: [bool; SCREEN_W],
     /// Columns covered by OBJ-window sprites this scanline.
     objwin: [bool; SCREEN_W],
     /// Top layer per column after compositing (for color effects).
     top_layer: [u8; SCREEN_W],
     /// Top colour per column after compositing.
     top_color: [u16; SCREEN_W],
+    pub bg2_ref_x: i32,
+    pub bg2_ref_y: i32,
+    pub bg3_ref_x: i32,
+    pub bg3_ref_y: i32,
 }
 
 impl Default for Ppu {
@@ -68,9 +73,14 @@ impl Default for Ppu {
             bg_prio: [[0; SCREEN_W]; 4],
             obj_color: [0; SCREEN_W],
             obj_prio: [0; SCREEN_W],
+            obj_semi: [false; SCREEN_W],
             objwin: [false; SCREEN_W],
             top_layer: [LAYER_BACKDROP; SCREEN_W],
             top_color: [0; SCREEN_W],
+            bg2_ref_x: 0,
+            bg2_ref_y: 0,
+            bg3_ref_x: 0,
+            bg3_ref_y: 0,
         }
     }
 }
@@ -80,13 +90,20 @@ impl Ppu {
         Ppu::default()
     }
 
+    pub fn reload_affine_refs(&mut self, bus: &Bus) {
+        self.bg2_ref_x = ((Self::reg32(bus, 0x28) as i32) << 4) >> 4;
+        self.bg2_ref_y = ((Self::reg32(bus, 0x2C) as i32) << 4) >> 4;
+        self.bg3_ref_x = ((Self::reg32(bus, 0x38) as i32) << 4) >> 4;
+        self.bg3_ref_y = ((Self::reg32(bus, 0x3C) as i32) << 4) >> 4;
+    }
+
     #[inline]
     fn dispcnt(bus: &Bus) -> u16 {
         u16::from_le_bytes([bus.io.regs[0], bus.io.regs[1]])
     }
     #[inline]
     fn bgcnt(bus: &Bus, bg: usize) -> u16 {
-        let o = 0x10 + bg * 8;
+        let o = 0x08 + bg * 2;
         u16::from_le_bytes([bus.io.regs[o], bus.io.regs[o + 1]])
     }
     #[inline]
@@ -127,7 +144,7 @@ impl Ppu {
     pub fn render_scanline(&mut self, bus: &Bus, y: u32) {
         let disp = Self::dispcnt(bus);
         // Forced blank: fill white.
-        if disp & (1 << 6) != 0 {
+        if disp & (1 << 7) != 0 {
             for x in 0..SCREEN_W {
                 self.framebuffer[y as usize * SCREEN_W + x] = 0x7FFF;
             }
@@ -149,6 +166,7 @@ impl Ppu {
         self.bg_prio = [[0; SCREEN_W]; 4];
         self.objwin = [false; SCREEN_W];
         self.obj_prio = [0; SCREEN_W];
+        self.obj_semi = [false; SCREEN_W];
 
         for (bg, &enabled) in bg_enabled.iter().enumerate() {
             if !enabled {
@@ -160,10 +178,10 @@ impl Ppu {
                     if bg <= 1 {
                         self.render_text(bus, bg, y);
                     } else {
-                        self.render_affine(bus, bg, y);
+                        self.render_affine(bus, bg);
                     }
                 }
-                2 => self.render_affine(bus, bg, y),
+                2 => self.render_affine(bus, bg),
                 3..=5
                     if bg == 2 => {
                         self.render_bitmap(bus, mode, y);
@@ -175,6 +193,16 @@ impl Ppu {
             self.render_obj(bus, y, disp);
         }
         self.composite(bus, y, win0, win1, obj_win);
+
+        // Advance internal affine reference points by PB/PD per scanline.
+        let pb2 = Self::reg16(bus, 0x22) as i16 as i32;
+        let pd2 = Self::reg16(bus, 0x26) as i16 as i32;
+        self.bg2_ref_x = self.bg2_ref_x.wrapping_add(pb2);
+        self.bg2_ref_y = self.bg2_ref_y.wrapping_add(pd2);
+        let pb3 = Self::reg16(bus, 0x32) as i16 as i32;
+        let pd3 = Self::reg16(bus, 0x36) as i16 as i32;
+        self.bg3_ref_x = self.bg3_ref_x.wrapping_add(pb3);
+        self.bg3_ref_y = self.bg3_ref_y.wrapping_add(pd3);
     }
 
     /// Render a text-mode background (BG0-3, tile map + tiles + palettes).
@@ -182,11 +210,12 @@ impl Ppu {
         let cnt = Self::bgcnt(bus, bg);
         let priority = (cnt & 3) as u8;
         let char_base = ((cnt >> 2) & 3) as usize;
-        let palette256 = cnt & (1 << 6) != 0;
-        let screen_base = ((cnt >> 7) & 31) as usize;
+        let mosaic = cnt & (1 << 6) != 0;
+        let palette256 = cnt & (1 << 7) != 0;
+        let screen_base = ((cnt >> 8) & 31) as usize;
         let size = ((cnt >> 14) & 3) as usize;
-        let hofs = Self::reg16(bus, 0x12 + bg * 8) as u32;
-        let vofs = Self::reg16(bus, 0x14 + bg * 8) as u32;
+        let hofs = Self::reg16(bus, 0x10 + bg * 4) as u32;
+        let vofs = Self::reg16(bus, 0x12 + bg * 4) as u32;
 
         let (tile_w, tile_h) = match size {
             0 => (32, 32),
@@ -195,19 +224,32 @@ impl Ppu {
             _ => (64, 64),
         };
         let map = screen_base * 0x800;
-        let char_block_byte = if palette256 { 0x8000 } else { 0x4000 };
-        let char_base_byte = char_base * char_block_byte;
+        let char_base_byte = char_base * 0x4000;
 
-        let mosaic = (cnt >> 4) & 3 != 0;
-        let mh = if mosaic { (Self::reg16(bus, 0x4C) & 0x0F) as usize } else { 0 };
+        let mosaic_reg = Self::reg16(bus, 0x4C);
+        let mh = if mosaic { (mosaic_reg & 0x0F) as u32 + 1 } else { 0 };
+        let mv = if mosaic { ((mosaic_reg >> 4) & 0x0F) as u32 + 1 } else { 0 };
 
+        let eff_y = if mv > 0 { y - (y % mv) } else { y };
         for x in 0..SCREEN_W {
-            let mx = if mosaic { x & !mh } else { x };
-            let sx = (mx as u32).wrapping_add(hofs) & (tile_w as u32 * 8 - 1);
-            let sy = y.wrapping_add(vofs) & (tile_h as u32 * 8 - 1);
+            let mx = if mh > 0 { (x as u32) - ((x as u32) % mh) } else { x as u32 };
+            let sx = mx.wrapping_add(hofs) & (tile_w as u32 * 8 - 1);
+            let sy = eff_y.wrapping_add(vofs) & (tile_h as u32 * 8 - 1);
             let tx = (sx / 8) as usize;
             let ty = (sy / 8) as usize;
-            let entry_addr = map + (ty * tile_w + tx) * 2;
+            // GBA text BGs use 32x32 tile screen blocks (0x800 bytes each).
+            // For sizes >32 tiles, extra screens follow sequentially.
+            let screen_x = tx / 32;
+            let screen_y = ty / 32;
+            let local_tx = tx % 32;
+            let local_ty = ty % 32;
+            let screen_idx = match size {
+                1 => screen_x,              // 64x32: screens 0,1 left-right
+                2 => screen_y,              // 32x64: screens 0,1 top-bottom
+                3 => screen_y * 2 + screen_x, // 64x64: 4 screens row-major
+                _ => 0,                     // 32x32: single screen
+            };
+            let entry_addr = map + screen_idx * 0x800 + (local_ty * 32 + local_tx) * 2;
             let entry = Self::vram16(bus, entry_addr);
 
             let tile = (entry & 0x3FF) as usize;
@@ -224,20 +266,16 @@ impl Ppu {
                 py = 7 - py;
             }
 
-            let tile_off = tile * if palette256 { 64 } else { 32 } + py * 8 + px;
-            let byte = bus.vram[Self::vram_index(char_base_byte + tile_off)];
             let (color_idx, opaque) = if palette256 {
+                let tile_off = tile * 64 + py * 8 + px;
+                let byte = bus.vram[Self::vram_index(char_base_byte + tile_off)];
                 (byte as u32, byte != 0)
             } else {
-                let lo = byte & 0x0F;
-                let hi = (byte >> 4) & 0x0F;
-                if lo != 0 {
-                    (pal_bank as u32 * 16 + lo as u32, true)
-                } else if hi != 0 {
-                    (pal_bank as u32 * 16 + hi as u32, true)
-                } else {
-                    (0, false)
-                }
+                let tile_off = tile * 32 + py * 4 + px / 2;
+                let byte = bus.vram[Self::vram_index(char_base_byte + tile_off)];
+                // Each byte holds two 4bpp pixels: lo nibble = left (even px), hi = right (odd px).
+                let nibble = if px & 1 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F };
+                (pal_bank as u32 * 16 + nibble as u32, nibble != 0)
             };
             if !opaque {
                 continue;
@@ -248,52 +286,54 @@ impl Ppu {
     }
 
     /// Render an affine background (BG2/BG3 in modes 1/2).
-    fn render_affine(&mut self, bus: &Bus, bg: usize, y: u32) {
+    fn render_affine(&mut self, bus: &Bus, bg: usize) {
         let cnt = Self::bgcnt(bus, bg);
         let priority = (cnt & 3) as u8;
-        let screen_base = ((cnt >> 7) & 31) as usize;
+        let char_base = ((cnt >> 2) & 3) as usize;
+        let char_base_byte = char_base * 0x4000;
+        let mosaic = cnt & (1 << 6) != 0;
+        let screen_base = ((cnt >> 8) & 31) as usize;
         let size = ((cnt >> 14) & 3) as usize;
-        let wrap = ((cnt >> 12) & 3) != 0;
-        // BG2 affine parameters at 0x30, BG3 at 0x40.
-        let base = if bg == 2 { 0x30 } else { 0x40 };
+        let wrap = ((cnt >> 13) & 1) != 0;
+        // BG2 affine parameters at 0x20, BG3 at 0x30.
+        let base = if bg == 2 { 0x20 } else { 0x30 };
         let pa = Self::reg16(bus, base) as i16 as i32;
-        let pb = Self::reg16(bus, base + 2) as i16 as i32;
         let pc = Self::reg16(bus, base + 4) as i16 as i32;
-        let pd = Self::reg16(bus, base + 6) as i16 as i32;
-        let ref_x = Self::reg32(bus, base + 8) as i32;
-        let ref_y = Self::reg32(bus, base + 12) as i32;
 
         let (tile_w, tile_h) = match size {
-            0 => (32, 32),
-            1 => (64, 64),
-            2 => (128, 128),
-            _ => (256, 256),
+            0 => (16, 16),
+            1 => (32, 32),
+            2 => (64, 64),
+            _ => (128, 128),
         };
         let map = screen_base * 0x800;
 
-        let ix = (ref_x as i64 + (pb as i64) * (y as i64) * 256) >> 8;
-        let iy = (ref_y as i64 + (pd as i64) * (y as i64) * 256) >> 8;
+        let mosaic_reg = Self::reg16(bus, 0x4C);
+        let mh = if mosaic { (mosaic_reg & 0x0F) as u32 + 1 } else { 0 };
+
+        let ix = if bg == 2 { self.bg2_ref_x as i64 } else { self.bg3_ref_x as i64 };
+        let iy = if bg == 2 { self.bg2_ref_y as i64 } else { self.bg3_ref_y as i64 };
 
         for x in 0..SCREEN_W {
-            let sx = ix + (pa as i64) * (x as i64);
-            let sy = iy + (pc as i64) * (x as i64);
+            let eff_x = if mh > 0 { (x as u32) - ((x as u32) % mh) } else { x as u32 };
+            let sx = (ix + (pa as i64) * (eff_x as i64)) >> 8;
+            let sy = (iy + (pc as i64) * (eff_x as i64)) >> 8;
+            let w = tile_w as i64 * 8;
+            let h = tile_h as i64 * 8;
             if !wrap {
-                let w = tile_w as i64 * 8;
-                let h = tile_h as i64 * 8;
                 if sx < 0 || sx >= w || sy < 0 || sy >= h {
                     continue;
                 }
             }
-            let sx = sx & (tile_w as i64 * 8 - 1);
-            let sy = sy & (tile_h as i64 * 8 - 1);
-            let tx = (sx / 8) as usize;
-            let ty = (sy / 8) as usize;
-            let entry_addr = map + (ty * tile_w + tx) * 2;
-            let entry = Self::vram16(bus, entry_addr);
-            let tile = (entry & 0x3FF) as usize;
-            let px = (sx % 8) as usize;
-            let py = (sy % 8) as usize;
-            let byte = bus.vram[Self::vram_index(tile * 64 + py * 8 + px)];
+            let sx = (sx.rem_euclid(w)) as usize;
+            let sy = (sy.rem_euclid(h)) as usize;
+            let tx = sx / 8;
+            let ty = sy / 8;
+            let entry_addr = map + ty * tile_w + tx;
+            let tile = bus.vram[Self::vram_index(entry_addr)] as usize;
+            let px = sx % 8;
+            let py = sy % 8;
+            let byte = bus.vram[Self::vram_index(char_base_byte + tile * 64 + py * 8 + px)];
             if byte == 0 {
                 continue;
             }
@@ -305,7 +345,7 @@ impl Ppu {
     /// Render a bitmap background (modes 3/4/5).
     fn render_bitmap(&mut self, bus: &Bus, mode: usize, y: u32) {
         let disp = Self::dispcnt(bus);
-        let frame_page = (disp >> 3) & 1 != 0;
+        let frame_page = (disp >> 4) & 1 != 0;
         for x in 0..SCREEN_W {
             if mode == 3 {
                 let addr = (y as usize * SCREEN_W + x) * 2;
@@ -338,7 +378,10 @@ impl Ppu {
             [16, 32, 32, 64],
             [8, 8, 16, 32],
         ];
-        let obj_1d = disp & (1 << 5) != 0;
+        let obj_1d = disp & (1 << 6) != 0;
+        let mosaic_reg = Self::reg16(bus, 0x4C);
+        let obj_mh = ((mosaic_reg >> 8) & 0x0F) as u32 + 1;
+        let obj_mv = ((mosaic_reg >> 12) & 0x0F) as u32 + 1;
 
         for i in 0..128 {
             let o = i * 8;
@@ -349,10 +392,11 @@ impl Ppu {
             let y_pos = (a0 & 0xFF) as i32;
             let affine_mode = (a0 >> 8) & 3;
             let mode = (a0 >> 10) & 3;
+            let obj_mosaic = a0 & (1 << 12) != 0;
             let palette256 = a0 & (1 << 13) != 0;
             let shape = ((a0 >> 14) & 3) as usize;
             let x_pos = (a1 & 0x1FF) as i32;
-            let size = ((a1 >> 10) & 3) as usize;
+            let size = ((a1 >> 14) & 3) as usize;
             let hflip = a1 & (1 << 12) != 0;
             let vflip = a1 & (1 << 13) != 0;
             let affine_index = ((a1 >> 9) & 31) as usize;
@@ -360,6 +404,9 @@ impl Ppu {
             let priority = ((a2 >> 10) & 3) as u8;
             let pal_bank = ((a2 >> 12) & 0xF) as usize;
 
+            if shape >= 3 {
+                continue;
+            }
             let (w, h) = {
                 let w = SIZES[shape][size];
                 let h = if shape == 0 {
@@ -371,17 +418,19 @@ impl Ppu {
                 };
                 (w, h)
             };
-            let affine = affine_mode != 0;
+            let affine = affine_mode == 1 || affine_mode == 3;
+            let double_size = affine_mode == 3;
+            let (draw_w, draw_h) = if double_size { (w * 2, h * 2) } else { (w, h) };
 
             // Affine parameters (signed 8.8) for the selected matrix.
             let (pa, pb, pc, pd) = if affine {
-                let ao = (affine_index / 2) * 8;
+                let ao = affine_index * 32;
                 let ao = ao & 0x3FF;
                 (
-                    u16::from_le_bytes([bus.oam[ao], bus.oam[ao + 1]]) as i16 as i32,
-                    u16::from_le_bytes([bus.oam[ao + 2], bus.oam[ao + 3]]) as i16 as i32,
-                    u16::from_le_bytes([bus.oam[ao + 4], bus.oam[ao + 5]]) as i16 as i32,
                     u16::from_le_bytes([bus.oam[ao + 6], bus.oam[ao + 7]]) as i16 as i32,
+                    u16::from_le_bytes([bus.oam[ao + 14], bus.oam[ao + 15]]) as i16 as i32,
+                    u16::from_le_bytes([bus.oam[ao + 22], bus.oam[ao + 23]]) as i16 as i32,
+                    u16::from_le_bytes([bus.oam[ao + 30], bus.oam[ao + 31]]) as i16 as i32,
                 )
             } else {
                 (0, 0, 0, 0)
@@ -389,45 +438,48 @@ impl Ppu {
 
             // OBJ-window sprites (mode 2) don't draw, but mark their columns.
             if mode == 2 {
-                for dx in 0..w {
+                for dx in 0..draw_w {
                     let x = x_pos + dx as i32;
-                    if x >= 0 && (x as usize) < SCREEN_W && y >= (y_pos as u32) && y < (y_pos as u32 + h as u32) {
+                    if x >= 0 && (x as usize) < SCREEN_W && y >= (y_pos as u32) && y < (y_pos as u32 + draw_h as u32) {
                         self.objwin[x as usize] = true;
                     }
                 }
                 continue;
             }
-            if mode == 1 {
-                // Semi-transparent: treat as normal for now.
-            }
 
-            for dy in 0..h {
-                let sy = y_pos + dy as i32;
-                if sy < 0 || sy >= SCREEN_H as i32 {
-                    continue;
-                }
+            for dy in 0..draw_h {
+                let sy = (y_pos + dy as i32) & 0xFF;
+                let sy = if sy >= 160 && y_pos >= 160 { sy - 256 } else { sy };
                 if y != sy as u32 {
                     continue;
                 }
-                for dx in 0..w {
-                    let sx = x_pos + dx as i32;
+                for dx in 0..draw_w {
+                    let sx = (x_pos + dx as i32) & 0x1FF;
+                    let sx = if sx >= 240 && x_pos >= 240 { sx - 512 } else { sx };
                     if sx < 0 || sx >= SCREEN_W as i32 {
                         continue;
                     }
+                    // Apply OBJ mosaic: snap draw coordinates to grid.
+                    let (eff_dx, eff_dy) = if obj_mosaic {
+                        let mdx = dx - (dx as u32 % obj_mh) as usize;
+                        let mdy = dy - (dy as u32 % obj_mv) as usize;
+                        (mdx, mdy)
+                    } else {
+                        (dx, dy)
+                    };
                     // Sample the tile pixel.
                     let (tpx, tpy) = if affine {
-                        // Map back through the inverse matrix (approx via forward).
-                        // Use the matrix to sample: (dx,dy) relative to centre.
-                        let cx = (dx as i32 - (w as i32 / 2)) as i64;
-                        let cy = (dy as i32 - (h as i32 / 2)) as i64;
-                        let mx = (pa as i64 * cx + pb as i64 * cy) >> 8;
-                        let my = (pc as i64 * cx + pd as i64 * cy) >> 8;
-                        let tpx = (mx as i32).rem_euclid(w as i32);
-                        let tpy = (my as i32).rem_euclid(h as i32);
-                        (tpx as usize, tpy as usize)
+                        let cx = eff_dx as i32 - (draw_w as i32 / 2);
+                        let cy = eff_dy as i32 - (draw_h as i32 / 2);
+                        let mx = ((pa as i64 * cx as i64 + pb as i64 * cy as i64) >> 8) + (w as i64 / 2);
+                        let my = ((pc as i64 * cx as i64 + pd as i64 * cy as i64) >> 8) + (h as i64 / 2);
+                        if mx < 0 || mx >= w as i64 || my < 0 || my >= h as i64 {
+                            continue;
+                        }
+                        (mx as usize, my as usize)
                     } else {
-                        let mut tpx = dx;
-                        let mut tpy = dy;
+                        let mut tpx = eff_dx;
+                        let mut tpy = eff_dy;
                         if hflip {
                             tpx = w - 1 - tpx;
                         }
@@ -437,42 +489,36 @@ impl Ppu {
                         (tpx, tpy)
                     };
 
-                    // Tile index: for 2D mapping tiles are laid out in rows; for
-                    // 1D mapping tiles advance per width.
                     let tile_in_row = tpx / 8;
                     let tile_y = tpy / 8;
                     let tiles_per_row = w / 8;
                     let tile_index = if obj_1d {
                         tile_base + tile_y * tiles_per_row + tile_in_row
                     } else {
-                        // 2D: tile_base plus row offset using the standard layout.
-                        tile_base + (tile_y * (32 / 8)) + tile_in_row
+                        tile_base + (tile_y * 32) + tile_in_row
                     };
                     let px = tpx % 8;
                     let py = tpy % 8;
-                    let tile_off = tile_index * (if palette256 { 64 } else { 32 }) + py * 8 + px;
-                    let byte = bus.vram[Self::vram_index(tile_off)];
                     let (color_idx, opaque) = if palette256 {
+                        let tile_off = tile_index * 64 + py * 8 + px;
+                        let byte = bus.vram[Self::vram_index(0x10000 + tile_off)];
                         (byte as usize, byte != 0)
                     } else {
-                        let lo = byte & 0x0F;
-                        let hi = (byte >> 4) & 0x0F;
-                        if lo != 0 {
-                            (pal_bank * 16 + lo as usize, true)
-                        } else if hi != 0 {
-                            (pal_bank * 16 + hi as usize, true)
-                        } else {
-                            (0, false)
-                        }
+                        let tile_off = tile_index * 32 + py * 4 + px / 2;
+                        let byte = bus.vram[Self::vram_index(0x10000 + tile_off)];
+                        // Each byte holds two 4bpp pixels: lo nibble = even px, hi = odd px.
+                        let nibble = if px & 1 == 0 { byte & 0x0F } else { (byte >> 4) & 0x0F } as usize;
+                        (pal_bank * 16 + nibble, nibble != 0)
                     };
                     if !opaque {
                         continue;
                     }
                     let color = Self::obj_palette(bus, color_idx);
-                    // OBJ with equal priority over a BG: OBJ wins here via
-                    // later compositing; store colour + priority.
-                    self.obj_color[sx as usize] = color;
-                    self.obj_prio[sx as usize] = priority + 1;
+                    if self.obj_prio[sx as usize] == 0 || priority + 1 < self.obj_prio[sx as usize] {
+                        self.obj_color[sx as usize] = color;
+                        self.obj_prio[sx as usize] = priority + 1;
+                        self.obj_semi[sx as usize] = mode == 1;
+                    }
                 }
             }
         }
@@ -498,7 +544,6 @@ impl Ppu {
 
         let row = y as usize * SCREEN_W;
         for x in 0..SCREEN_W {
-            // Determine the window covering this pixel.
             let any_window = win0 || win1 || obj_win;
             let mask = if !any_window {
                 0x3F
@@ -512,10 +557,8 @@ impl Ppu {
                 winout & 0x3F
             };
 
-            // Composite by priority: scan topmost-first (p=0 on top), and
-            // within a priority OBJ sits above BG and higher BG above lower.
             let order = [LAYER_OBJ, BG3, BG2, BG1, BG0];
-            let mut color = 0u16;
+            let mut color = Self::bg_palette(bus, 0);
             let mut top_layer = LAYER_BACKDROP;
             let mut found_top = false;
             let mut second_color = 0u16;
@@ -547,28 +590,33 @@ impl Ppu {
             self.top_layer[x] = top_layer;
             self.top_color[x] = color;
 
-            // Color effects.
             let in_first = first_tgt & (1 << top_layer) != 0;
-            let out = match effect {
-                1 if in_first => {
-                    let src = color;
-                    let dst = if have_second { second_color } else { 0 };
-                    Self::alpha_blend(src, dst, eva, evb)
+            let semi = top_layer == LAYER_OBJ && self.obj_semi[x];
+            let out = if semi && have_second {
+                Self::alpha_blend(color, second_color, eva, evb)
+            } else {
+                match effect {
+                    1 if in_first => {
+                        let dst = if have_second { second_color } else { 0 };
+                        Self::alpha_blend(color, dst, eva, evb)
+                    }
+                    2 if in_first => Self::brighten(color, evy),
+                    3 if in_first => Self::darken(color, evy),
+                    _ => color,
                 }
-                2 if in_first => Self::brighten(color, evy),
-                3 if in_first => Self::darken(color, evy),
-                _ => color,
             };
             self.framebuffer[row + x] = out;
         }
     }
 
     fn in_window(x: i32, y: i32, wh: u16, wv: u16) -> bool {
-        let x1 = (wh & 0xFF) as i32;
-        let x2 = ((wh >> 8) & 0xFF) as i32;
-        let y1 = (wv & 0xFF) as i32;
-        let y2 = ((wv >> 8) & 0xFF) as i32;
-        x >= x1 && x <= x2 && y >= y1 && y <= y2
+        let x1 = ((wh >> 8) & 0xFF) as i32;
+        let x2 = (wh & 0xFF) as i32;
+        let y1 = ((wv >> 8) & 0xFF) as i32;
+        let y2 = (wv & 0xFF) as i32;
+        let in_x = if x1 <= x2 { x >= x1 && x < x2 } else { x >= x1 || x < x2 };
+        let in_y = if y1 <= y2 { y >= y1 && y < y2 } else { y >= y1 || y < y2 };
+        in_x && in_y
     }
 
     fn alpha_blend(src: u16, dst: u16, eva: u32, evb: u32) -> u16 {
@@ -618,7 +666,7 @@ mod tests {
     #[test]
     fn forced_blank_is_white() {
         let mut bus = test_bus();
-        set16(&mut bus, 0, 1 << 6); // forced blank
+        set16(&mut bus, 0, 1 << 7); // forced blank
         let mut ppu = Ppu::new();
         ppu.render_scanline(&bus, 0);
         assert_eq!(ppu.framebuffer[0], 0x7FFF);
@@ -643,8 +691,8 @@ mod tests {
     fn mode0_text_tile() {
         let mut bus = test_bus();
         set16(&mut bus, 0, 0x0100); // mode 0, BG0 enabled
-        // BG0CNT at 0x10: priority 0, char base 0, screen base 0, size 0.
-        set16(&mut bus, 0x10, 0);
+        // BG0CNT at 0x08: priority 0, char base 0, screen base 0, size 0.
+        set16(&mut bus, 0x08, 0);
         // Map entry (0,0) -> tile 1 (stored in VRAM).
         bus.vram[0] = 1;
         bus.vram[1] = 0;
@@ -663,11 +711,11 @@ mod tests {
     fn mode2_affine_identity() {
         let mut bus = test_bus();
         set16(&mut bus, 0, 0x0402); // mode 2, BG2 enabled
-        // BG2CNT at 0x20: priority 0, screen base 0, size 0, no wrap.
-        set16(&mut bus, 0x20, 0);
-        // Identity matrix PA=256 (1.0), PD=256 (BG2 affine params at 0x30).
-        set16(&mut bus, 0x30, 256);
-        set16(&mut bus, 0x36, 256);
+        // BG2CNT at 0x0C: priority 0, screen base 0, size 0, no wrap.
+        set16(&mut bus, 0x0C, 0);
+        // Identity matrix PA=256 (1.0), PD=256 (BG2 affine params at 0x20).
+        set16(&mut bus, 0x20, 256);
+        set16(&mut bus, 0x26, 256);
         // Map entry (0,0) -> tile 1; tile 1 pixel (0,0) -> 7.
         bus.vram[0] = 1;
         bus.vram[1] = 0;
@@ -692,8 +740,8 @@ mod tests {
         bus.oam[3] = 0;
         bus.oam[4] = 2; // tile 2
         bus.oam[5] = 0;
-        // Tile 2, 16-color: byte offset 2*32. Pixel (0,0) -> 3.
-        bus.vram[2 * 32] = 3;
+        // Tile 2, 16-color in OBJ block (0x10000): byte offset 0x10000 + 2*32. Pixel (0,0) -> 3.
+        bus.vram[0x10000 + 2 * 32] = 3;
         let yellow = rgb(31, 31, 0);
         bus.palram[0x200 + 3 * 2] = yellow as u8;
         bus.palram[0x200 + 3 * 2 + 1] = (yellow >> 8) as u8;

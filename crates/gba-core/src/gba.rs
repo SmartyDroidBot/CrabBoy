@@ -9,6 +9,8 @@
 use crate::apu::Apu;
 use crate::bus::Bus;
 use crate::cpu::Cpu;
+use crate::cpu::flag;
+use crate::cpu::mode;
 use crate::io::irq;
 use crate::ppu::Ppu;
 use crate::{dma::Timing, ppu};
@@ -31,6 +33,8 @@ pub struct Gba {
     pub(crate) line: u32,
     /// Frames completed (for save states / info).
     pub(crate) frame_count: u64,
+    /// The first unrecognised BIOS SWI executed (diagnostics).
+    pub last_unknown_swi: Option<u32>,
 }
 
 impl Gba {
@@ -40,11 +44,15 @@ impl Gba {
         // vector, which copies the cart header to IWRAM and branches to the
         // cartridge entry point. Without a BIOS dump we skip straight to the
         // cartridge at 0x08000000 (the ROM's first word is its entry branch)
-        // and give it the stack pointer the BIOS would have set up.
+        // and give it the stack pointer the BIOS would have set up. The real
+        // BIOS enables IRQs before handing control to the game, so clear the
+        // CPSR I-flag (the hardware reset sets it).
+        cpu.set_cpsr(cpu.cpsr() & !flag::I);
         cpu.set_pc(0x0800_0000);
-        cpu.set_reg(13, 0x0300_7F00);
+        cpu.set_reg(13, 0x0300_7F00); // SP_svc (current mode is SVC)
+        cpu.set_mode_sp(mode::IRQ, 0x0300_7FA0); // SP_irq (BIOS default)
         let bus = Bus::new(rom);
-        Gba { cpu, bus, ppu: Ppu::new(), apu: Apu::new(), line_cycles: 0, line: 0, frame_count: 0 }
+        Gba { cpu, bus, ppu: Ppu::new(), apu: Apu::new(), line_cycles: 0, line: 0, frame_count: 0, last_unknown_swi: None }
     }
 
     /// Construct a `Box<dyn System>` from ROM bytes (frontend convenience).
@@ -52,14 +60,85 @@ impl Gba {
         Box::new(Gba::new(rom))
     }
 
+    /// Construct a system that boots a real BIOS dump from the reset vector
+    /// (`0x00000000`). The BIOS runs its POST/intro and launches the cartridge,
+    /// setting up the stack pointers and boot RAM that a skip-BIOS start omits.
+    ///
+    /// When `cold` is true the BIOS performs a full cold boot (logo intro);
+    /// when false it sets POSTFLG for a warm boot that skips the intro.
+    pub fn with_bios(rom: Vec<u8>, bios: Vec<u8>, cold: bool) -> Gba {
+        let mut gba = Gba::new(rom);
+        gba.cpu.set_has_bios(true);
+        gba.bus.set_bios(bios);
+        if !cold {
+            // POSTFLG=1 requests a warm boot, skipping the ~2s "Nintendo" logo.
+            gba.bus.io.regs[0x300] = 1;
+        }
+        // The real GBA powers on in SVC mode at the BIOS reset vector.
+        gba.cpu.set_pc(0x0000_0000);
+        gba
+    }
+
     /// Advance the machine by `cycles` (timers, APU, PPU scanlines, DMA).
     fn advance(&mut self, cycles: u32) {
         self.bus.timers.step(cycles);
+        for i in 0..4 {
+            if self.bus.timers.just_overflowed(i) {
+                self.apu.timer_overflow(i as u8);
+                self.check_dma_fifo(i);
+            }
+        }
         self.apu.step(cycles);
         self.line_cycles += cycles;
         while self.line_cycles >= ppu::CYCLES_PER_LINE {
             self.line_cycles -= ppu::CYCLES_PER_LINE;
             self.tick_line();
+        }
+    }
+
+    fn check_dma_fifo(&mut self, timer_idx: usize) {
+        let cnt_h = self.bus.io.read16(0x82);
+        let dsa_timer = ((cnt_h >> 10) & 1) as usize;
+        let dsb_timer = ((cnt_h >> 14) & 1) as usize;
+
+        // DMA1 feeds FIFO A if dsa_timer matches and FIFO A has <= 16 bytes
+        if dsa_timer == timer_idx && self.apu.fifo_a_count() <= 16 {
+            let mut ch = self.bus.dma.chans[1];
+            if ch.enabled && ch.timing() == Timing::Special {
+                let s = ch.src;
+                for _ in 0..4 {
+                    let w = self.bus.read32(s);
+                    self.apu.push_fifo_a(w as u8);
+                    self.apu.push_fifo_a((w >> 8) as u8);
+                    self.apu.push_fifo_a((w >> 16) as u8);
+                    self.apu.push_fifo_a((w >> 24) as u8);
+                }
+                ch.src = crate::dma::adjust(s, 16, ch.src_adjust());
+                if ch.irq_enable() {
+                    self.bus.dma.flags |= 1 << (8 + 1);
+                }
+                self.bus.dma.chans[1] = ch;
+            }
+        }
+
+        // DMA2 feeds FIFO B if dsb_timer matches and FIFO B has <= 16 bytes
+        if dsb_timer == timer_idx && self.apu.fifo_b_count() <= 16 {
+            let mut ch = self.bus.dma.chans[2];
+            if ch.enabled && ch.timing() == Timing::Special {
+                let s = ch.src;
+                for _ in 0..4 {
+                    let w = self.bus.read32(s);
+                    self.apu.push_fifo_b(w as u8);
+                    self.apu.push_fifo_b((w >> 8) as u8);
+                    self.apu.push_fifo_b((w >> 16) as u8);
+                    self.apu.push_fifo_b((w >> 24) as u8);
+                }
+                ch.src = crate::dma::adjust(s, 16, ch.src_adjust());
+                if ch.irq_enable() {
+                    self.bus.dma.flags |= 1 << (8 + 2);
+                }
+                self.bus.dma.chans[2] = ch;
+            }
         }
     }
 
@@ -76,7 +155,7 @@ impl Gba {
 
         // DISPSTAT at 0x04: low byte = flags + IRQ enables; high byte = VCOUNT
         // setting.
-        let irq_en = self.bus.io.regs[0x05] & 0x07;
+        let irq_en = (self.bus.io.regs[0x04] >> 3) & 0x07;
         let vcount_setting = self.bus.io.regs[0x05] as u32;
         let in_vblank = y >= ppu::VISIBLE_LINES;
         let vblank_flag = if in_vblank { 1 } else { 0 };
@@ -88,7 +167,12 @@ impl Gba {
 
         // VBlank transition.
         if y == ppu::VISIBLE_LINES {
+            self.ppu.reload_affine_refs(&self.bus);
             self.bus.run_dma(Timing::VBlank);
+            if self.cpu.bios_wait_mask().is_some_and(|mask| mask & irq::VBLANK != 0) {
+                self.cpu.complete_bios_wait();
+                self.dispatch_bios_irq(irq::VBLANK);
+            }
             if irq_en & 0x01 != 0 {
                 self.bus.io.raise_irq(irq::VBLANK);
             }
@@ -103,8 +187,27 @@ impl Gba {
             self.bus.io.raise_irq(irq::HBLANK);
         }
 
-        // Write the DISPSTAT flags byte (VBlank + HBlank bits).
-        self.bus.io.regs[0x04] = vblank_flag | (1 << 1);
+        // Write the DISPSTAT flags byte (VBlank + HBlank bits), preserving the
+        // game-written IRQ-enable bits (3-5).
+        // HBlank is set during the H-blank period of every line (visible and VBlank).
+        // In our scanline model, once tick_line runs the HBlank DMA/IRQ it is the
+        // H-blank period, so the bit stays asserted until the next line begins.
+        let enables = self.bus.io.regs[0x04] & 0x38;
+        self.bus.io.regs[0x04] = vblank_flag | (1 << 1) | enables;
+    }
+
+    /// Dispatch the game's IRQ handler as the real BIOS would: enter IRQ mode,
+    /// branch to `[0x03007FFC]`. Called when a bios_wait completes.
+    fn dispatch_bios_irq(&mut self, mask: u16) {
+        let cur = self.bus.read32(crate::bios::BIOS_IF_ADDR);
+        self.bus.write32(crate::bios::BIOS_IF_ADDR, cur | mask as u32);
+        let handler = self.bus.read32(0x0300_7FFC);
+        if handler == 0 || handler == 0xFFFF_FFFF {
+            return;
+        }
+        let lr = self.cpu.pc();
+        self.cpu.irq(lr);
+        self.cpu.set_pc(handler);
     }
 
     fn press_button(&mut self, button: emu_core::Button) {
@@ -141,6 +244,23 @@ impl Gba {
     pub fn step(&mut self) -> u32 {
         self.bus.sync_dev_irq();
 
+        // HALTCNT (0x04000301) write requests CPU halt.
+        if self.bus.io.halt_requested {
+            self.bus.io.halt_requested = false;
+            self.cpu.halted = true;
+        }
+
+        if let Some(mask) = self.cpu.bios_wait_mask() {
+            if self.bus.io.iflags() & mask != 0 {
+                self.bus.io.acknowledge(mask);
+                self.cpu.complete_bios_wait();
+                self.dispatch_bios_irq(mask);
+            } else {
+                self.advance(4);
+                return 4;
+            }
+        }
+
         if self.cpu.halted {
             if self.bus.pending_irq() != 0 {
                 self.cpu.halted = false;
@@ -154,6 +274,12 @@ impl Gba {
         if pending != 0 && !self.cpu.irq_masked() {
             let lr = self.cpu.pc();
             self.cpu.irq(lr);
+            // Without a BIOS, dispatch the IRQ straight to the game's handler
+            // (the real BIOS's `ldr pc, [pc, #-4]` at vector 0x18 jumps through
+            // the handler pointer the game stores at 0x03007FFC).
+            if self.bus.bios.is_empty() {
+                self.cpu.set_pc(self.bus.read32(0x0300_7FFC));
+            }
             self.advance(4);
             return 4;
         }
@@ -164,13 +290,73 @@ impl Gba {
         // Dispatch a BIOS SWI (if any) now that the instruction has finished.
         if let Some(num) = self.cpu.take_bios_call() {
             if !crate::bios::run(&mut self.cpu, &mut self.bus, num) {
-                self.cpu.swi(self.cpu.bios_lr());
+                // Unrecognised SWI: the real BIOS dispatcher would still handle
+                // it, so no-op (return) rather than hanging on the zeroed SVC
+                // vector. Record it so we know which routines to implement.
+                if self.last_unknown_swi != Some(num) {
+                    self.last_unknown_swi = Some(num);
+                    eprintln!("unimplemented BIOS SWI 0x{num:02X}");
+                }
             }
         }
         // Immediate DMA fires as soon as its channel is enabled.
         self.bus.run_dma(Timing::Immediate);
         self.advance(total);
         total
+    }
+/// Current DISPCNT register value (read diagnostics).
+    pub fn dispcnt(&self) -> u16 {
+        self.bus.io.read16(0)
+    }
+
+    /// Frames completed (diagnostics).
+    pub fn frames(&self) -> u64 {
+        self.frame_count
+    }
+
+    /// Current program counter (diagnostics).
+    pub fn pc(&self) -> u32 {
+        self.cpu.pc()
+    }
+
+    /// Whether the CPU is halted (waiting for an IRQ).
+    pub fn halted(&self) -> bool {
+        self.cpu.halted
+    }
+
+    /// Read the instruction word at `pc` for tracing (diagnostics).
+    pub fn peek16(&mut self, pc: u32) -> u32 {
+        self.bus.read16(pc)
+    }
+
+    /// CPU registers (diagnostics).
+    pub fn regs(&self) -> [u32; 16] {
+        self.cpu.dump_regs()
+    }
+
+    /// Current stack pointer (SVC/USR, diagnostics).
+    pub fn sp(&self) -> u32 {
+        self.cpu.sp_raw()
+    }
+
+    /// Read a 32-bit word (diagnostics).
+    pub fn peek32(&mut self, addr: u32) -> u32 {
+        self.bus.read32(addr)
+    }
+
+    /// Number of cycles in one full frame.
+    pub fn frame_cycles(&self) -> u32 {
+        FRAME_CYCLES
+    }
+
+    /// IRQ/exception diagnostics: (IME, IE, IF, handler pointer at 0x03007FFC).
+    pub fn irq_debug(&mut self) -> (bool, u16, u16, u32) {
+        (
+            self.bus.io.ime(),
+            self.bus.io.ie(),
+            self.bus.io.iflags(),
+            self.bus.read32(0x0300_7FFC),
+        )
     }
 }
 
@@ -236,7 +422,12 @@ impl emu_core::System for Gba {
     }
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
-        self.apu.take_audio()
+        let mut buf = self.apu.take_audio();
+        // Cap samples per frame to prevent surplus accumulation in the audio
+        // sink, which would cause ever-growing latency.
+        let max_samples = (self.audio_rate() as usize / 60 + 1) * 2;
+        buf.samples.truncate(max_samples);
+        buf
     }
 
     fn battery_backed(&self) -> bool {
@@ -329,5 +520,44 @@ mod tests {
         gba.step();
         // The branch at 0x08000000 loops back to itself (B .).
         assert_eq!(gba.cpu.pc(), 0x0800_0000);
+    }
+
+    #[test]
+    fn vblank_intr_wait_completes_at_vblank_without_ie() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        assert!(crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05));
+        assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
+        gba.line = ppu::VISIBLE_LINES - 1;
+        gba.tick_line();
+        assert_eq!(gba.cpu.bios_wait_mask(), None);
+    }
+
+    #[test]
+    fn bios_if_flag_cleared_on_entry_and_set_at_vblank() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05);
+        // Flag cleared on IntrWait entry.
+        assert_eq!(gba.peek32(0x0300_7FF8) & 1, 0);
+        // Advance to VBlank.
+        gba.line = ppu::VISIBLE_LINES - 1;
+        gba.tick_line();
+        // Flag set, wait cleared.
+        assert_eq!(gba.cpu.bios_wait_mask(), None);
+        assert_eq!(gba.peek32(0x0300_7FF8) & 1, 1);
+    }
+
+    #[test]
+    fn bios_irq_dispatch_enters_irq_mode() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        // Install a stub handler at 0x03007FFC pointing to IWRAM.
+        gba.bus.write32(0x0300_7FFC, 0x0300_0100);
+        // Install a NOP (MOV r0,r0) at that address.
+        gba.bus.write32(0x0300_0100, 0xE1A0_0000);
+        crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05);
+        gba.line = ppu::VISIBLE_LINES - 1;
+        gba.tick_line();
+        // After dispatch, CPU should be in IRQ mode at handler address.
+        assert_eq!(gba.cpu.pc(), 0x0300_0100);
+        assert_eq!(gba.cpu.cpsr() & 0x1F, crate::cpu::mode::IRQ);
     }
 }

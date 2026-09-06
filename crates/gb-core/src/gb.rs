@@ -236,7 +236,12 @@ impl emu_core::System for Gb {
     }
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
-        std::mem::take(&mut self.bus.apu.buffer)
+        let mut buf = std::mem::take(&mut self.bus.apu.buffer);
+        // Cap samples per frame to prevent surplus accumulation in the audio
+        // sink, which would cause ever-growing latency.
+        let max_samples = (self.audio_rate() as usize / 60 + 1) * 2;
+        buf.samples.truncate(max_samples);
+        buf
     }
 
     fn battery_backed(&self) -> bool {
