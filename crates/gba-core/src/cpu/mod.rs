@@ -783,16 +783,122 @@ mod tests {
         cpu.regs[0] = 0x200;
         cpu.regs[1] = 0x10;
         cpu.regs[2] = 0xCAFEBABE;
-        // STR r2, [r0, r1]: 0101 0 0 0 Rb(000) Ro(001) Rd(010) = 0x5000 | (1<<3) | 2
-        thumb(&mut bus, 0, 0x500A);
+        // STR r2, [r0, r1]: format 7, L=0 B=0, Ro=001 Rb=000 Rd=010 = 0x5042.
+        thumb(&mut bus, 0, 0x5042);
         cpu.pc = 0;
         cpu.execute(&mut bus);
         assert_eq!(bus.read32(0x210), 0xCAFEBABE);
-        // LDR r3, [r0, r1] (word, load): 0101 0 0 1 Rb Ro Rd = 0x520B
-        thumb(&mut bus, 0, 0x520B);
+        // LDR r3, [r0, r1]: format 7, L=1 B=0 = 0x5843.
+        thumb(&mut bus, 0, 0x5843);
         cpu.pc = 0;
         cpu.execute(&mut bus);
         assert_eq!(cpu.regs[3], 0xCAFEBABE);
+        // LDRSH r4, [r0, r1]: format 8, H=1 S=1 = 0x5E44.
+        bus.write16(0x210, 0x8001);
+        thumb(&mut bus, 0, 0x5E44);
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[4], 0xFFFF_8001);
+    }
+
+    #[test]
+    fn thumb_push_pop_round_trip() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        cpu.regs[4] = 0x4444_4444;
+        cpu.regs[5] = 0x5555_5555;
+        cpu.regs[6] = 0x6666_6666;
+        cpu.regs[7] = 0x7777_7777;
+        cpu.regs[14] = 0x0800_1234;
+        cpu.regs[13] = 0x1000;
+        thumb(&mut bus, 0, 0xB5F0); // push {r4-r7, lr}
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[13], 0x1000 - 20);
+        // Lowest register at the lowest address, LR on top.
+        assert_eq!(bus.read32(0x1000 - 20), 0x4444_4444);
+        assert_eq!(bus.read32(0x1000 - 16), 0x5555_5555);
+        assert_eq!(bus.read32(0x1000 - 12), 0x6666_6666);
+        assert_eq!(bus.read32(0x1000 - 8), 0x7777_7777);
+        assert_eq!(bus.read32(0x1000 - 4), 0x0800_1234);
+        for r in 4..8 {
+            cpu.regs[r] = 0;
+        }
+        thumb(&mut bus, 2, 0xBCF0); // pop {r4-r7}
+        cpu.pc = 2;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[13], 0x1000 - 4);
+        assert_eq!(cpu.regs[4], 0x4444_4444);
+        assert_eq!(cpu.regs[7], 0x7777_7777);
+    }
+
+    #[test]
+    fn thumb_pop_pc_branches_via_stack() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        cpu.regs[13] = 0x1000;
+        bus.write32(0x1000, 0xAAAA_AAAA);
+        bus.write32(0x1004, 0x0800_2000 | 1);
+        thumb(&mut bus, 0, 0xBD02); // pop {r1, pc}
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[1], 0xAAAA_AAAA);
+        assert_eq!(cpu.pc, 0x0800_2000);
+        assert_eq!(cpu.regs[13], 0x1008);
+        assert!(cpu.in_thumb());
+    }
+
+    #[test]
+    fn thumb_add_sub_register_uses_rs_as_left_operand() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        cpu.regs[0] = 3;
+        cpu.regs[1] = 10;
+        thumb(&mut bus, 0, 0x1842); // add r2, r0, r1
+        thumb(&mut bus, 2, 0x1A43); // sub r3, r0, r1
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[2], 13);
+        assert_eq!(cpu.regs[3], (-7i32) as u32);
+    }
+
+    #[test]
+    fn thumb_ldr_sp_relative_and_ldmia_decode() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        cpu.regs[13] = 0x1000;
+        bus.write32(0x1008, 0x1234_5678);
+        thumb(&mut bus, 0, 0x9A02); // ldr r2, [sp, #8]
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[2], 0x1234_5678);
+        cpu.regs[0] = 0x2000;
+        bus.write32(0x2000, 1);
+        bus.write32(0x2004, 2);
+        thumb(&mut bus, 2, 0xC806); // ldmia r0!, {r1, r2}
+        cpu.pc = 2;
+        cpu.execute(&mut bus);
+        assert_eq!((cpu.regs[1], cpu.regs[2], cpu.regs[0]), (1, 2, 0x2008));
+    }
+
+    #[test]
+    fn thumb_bl_negative_offset() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        // bl 0x80 from 0x100: offset -0x84 -> prefix F7FF, suffix FFBE.
+        thumb(&mut bus, 0x100, 0xF7FF);
+        thumb(&mut bus, 0x102, 0xFFBE);
+        cpu.pc = 0x100;
+        cpu.execute(&mut bus);
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.pc, 0x80);
+        assert_eq!(cpu.regs[14], 0x105);
     }
 
     #[test]

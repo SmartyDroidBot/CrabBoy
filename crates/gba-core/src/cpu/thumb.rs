@@ -26,12 +26,19 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             }
         }
         9 => ldr_pc_rel(cpu, bus, inst),
-        10 => ldr_str_reg(cpu, bus, inst),
-        11 => ldrh_signed_reg(cpu, bus, inst),
+        // Formats 7 and 8 share the top bits 0101; bit 9 picks the
+        // sign-extended/halfword family.
+        10 | 11 => {
+            if inst & (1 << 9) != 0 {
+                ldrh_signed_reg(cpu, bus, inst);
+            } else {
+                ldr_str_reg(cpu, bus, inst);
+            }
+        }
         12 | 13 => ldr_str_word_imm(cpu, bus, inst),
         14 | 15 => ldr_str_byte_imm(cpu, bus, inst),
         16 | 17 => ldr_str_half_imm(cpu, bus, inst),
-        18 => ldr_str_sp_rel(cpu, bus, inst),
+        18 | 19 => ldr_str_sp_rel(cpu, bus, inst),
         20 | 21 => add_pc_or_sp(cpu, inst),
         22 => {
             if inst & (1 << 10) != 0 {
@@ -40,7 +47,9 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
                 add_sub_sp(cpu, inst);
             }
         }
-        24 => ldm_stm(cpu, bus, inst),
+        // POP is 1011 110 R rlist (top five bits 10111).
+        23 => push_pop(cpu, bus, inst),
+        24 | 25 => ldm_stm(cpu, bus, inst),
         26 | 27 => {
             if inst & 0xFF00 == 0xDF00 {
                 let num = inst & 0xFF;
@@ -88,10 +97,11 @@ fn add_sub(cpu: &mut Cpu, inst: u32) {
         cpu.set_reg(rd, r);
         set_flags(cpu, r, c, v);
     } else {
+        // Format 2 is `Rd = Rs op Rn` with Rs in bits 5:3 and Rn in bits 8:6.
         let rs = (inst >> 3) & 7;
         let rn_field = (inst >> 6) & 7;
-        let a = rn(cpu, rn_field);
-        let b = rn(cpu, rs);
+        let a = rn(cpu, rs);
+        let b = rn(cpu, rn_field);
         let (r, c, v) = if op { sub(a, b) } else { add(a, b) };
         cpu.set_reg(rd, r);
         set_flags(cpu, r, c, v);
@@ -227,11 +237,12 @@ fn ldr_pc_rel(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     cpu.add_cycles(1);
 }
 
+/// Format 7: `0101 L B 0 Ro Rb Rd`, word/byte with register offset.
 fn ldr_str_reg(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
+    let l = inst & (1 << 11) != 0;
     let i = inst & (1 << 10) != 0; // 0=word, 1=byte
-    let l = inst & (1 << 9) != 0;
-    let rb = (inst >> 6) & 7;
-    let ro = (inst >> 3) & 7;
+    let ro = (inst >> 6) & 7;
+    let rb = (inst >> 3) & 7;
     let rd = inst & 7;
     let addr = rn(cpu, rb).wrapping_add(rn(cpu, ro));
     if l {
@@ -248,27 +259,17 @@ fn ldr_str_reg(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     cpu.add_cycles(1);
 }
 
+/// Format 8: `0101 H S 1 Ro Rb Rd`; (H,S) = STRH, LDSB, LDRH, LDSH.
 fn ldrh_signed_reg(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
-    let rb = (inst >> 6) & 7;
-    let ro = (inst >> 3) & 7;
+    let ro = (inst >> 6) & 7;
+    let rb = (inst >> 3) & 7;
     let rd = inst & 7;
     let addr = rn(cpu, rb).wrapping_add(rn(cpu, ro));
-    if inst & (1 << 10) != 0 {
-        // Sign-extended.
-        let l = inst & (1 << 9) != 0;
-        let v = if l {
-            (bus.read16(addr) as i16) as u32
-        } else {
-            (bus.read8(addr) as i8) as u32
-        };
-        cpu.set_reg(rd, v);
-    } else {
-        let l = inst & (1 << 9) != 0;
-        if l {
-            cpu.set_reg(rd, bus.read16(addr));
-        } else {
-            bus.write16(addr, rn(cpu, rd));
-        }
+    match (inst >> 10) & 3 {
+        0 => bus.write16(addr, rn(cpu, rd)),
+        1 => cpu.set_reg(rd, (bus.read8(addr) as i8) as u32),
+        2 => cpu.set_reg(rd, bus.read16(addr)),
+        _ => cpu.set_reg(rd, (bus.read16(addr) as i16) as u32),
     }
     cpu.add_cycles(1);
 }
@@ -363,12 +364,13 @@ fn push_pop(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let count = rlist.count_ones() + if has_lr { 1 } else { 0 };
     let sp = rn(cpu, 13);
     if !l {
-        // PUSH (STMDB, descending, with LR).
-        let mut addr = sp.wrapping_sub(4);
+        // PUSH (STMDB): the lowest-numbered register lands at the lowest
+        // address and LR at the highest, mirroring the ascending POP.
+        let mut addr = sp.wrapping_sub(4 * count);
         for r in 0..8u32 {
             if rlist & (1 << r) != 0 {
                 bus.write32(addr, rn(cpu, r));
-                addr = addr.wrapping_sub(4);
+                addr = addr.wrapping_add(4);
             }
         }
         if has_lr {
@@ -453,20 +455,26 @@ fn branch_uncond(cpu: &mut Cpu, inst: u32) {
 }
 
 fn bl_upper(cpu: &mut Cpu, inst: u32) {
-    // LR = PC + 4 + (offset_top << 12)
+    // 11110 offset11: LR = (prefix PC + 4) + SignExtend(offset11) << 12.
+    // `cpu.pc` already points at the suffix halfword (prefix + 2).
     let off = inst & 0x7FF;
-    let lr = cpu.pc.wrapping_add(2).wrapping_add(off << 12);
+    let top = if off & 0x400 != 0 {
+        off | 0xFFFF_F800
+    } else {
+        off
+    };
+    let lr = cpu.pc.wrapping_add(2).wrapping_add(top << 12);
     cpu.set_reg(14, lr);
     cpu.add_cycles(1);
 }
 
 fn bl_lower(cpu: &mut Cpu, inst: u32) {
+    // 11111 offset11: target = LR + (offset11 << 1); LR = next | 1.
     let off = inst & 0x7FF;
     let target = cpu.reg(14).wrapping_add(off << 1);
-    // Return address = address after the first half (self.pc), with bit 0 set.
     cpu.set_reg(14, cpu.pc | 1);
     cpu.branch(target);
-    cpu.add_cycles(1);
+    cpu.add_cycles(3);
 }
 
 fn cond_holds(cpu: &Cpu, cond: u32) -> bool {
