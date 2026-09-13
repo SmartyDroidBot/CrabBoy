@@ -19,10 +19,14 @@ pub(crate) fn run(cpu: &mut Cpu, bus: &mut Bus, num: u32) -> bool {
         0x06 => div(cpu),
         0x07 => div_arm(cpu),
         0x08 => sqrt(cpu),
+        0x09 => arc_tan(cpu),
         0x0A => arc_tan2(cpu),
         0x0B => cpu_set(cpu, bus),
         0x0C => cpu_fast_set(cpu, bus),
         0x0D => get_bios_checksum(cpu),
+        0x0E => bg_affine_set(cpu, bus),
+        0x0F => obj_affine_set(cpu, bus),
+        0x10 => bit_unpack(cpu, bus),
         0x11 => lz77(cpu, bus, Unit::Byte),
         0x12 => lz77(cpu, bus, Unit::Half),
         0x13 => huff(cpu, bus),
@@ -88,96 +92,171 @@ fn vblank_intr_wait(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     true
 }
 
+/// Signed division as the BIOS performs it. Division by zero cannot be
+/// reproduced exactly (the BIOS loops for |num| > 1); follow mGBA's HLE and
+/// return the sign of the numerator with the numerator as remainder.
+fn divide(num: i32, den: i32) -> (i32, i32) {
+    if den == 0 {
+        (if num < 0 { -1 } else { 1 }, num)
+    } else {
+        (num.wrapping_div(den), num.wrapping_rem(den))
+    }
+}
+
 /// 0x06 Div: r0/r1 -> r0 = quotient, r1 = remainder, r3 = |quotient|.
 fn div(cpu: &mut Cpu) -> bool {
-    let num = cpu.reg_raw(0) as i32;
-    let den = cpu.reg_raw(1) as i32;
-    if den == 0 {
-        cpu.set_reg(0, 0);
-        cpu.set_reg(1, 0);
-        cpu.set_reg(3, 0);
-    } else {
-        let q = (num as i64 / den as i64) as i32;
-        let r = (num as i64 % den as i64) as i32;
-        cpu.set_reg(0, q as u32);
-        cpu.set_reg(1, r as u32);
-        cpu.set_reg(3, q.unsigned_abs());
-    }
+    let (q, r) = divide(cpu.reg_raw(0) as i32, cpu.reg_raw(1) as i32);
+    cpu.set_reg(0, q as u32);
+    cpu.set_reg(1, r as u32);
+    cpu.set_reg(3, q.unsigned_abs());
     true
 }
 
-/// 0x07 DivARM: r1/r2 -> r0 = quotient, r1 = remainder.
+/// 0x07 DivARM: r1/r2 -> r0 = quotient, r1 = remainder, r3 = |quotient|.
 fn div_arm(cpu: &mut Cpu) -> bool {
-    let num = cpu.reg_raw(1) as i32;
-    let den = cpu.reg_raw(2) as i32;
-    if den == 0 {
-        cpu.set_reg(0, 0);
-        cpu.set_reg(1, 0);
-    } else {
-        let q = (num as i64 / den as i64) as i32;
-        let r = (num as i64 % den as i64) as i32;
-        cpu.set_reg(0, q as u32);
-        cpu.set_reg(1, r as u32);
-    }
+    let (q, r) = divide(cpu.reg_raw(1) as i32, cpu.reg_raw(2) as i32);
+    cpu.set_reg(0, q as u32);
+    cpu.set_reg(1, r as u32);
+    cpu.set_reg(3, q.unsigned_abs());
     true
 }
 
-/// 0x08 Sqrt: r0 = isqrt(r0).
+/// 0x08 Sqrt: r0 = floor(sqrt(r0)), computed bit by bit.
 fn sqrt(cpu: &mut Cpu) -> bool {
     let v = cpu.reg_raw(0);
-    cpu.set_reg(0, (v as f64).sqrt() as u32);
+    cpu.set_reg(0, isqrt(v));
     true
 }
 
-/// 0x0A ArcTan2: r0 = atan2(r1, r0) in 0..0xFFFF (full circle = 0x10000).
+fn isqrt(v: u32) -> u32 {
+    let mut rem = v;
+    let mut root = 0u32;
+    let mut bit = 1u32 << 30;
+    while bit > rem {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if rem >= root + bit {
+            rem -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root
+}
+
+/// The BIOS ArcTan polynomial: `i` is a 1.14 fixed-point tangent, the result
+/// an angle with 0x4000 = 90 degrees (only valid for |i| <= 1).
+fn bios_arctan(i: i32) -> i32 {
+    let a = -((i * i) >> 14);
+    let mut b = ((0xA9 * a) >> 14) + 0x390;
+    b = ((b * a) >> 14) + 0x91C;
+    b = ((b * a) >> 14) + 0xFB6;
+    b = ((b * a) >> 14) + 0x16AA;
+    b = ((b * a) >> 14) + 0x2081;
+    b = ((b * a) >> 14) + 0x3651;
+    b = ((b * a) >> 14) + 0xA2F9;
+    (i * b) >> 16
+}
+
+/// 0x09 ArcTan: r0 = tan (1.14 fixed point) -> r0 = angle (0x4000 = 90 deg).
+fn arc_tan(cpu: &mut Cpu) -> bool {
+    let i = cpu.reg_raw(0) as i16 as i32;
+    cpu.set_reg(0, bios_arctan(i) as u32 & 0xFFFF);
+    true
+}
+
+/// 0x0A ArcTan2: r0 = x, r1 = y (signed 16-bit) -> r0 = angle 0..0xFFFF
+/// (full circle = 0x10000), reduced to the ArcTan polynomial per octant.
 fn arc_tan2(cpu: &mut Cpu) -> bool {
-    let x = cpu.reg_raw(0) as i32;
-    let y = cpu.reg_raw(1) as i32;
-    if x == 0 && y == 0 {
-        cpu.set_reg(0, 0);
-        return true;
-    }
-    let ang = (y as f64).atan2(x as f64);
-    let mut norm = ((ang / (2.0 * std::f64::consts::PI)) * 65536.0).round() as i32;
-    if norm < 0 {
-        norm += 65536;
-    }
-    cpu.set_reg(0, norm as u32);
+    let x = cpu.reg_raw(0) as i16 as i32;
+    let y = cpu.reg_raw(1) as i16 as i32;
+    let angle = if y == 0 {
+        if x >= 0 {
+            0
+        } else {
+            0x8000
+        }
+    } else if x == 0 {
+        if y >= 0 {
+            0x4000
+        } else {
+            0xC000
+        }
+    } else if y >= 0 {
+        if x >= 0 {
+            if x >= y {
+                bios_arctan((y << 14) / x)
+            } else {
+                0x4000 - bios_arctan((x << 14) / y)
+            }
+        } else if -x >= y {
+            bios_arctan((y << 14) / x) + 0x8000
+        } else {
+            0x4000 - bios_arctan((x << 14) / y)
+        }
+    } else if x <= 0 {
+        if -x > -y {
+            bios_arctan((y << 14) / x) + 0x8000
+        } else {
+            0xC000 - bios_arctan((x << 14) / y)
+        }
+    } else if x >= -y {
+        bios_arctan((y << 14) / x) + 0x10000
+    } else {
+        0xC000 - bios_arctan((x << 14) / y)
+    };
+    cpu.set_reg(0, angle as u32 & 0xFFFF);
     true
 }
 
-/// 0x0B CpuSet: copy r0[src] -> r1[dst]. r2 bit 26 selects 32-bit mode.
+/// 0x0B CpuSet: copy or fill r0 -> r1. r2 bits 0-20 = unit count, bit 24 =
+/// fill mode (repeat the first source unit), bit 26 = 32-bit units.
 fn cpu_set(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     let mut src = cpu.reg_raw(0);
     let mut dst = cpu.reg_raw(1);
     let ctrl = cpu.reg_raw(2);
-    let count = (ctrl & 0x1FFFFF) as usize;
+    let count = (ctrl & 0x1F_FFFF) as usize;
+    let fill = ctrl & 0x0100_0000 != 0;
     if ctrl & 0x0400_0000 != 0 {
-        let n = count.min(0x8000);
-        for _ in 0..n {
-            let v = bus.read32(src);
+        let fill_value = bus.read32(src);
+        for _ in 0..count {
+            let v = if fill {
+                fill_value
+            } else {
+                let v = bus.read32(src);
+                src = src.wrapping_add(4);
+                v
+            };
             bus.write32(dst, v);
-            src = src.wrapping_add(4);
             dst = dst.wrapping_add(4);
         }
     } else {
-        let n = count.min(0x10000);
-        for _ in 0..n {
-            let v = bus.read16(src);
+        let fill_value = bus.read16(src);
+        for _ in 0..count {
+            let v = if fill {
+                fill_value
+            } else {
+                let v = bus.read16(src);
+                src = src.wrapping_add(2);
+                v
+            };
             bus.write16(dst, v);
-            src = src.wrapping_add(2);
             dst = dst.wrapping_add(2);
         }
     }
     true
 }
 
-/// 0x0C CpuFastSet: 32-bit copy r0[r1]; r2 bit 24 enables 32-bit fill.
+/// 0x0C CpuFastSet: 32-bit copy or fill in blocks of eight words; the count
+/// is rounded up to a multiple of eight as the BIOS's unrolled loop does.
 fn cpu_fast_set(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     let mut src = cpu.reg_raw(0);
     let mut dst = cpu.reg_raw(1);
     let ctrl = cpu.reg_raw(2);
-    let count = ((ctrl & 0x1FFFFF) as usize).min(0x8000);
+    let count = ((ctrl & 0x1F_FFFF) as usize).div_ceil(8) * 8;
     if ctrl & 0x0100_0000 != 0 {
         let v = bus.read32(src);
         for _ in 0..count {
@@ -195,9 +274,136 @@ fn cpu_fast_set(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     true
 }
 
-/// 0x0D GetBIOSChecksum: return a checksum (games only check it is non-zero).
+/// 0x0D GetBIOSChecksum: the checksum of the retail GBA BIOS.
 fn get_bios_checksum(cpu: &mut Cpu) -> bool {
-    cpu.set_reg(0, 0x1234_5678);
+    cpu.set_reg(0, 0xBAAE_187F);
+    true
+}
+
+/// sin(i * 2pi / 256) in 2.14 fixed point; cos is the entry 64 further on.
+const SIN_LUT: [i16; 256] = [
+    0, 402, 804, 1205, 1606, 2006, 2404, 2801, 3196, 3590, 3981, 4370, 4756, 5139, 5520, 5897,
+    6270, 6639, 7005, 7366, 7723, 8076, 8423, 8765, 9102, 9434, 9760, 10080, 10394, 10702, 11003,
+    11297, 11585, 11866, 12140, 12406, 12665, 12916, 13160, 13395, 13623, 13842, 14053, 14256,
+    14449, 14635, 14811, 14978, 15137, 15286, 15426, 15557, 15679, 15791, 15893, 15986, 16069,
+    16143, 16207, 16261, 16305, 16340, 16364, 16379, 16384, 16379, 16364, 16340, 16305, 16261,
+    16207, 16143, 16069, 15986, 15893, 15791, 15679, 15557, 15426, 15286, 15137, 14978, 14811,
+    14635, 14449, 14256, 14053, 13842, 13623, 13395, 13160, 12916, 12665, 12406, 12140, 11866,
+    11585, 11297, 11003, 10702, 10394, 10080, 9760, 9434, 9102, 8765, 8423, 8076, 7723, 7366, 7005,
+    6639, 6270, 5897, 5520, 5139, 4756, 4370, 3981, 3590, 3196, 2801, 2404, 2006, 1606, 1205, 804,
+    402, 0, -402, -804, -1205, -1606, -2006, -2404, -2801, -3196, -3590, -3981, -4370, -4756,
+    -5139, -5520, -5897, -6270, -6639, -7005, -7366, -7723, -8076, -8423, -8765, -9102, -9434,
+    -9760, -10080, -10394, -10702, -11003, -11297, -11585, -11866, -12140, -12406, -12665, -12916,
+    -13160, -13395, -13623, -13842, -14053, -14256, -14449, -14635, -14811, -14978, -15137, -15286,
+    -15426, -15557, -15679, -15791, -15893, -15986, -16069, -16143, -16207, -16261, -16305, -16340,
+    -16364, -16379, -16384, -16379, -16364, -16340, -16305, -16261, -16207, -16143, -16069, -15986,
+    -15893, -15791, -15679, -15557, -15426, -15286, -15137, -14978, -14811, -14635, -14449, -14256,
+    -14053, -13842, -13623, -13395, -13160, -12916, -12665, -12406, -12140, -11866, -11585, -11297,
+    -11003, -10702, -10394, -10080, -9760, -9434, -9102, -8765, -8423, -8076, -7723, -7366, -7005,
+    -6639, -6270, -5897, -5520, -5139, -4756, -4370, -3981, -3590, -3196, -2801, -2404, -2006,
+    -1606, -1205, -804, -402,
+];
+
+/// Rotation matrix entries (8.8 fixed point) for scales `sx`/`sy` (8.8) and
+/// an angle whose top byte indexes the sine table, as the BIOS does.
+fn affine_matrix(sx: i32, sy: i32, alpha: u32) -> (i32, i32, i32, i32) {
+    let theta = ((alpha >> 8) & 0xFF) as usize;
+    let sin = SIN_LUT[theta] as i32;
+    let cos = SIN_LUT[(theta + 64) & 0xFF] as i32;
+    let pa = (sx * cos) >> 14;
+    let pb = -((sx * sin) >> 14);
+    let pc = (sy * sin) >> 14;
+    let pd = (sy * cos) >> 14;
+    (pa, pb, pc, pd)
+}
+
+/// 0x0E BgAffineSet: r0 = source (s32 cx, s32 cy, s16 px, s16 py, s16 sx,
+/// s16 sy, u16 alpha; 20 bytes), r1 = destination (s16 pa, pb, pc, pd; s32
+/// dx, dy; 16 bytes), r2 = count.
+fn bg_affine_set(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let mut src = cpu.reg_raw(0);
+    let mut dst = cpu.reg_raw(1);
+    for _ in 0..cpu.reg_raw(2) {
+        let cx = bus.read32(src) as i32;
+        let cy = bus.read32(src.wrapping_add(4)) as i32;
+        let px = bus.read16(src.wrapping_add(8)) as i16 as i32;
+        let py = bus.read16(src.wrapping_add(10)) as i16 as i32;
+        let sx = bus.read16(src.wrapping_add(12)) as i16 as i32;
+        let sy = bus.read16(src.wrapping_add(14)) as i16 as i32;
+        let alpha = bus.read16(src.wrapping_add(16));
+        src = src.wrapping_add(20);
+        let (pa, pb, pc, pd) = affine_matrix(sx, sy, alpha);
+        let dx = cx.wrapping_sub(pa.wrapping_mul(px).wrapping_add(pb.wrapping_mul(py)));
+        let dy = cy.wrapping_sub(pc.wrapping_mul(px).wrapping_add(pd.wrapping_mul(py)));
+        bus.write16(dst, pa as u32 & 0xFFFF);
+        bus.write16(dst.wrapping_add(2), pb as u32 & 0xFFFF);
+        bus.write16(dst.wrapping_add(4), pc as u32 & 0xFFFF);
+        bus.write16(dst.wrapping_add(6), pd as u32 & 0xFFFF);
+        bus.write32(dst.wrapping_add(8), dx as u32);
+        bus.write32(dst.wrapping_add(12), dy as u32);
+        dst = dst.wrapping_add(16);
+    }
+    true
+}
+
+/// 0x0F ObjAffineSet: r0 = source (s16 sx, s16 sy, u16 alpha; 8 bytes with
+/// padding), r1 = destination, r2 = count, r3 = byte offset between the
+/// four matrix entries (8 when writing straight into OAM).
+fn obj_affine_set(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let mut src = cpu.reg_raw(0);
+    let mut dst = cpu.reg_raw(1);
+    let stride = cpu.reg_raw(3);
+    for _ in 0..cpu.reg_raw(2) {
+        let sx = bus.read16(src) as i16 as i32;
+        let sy = bus.read16(src.wrapping_add(2)) as i16 as i32;
+        let alpha = bus.read16(src.wrapping_add(4));
+        src = src.wrapping_add(8);
+        let (pa, pb, pc, pd) = affine_matrix(sx, sy, alpha);
+        for v in [pa, pb, pc, pd] {
+            bus.write16(dst, v as u32 & 0xFFFF);
+            dst = dst.wrapping_add(stride);
+        }
+    }
+    true
+}
+
+/// 0x10 BitUnPack: r0 = source, r1 = destination (word aligned), r2 = info
+/// block (u16 source length in bytes, u8 source unit width, u8 destination
+/// unit width, u32 data offset with bit 31 = also add it to zero units).
+fn bit_unpack(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let src = cpu.reg_raw(0);
+    let mut dst = cpu.reg_raw(1);
+    let info = cpu.reg_raw(2);
+    let src_len = bus.read16(info) as usize;
+    let src_width = bus.read8(info.wrapping_add(2));
+    let dst_width = bus.read8(info.wrapping_add(3));
+    let bias = bus.read32(info.wrapping_add(4));
+    let offset = bias & 0x7FFF_FFFF;
+    let zero_too = bias & 0x8000_0000 != 0;
+    if !matches!(src_width, 1 | 2 | 4 | 8) || !matches!(dst_width, 1 | 2 | 4 | 8 | 16 | 32) {
+        return false;
+    }
+    let mut out = 0u32;
+    let mut bits = 0u32;
+    for i in 0..src_len as u32 {
+        let byte = bus.read8(src.wrapping_add(i));
+        let mut b = 0;
+        while b < 8 {
+            let mut unit = (byte >> b) & ((1 << src_width) - 1);
+            if unit != 0 || zero_too {
+                unit = unit.wrapping_add(offset);
+            }
+            out |= unit.wrapping_shl(bits);
+            bits += dst_width;
+            if bits >= 32 {
+                bus.write32(dst, out);
+                dst = dst.wrapping_add(4);
+                out = 0;
+                bits = 0;
+            }
+            b += src_width;
+        }
+    }
     true
 }
 
@@ -548,6 +754,150 @@ mod tests {
         // A byte-width stream is rejected by the 16-bit filter.
         let mut bus = rom_bus(&header(8, 1, 4));
         assert!(!run_unpack(&mut bus, 0x18));
+    }
+
+    #[test]
+    fn arc_tan2_covers_the_axes_and_diagonals() {
+        let mut c = Cpu::new();
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        for (x, y, expect) in [
+            (1i32, 0i32, 0u32),
+            (0, 1, 0x4000),
+            (-1, 0, 0x8000),
+            (0, -1, 0xC000),
+            (0, 0, 0),
+        ] {
+            c.set_reg(0, x as u32);
+            c.set_reg(1, y as u32);
+            crate::bios::run(&mut c, &mut bus, 0x0A);
+            assert_eq!(c.reg_raw(0), expect, "atan2({y}, {x})");
+        }
+        c.set_reg(0, 100);
+        c.set_reg(1, 100);
+        crate::bios::run(&mut c, &mut bus, 0x0A);
+        assert!((c.reg_raw(0) as i32 - 0x2000).abs() <= 4);
+        c.set_reg(0, (-100i32) as u32);
+        c.set_reg(1, (-100i32) as u32);
+        crate::bios::run(&mut c, &mut bus, 0x0A);
+        assert!((c.reg_raw(0) as i32 - 0xA000).abs() <= 4);
+        // ArcTan of 1.0 (1.14) is 45 degrees.
+        c.set_reg(0, 0x4000);
+        crate::bios::run(&mut c, &mut bus, 0x09);
+        assert!((c.reg_raw(0) as i32 - 0x2000).abs() <= 4);
+    }
+
+    #[test]
+    fn div_by_zero_follows_the_hle_convention() {
+        let mut c = Cpu::new();
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        c.set_reg(0, (-7i32) as u32);
+        c.set_reg(1, 0);
+        crate::bios::run(&mut c, &mut bus, 0x06);
+        assert_eq!(c.reg_raw(0), (-1i32) as u32);
+        assert_eq!(c.reg_raw(1), (-7i32) as u32);
+        assert_eq!(c.reg_raw(3), 1);
+    }
+
+    #[test]
+    fn sqrt_is_exact_integer_floor() {
+        let mut c = Cpu::new();
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        for (v, r) in [
+            (0u32, 0u32),
+            (1, 1),
+            (2, 1),
+            (81, 9),
+            (99, 9),
+            (u32::MAX, 65535),
+        ] {
+            c.set_reg(0, v);
+            crate::bios::run(&mut c, &mut bus, 0x08);
+            assert_eq!(c.reg_raw(0), r, "sqrt({v})");
+        }
+    }
+
+    #[test]
+    fn cpu_set_fill_mode_repeats_the_first_unit() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write16(0x0300_0000, 0xBEEF);
+        let mut c = Cpu::new();
+        c.set_reg(0, 0x0300_0000);
+        c.set_reg(1, 0x0200_0000);
+        c.set_reg(2, 3 | (1 << 24));
+        crate::bios::run(&mut c, &mut bus, 0x0B);
+        assert_eq!(bus.read16(0x0200_0004), 0xBEEF);
+        // CpuFastSet rounds a count of 3 words up to 8.
+        c.set_reg(0, 0x0300_0000);
+        c.set_reg(1, 0x0200_1000);
+        c.set_reg(2, 3 | (1 << 24));
+        crate::bios::run(&mut c, &mut bus, 0x0C);
+        assert_eq!(bus.read32(0x0200_101C), 0xBEEF);
+    }
+
+    #[test]
+    fn bg_affine_set_rotates_by_ninety_degrees() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        let src = 0x0300_0000;
+        bus.write32(src, 0x1000 << 8); // cx
+        bus.write32(src + 4, 0x2000 << 8); // cy
+        bus.write16(src + 8, 120); // px
+        bus.write16(src + 10, 80); // py
+        bus.write16(src + 12, 0x100); // sx = 1.0
+        bus.write16(src + 14, 0x100); // sy = 1.0
+        bus.write16(src + 16, 0x4000); // 90 degrees
+        let mut c = Cpu::new();
+        c.set_reg(0, src);
+        c.set_reg(1, 0x0300_0100);
+        c.set_reg(2, 1);
+        crate::bios::run(&mut c, &mut bus, 0x0E);
+        let pa = bus.read16(0x0300_0100) as i16;
+        let pb = bus.read16(0x0300_0102) as i16;
+        let pc = bus.read16(0x0300_0104) as i16;
+        let pd = bus.read16(0x0300_0106) as i16;
+        assert_eq!((pa, pb, pc, pd), (0, -0x100, 0x100, 0));
+        let dx = bus.read32(0x0300_0108) as i32;
+        let dy = bus.read32(0x0300_010C) as i32;
+        assert_eq!(dx, (0x1000 << 8) - (0 * 120 + -0x100 * 80));
+        assert_eq!(dy, (0x2000 << 8) - (0x100 * 120 + 0 * 80));
+    }
+
+    #[test]
+    fn obj_affine_set_writes_with_the_oam_stride() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write16(0x0300_0000, 0x200); // sx = 2.0
+        bus.write16(0x0300_0002, 0x080); // sy = 0.5
+        bus.write16(0x0300_0004, 0); // angle 0
+        let mut c = Cpu::new();
+        c.set_reg(0, 0x0300_0000);
+        c.set_reg(1, 0x0700_0006);
+        c.set_reg(2, 1);
+        c.set_reg(3, 8);
+        crate::bios::run(&mut c, &mut bus, 0x0F);
+        assert_eq!(bus.read16(0x0700_0006), 0x200);
+        assert_eq!(bus.read16(0x0700_000E), 0);
+        assert_eq!(bus.read16(0x0700_0016), 0);
+        assert_eq!(bus.read16(0x0700_001E), 0x080);
+    }
+
+    #[test]
+    fn bit_unpack_widens_units_and_applies_the_offset() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        // Two source bytes of 1-bit units -> 4-bit units, offset 5 added to
+        // non-zero units only: 0b0000_0011, 0b1000_0000.
+        bus.write8(0x0300_0000, 0b0000_0011);
+        bus.write8(0x0300_0001, 0b1000_0000);
+        let info = 0x0300_0100;
+        bus.write16(info, 2);
+        bus.write8(info + 2, 1);
+        bus.write8(info + 3, 4);
+        bus.write32(info + 4, 5);
+        let mut c = Cpu::new();
+        c.set_reg(0, 0x0300_0000);
+        c.set_reg(1, 0x0200_0000);
+        c.set_reg(2, info);
+        crate::bios::run(&mut c, &mut bus, 0x10);
+        assert_eq!(bus.read32(0x0200_0000), 0x0000_0066);
+        assert_eq!(bus.read32(0x0200_0004), 0x6000_0000);
     }
 
     #[test]
