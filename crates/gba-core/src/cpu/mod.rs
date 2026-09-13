@@ -657,6 +657,7 @@ mod tests {
     #[test]
     fn arm_swi_enters_svc() {
         let mut cpu = Cpu::new();
+        cpu.set_has_bios(true);
         cpu.set_cpsr(mode::USR);
         let mut bus = TestBus::new();
         arm(&mut bus, 0, 0xEF000000); // SWI 0
@@ -666,8 +667,37 @@ mod tests {
         assert_eq!(cpu.cpsr & 0x1F, mode::SVC);
         assert_ne!(cpu.cpsr & flag::I, 0);
         assert_eq!(cpu.lr[1], 4); // SVC LR = return address
-                                  // SPSR_SVC saved USR mode + no T.
+        assert_eq!(cpu.regs[14], 4);
+        // SPSR_SVC saved USR mode + no T.
         assert_eq!(cpu.spsr[1] & 0x1F, mode::USR);
+    }
+
+    #[test]
+    fn arm_swi_number_is_bits_16_to_23() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        arm(&mut bus, 0, 0xEF0B0000); // swi 0x0B0000 = CpuSet
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.take_bios_call(), Some(0x0B));
+        assert_eq!(cpu.pc, 4, "HLE SWI returns to the next instruction");
+        assert_eq!(cpu.cpsr & 0x1F, mode::USR);
+    }
+
+    #[test]
+    fn thumb_swi_lr_has_no_thumb_bit() {
+        let mut cpu = Cpu::new();
+        cpu.set_has_bios(true);
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        thumb(&mut bus, 0, 0xDF05); // swi 5
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.pc, VECTOR_SWI);
+        assert!(!cpu.in_thumb());
+        assert_eq!(cpu.regs[14], 2);
+        assert_ne!(cpu.spsr[1] & flag::T, 0);
     }
 
     #[test]

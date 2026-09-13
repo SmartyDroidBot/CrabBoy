@@ -304,13 +304,9 @@ impl Gba {
         // Dispatch a BIOS SWI (if any) now that the instruction has finished.
         if let Some(num) = self.cpu.take_bios_call() {
             if !crate::bios::run(&mut self.cpu, &mut self.bus, num) {
-                // Unrecognised SWI: the real BIOS dispatcher would still handle
-                // it, so no-op (return) rather than hanging on the zeroed SVC
-                // vector. Record it so we know which routines to implement.
-                if self.last_unknown_swi != Some(num) {
-                    self.last_unknown_swi = Some(num);
-                    eprintln!("unimplemented BIOS SWI 0x{num:02X}");
-                }
+                // Unimplemented routine: return to the caller and record the
+                // number so the diagnostic tools can report it.
+                self.last_unknown_swi = Some(num);
             }
         }
         // Immediate DMA fires as soon as its channel is enabled.

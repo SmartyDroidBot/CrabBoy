@@ -226,13 +226,15 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         cpu.add_cycles(3);
         return;
     }
-    // SWI
+    // SWI: on the GBA the BIOS function number sits in bits 23:16 of the
+    // comment field (`swi 0x060000` is Div). With a real BIOS the SVC
+    // exception runs its dispatcher; otherwise the HLE dispatcher handles
+    // every number so no call can fall into the zeroed vector.
     if inst & 0x0F00_0000 == 0x0F00_0000 {
-        let num = inst & 0x00FF_FFFF;
-        if crate::bios::is_known(num) {
-            cpu.swi_bios(num);
-        } else {
+        if cpu.has_bios {
             cpu.swi(cpu.pc);
+        } else {
+            cpu.swi_bios((inst >> 16) & 0xFF);
         }
         cpu.add_cycles(3);
         return;

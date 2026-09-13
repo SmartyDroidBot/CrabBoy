@@ -3,23 +3,14 @@
 //! Real GBA games call BIOS routines via `SWI #n` (e.g. `CpuSet` for the boot
 //! header copy, `VBlankIntrWait` for frame sync). With no BIOS dump these calls
 //! would jump to the zeroed vector at `0x00000008` and hang, so we emulate the
-//! common routines directly. Unrecognised SWIs fall through to a normal SVC
-//! exception.
+//! routines directly. Unimplemented SWIs are recorded by the system root and
+//! otherwise act as a return.
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 
-/// The BIOS SWI numbers we implement. Anything else takes a normal SVC
-/// exception.
-pub(crate) fn is_known(num: u32) -> bool {
-    matches!(
-        num,
-        0x01 | 0x02 | 0x05 | 0x06 | 0x07 | 0x08 | 0x0A | 0x0B | 0x0C | 0x0D
-    )
-}
-
-/// Run a BIOS SWI. Returns `true` if handled, `false` if the caller should
-/// fall back to the SVC exception.
+/// Run a BIOS SWI. Returns `true` if handled, `false` if the routine is not
+/// implemented; the caller records it and continues at the next instruction.
 pub(crate) fn run(cpu: &mut Cpu, bus: &mut Bus, num: u32) -> bool {
     match num {
         0x01 => register_ram_reset(cpu, bus),

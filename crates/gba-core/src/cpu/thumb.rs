@@ -52,11 +52,12 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         24 | 25 => ldm_stm(cpu, bus, inst),
         26 | 27 => {
             if inst & 0xFF00 == 0xDF00 {
-                let num = inst & 0xFF;
-                if crate::bios::is_known(num) {
-                    cpu.swi_bios(num);
-                } else {
+                // LR_svc is the plain next-instruction address; the BIOS
+                // dispatcher reads `[lr - 2]` and relies on SPSR.T for width.
+                if cpu.has_bios {
                     cpu.swi(cpu.pc);
+                } else {
+                    cpu.swi_bios(inst & 0xFF);
                 }
                 cpu.add_cycles(3);
             } else {
