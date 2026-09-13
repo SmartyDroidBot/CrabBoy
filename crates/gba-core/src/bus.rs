@@ -541,6 +541,11 @@ impl Bus {
     pub fn pending_irq(&self) -> u16 {
         self.io.pending_irq()
     }
+
+    /// Interrupts that end a HALT (IF & IE, regardless of IME).
+    pub fn wake_irq(&self) -> u16 {
+        self.io.wake_irq()
+    }
 }
 
 impl CpuBus for Bus {
@@ -622,12 +627,43 @@ mod tests {
         assert_ne!(b.io.iflags() & crate::io::IRQ_KEYPAD, 0);
         // Without IE the flag is set but nothing is pending.
         assert_eq!(b.pending_irq() & crate::io::IRQ_KEYPAD, 0);
-        // Enable the keypad IRQ in IE, then it becomes pending.
+        // Enable the keypad IRQ in IE: it wakes a HALT but is not taken
+        // until IME is set.
         b.write16(0x0400_0200, crate::io::IRQ_KEYPAD as u32);
+        assert_ne!(b.wake_irq() & crate::io::IRQ_KEYPAD, 0);
+        assert_eq!(b.pending_irq() & crate::io::IRQ_KEYPAD, 0);
+        b.write16(0x0400_0208, 1);
         assert_ne!(b.pending_irq() & crate::io::IRQ_KEYPAD, 0);
         // Acknowledge: writing 1 to IF clears.
         b.write16(0x0400_0202, crate::io::IRQ_KEYPAD as u32);
         assert_eq!(b.io.iflags() & crate::io::IRQ_KEYPAD, 0);
+    }
+
+    #[test]
+    fn ime_lives_at_0x208_and_waitcnt_at_0x204() {
+        let mut b = bus();
+        b.write16(0x0400_0204, 0x4317); // WAITCNT
+        assert!(!b.io.ime());
+        assert_eq!(b.read16(0x0400_0204), 0x4317);
+        b.write16(0x0400_0208, 1);
+        assert!(b.io.ime());
+        assert_eq!(b.read16(0x0400_0208), 1);
+    }
+
+    #[test]
+    fn dispstat_status_bits_are_read_only() {
+        let mut b = bus();
+        b.write16(0x0400_0004, 0xFFFF);
+        assert_eq!(b.read16(0x0400_0004), 0xFF38);
+    }
+
+    #[test]
+    fn io_powers_on_with_bios_register_values() {
+        let mut b = bus();
+        assert_eq!(b.read16(0x0400_0000), 0x0080); // DISPCNT forced blank
+        assert_eq!(b.read16(0x0400_0020), 0x0100); // BG2PA identity
+        assert_eq!(b.read16(0x0400_0088), 0x0200); // SOUNDBIAS
+        assert_eq!(b.read16(0x0400_0134), 0x8000); // RCNT
     }
 
     #[test]

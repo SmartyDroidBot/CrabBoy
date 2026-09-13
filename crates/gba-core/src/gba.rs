@@ -276,7 +276,8 @@ impl Gba {
         }
 
         if self.cpu.halted {
-            if self.bus.pending_irq() != 0 {
+            // HALT ends on any enabled interrupt even while IME is clear.
+            if self.bus.wake_irq() != 0 {
                 self.cpu.halted = false;
             } else {
                 self.advance(4);

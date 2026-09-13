@@ -50,7 +50,10 @@ const KEYCNT: usize = 0x132;
 /// I/O offsets of IE / IF / IME.
 const IE: usize = 0x200;
 const IF: usize = 0x202;
-const IME: usize = 0x204;
+const IME: usize = 0x208;
+/// I/O offset of `DISPSTAT`; bits 0-2 are read-only status flags.
+const DISPSTAT: usize = 0x04;
+const DISPSTAT_WRITABLE: u16 = 0xFF38;
 
 /// The I/O registers of a GBA.
 pub struct Io {
@@ -94,7 +97,20 @@ impl Default for Io {
             #[cfg(feature = "trace")]
             write_log: Vec::new(),
         };
-        io.regs[0x2] = 1; // DISPSTAT: V-Blank flag must start set so games don't hang.
+        // Power-on register values (GBATEK / mGBA `GBAIOInit`): forced blank,
+        // identity affine matrices, SOUNDBIAS mid-level, RCNT general-purpose.
+        for (off, v) in [
+            (0x000usize, 0x0080u16),
+            (0x020, 0x0100),
+            (0x026, 0x0100),
+            (0x030, 0x0100),
+            (0x036, 0x0100),
+            (0x088, 0x0200),
+            (0x134, 0x8000),
+        ] {
+            io.regs[off] = v as u8;
+            io.regs[off + 1] = (v >> 8) as u8;
+        }
         io
     }
 }
@@ -166,6 +182,12 @@ impl Io {
         self.trace_write(offset, 2, value);
         match offset {
             KEYINPUT | 0x06 => {}
+            DISPSTAT => {
+                let cur = u16::from_le_bytes([self.regs[offset], self.regs[offset + 1]]);
+                let v = (cur & !DISPSTAT_WRITABLE) | (value & DISPSTAT_WRITABLE);
+                self.regs[offset] = v as u8;
+                self.regs[offset + 1] = (v >> 8) as u8;
+            }
             KEYCNT => {
                 self.keycnt = value;
                 self.regs[offset] = value as u8;
@@ -211,8 +233,17 @@ impl Io {
         self.vcount
     }
 
-    /// Interrupt flags currently asserted (IF & IE).
+    /// Interrupts that will be taken by the CPU: IF & IE, gated by IME.
     pub fn pending_irq(&self) -> u16 {
+        if self.ime {
+            self.iflags & self.ie
+        } else {
+            0
+        }
+    }
+
+    /// Interrupts that end a HALT: IF & IE regardless of IME.
+    pub fn wake_irq(&self) -> u16 {
         self.iflags & self.ie
     }
 
