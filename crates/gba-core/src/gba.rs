@@ -49,6 +49,7 @@ impl Gba {
         cpu.set_cpsr(0x1F);
         cpu.set_pc(0x0800_0000);
         let mut bus = Bus::new(rom);
+        Self::install_irq_stub(&mut bus);
         bus.io.regs[0x300] = 1;
         bus.io.set_vcount(0x7E);
         Gba {
@@ -86,6 +87,46 @@ impl Gba {
         gba.bus.io.set_vcount(0);
         gba.line = 0;
         gba
+    }
+
+    /// BIOS address of the IRQ return stub used by the skip-BIOS boot.
+    const IRQ_RETURN_STUB: u32 = 0x20;
+
+    /// The real BIOS returns from the game's IRQ handler through
+    /// `ldmfd sp!, {r0-r3, r12, lr}; subs pc, lr, #4`. Without a BIOS image,
+    /// plant those two instructions at 0x20 so that `bx lr` from the handler
+    /// pops the frame `enter_irq` pushed and resumes the interrupted code.
+    fn install_irq_stub(bus: &mut Bus) {
+        if bus.has_real_bios() {
+            return;
+        }
+        let mut stub = vec![0u8; 0x28];
+        stub[0x20..0x24].copy_from_slice(&0xE8BD_500Fu32.to_le_bytes());
+        stub[0x24..0x28].copy_from_slice(&0xE25E_F004u32.to_le_bytes());
+        bus.set_bios(stub);
+    }
+
+    /// Take a pending IRQ. With a real BIOS the vector at 0x18 runs its
+    /// dispatcher; otherwise replicate it: push {r0-r3, r12, lr} on the IRQ
+    /// stack, point LR at the return stub, pass the I/O base in r0 (the BIOS
+    /// leaves it there) and jump to the handler registered at 0x03007FFC.
+    fn enter_irq(&mut self) {
+        let lr = self.cpu.pc().wrapping_add(4);
+        self.cpu.irq(lr);
+        self.cpu.halted = false;
+        if self.cpu.has_bios {
+            return;
+        }
+        let handler = self.bus.read32(0x0300_7FFC);
+        let sp = self.cpu.sp_raw().wrapping_sub(24);
+        for (i, r) in [0u32, 1, 2, 3, 12, 14].into_iter().enumerate() {
+            let v = self.cpu.reg_raw(r);
+            self.bus.write32(sp.wrapping_add(i as u32 * 4), v);
+        }
+        self.cpu.set_reg(13, sp);
+        self.cpu.set_reg(14, Self::IRQ_RETURN_STUB);
+        self.cpu.set_reg(0, 0x0400_0000);
+        self.cpu.set_pc(handler);
     }
 
     /// Advance the machine by `cycles` (timers, APU, PPU scanlines, DMA).
@@ -178,14 +219,6 @@ impl Gba {
         if y == ppu::VISIBLE_LINES {
             self.ppu.reload_affine_refs(&self.bus);
             self.bus.run_dma(Timing::VBlank);
-            if self
-                .cpu
-                .bios_wait_mask()
-                .is_some_and(|mask| mask & irq::VBLANK != 0)
-            {
-                self.cpu.complete_bios_wait();
-                self.dispatch_bios_irq(irq::VBLANK);
-            }
             if irq_en & 0x01 != 0 {
                 self.bus.io.raise_irq(irq::VBLANK);
             }
@@ -207,21 +240,6 @@ impl Gba {
         // H-blank period, so the bit stays asserted until the next line begins.
         let enables = self.bus.io.regs[0x04] & 0x38;
         self.bus.io.regs[0x04] = vblank_flag | (1 << 1) | enables;
-    }
-
-    /// Dispatch the game's IRQ handler as the real BIOS would: enter IRQ mode,
-    /// branch to `[0x03007FFC]`. Called when a bios_wait completes.
-    fn dispatch_bios_irq(&mut self, mask: u16) {
-        let cur = self.bus.read32(crate::bios::BIOS_IF_ADDR);
-        self.bus
-            .write32(crate::bios::BIOS_IF_ADDR, cur | mask as u32);
-        let handler = self.bus.read32(0x0300_7FFC);
-        if handler == 0 || handler == 0xFFFF_FFFF {
-            return;
-        }
-        let lr = self.cpu.pc();
-        self.cpu.irq(lr);
-        self.cpu.set_pc(handler);
     }
 
     fn press_button(&mut self, button: emu_core::Button) {
@@ -264,39 +282,38 @@ impl Gba {
             self.cpu.halted = true;
         }
 
-        if let Some(mask) = self.cpu.bios_wait_mask() {
-            if self.bus.io.iflags() & mask != 0 {
-                self.bus.io.acknowledge(mask);
+        // HLE IntrWait: the BIOS routine halts until the game's IRQ handler
+        // flags the awaited interrupt in the IF mirror at 0x03007FF8, taking
+        // interrupts normally in the meantime. The check only applies while
+        // the PC is back at the wait loop, not while a handler runs.
+        if self.cpu.at_bios_wait() {
+            let mask = self.cpu.bios_wait_mask().unwrap_or(0);
+            let mirror = self.bus.read16(crate::bios::BIOS_IF_ADDR) as u16;
+            if mirror & mask != 0 {
+                self.bus
+                    .write16(crate::bios::BIOS_IF_ADDR, (mirror & !mask) as u32);
                 self.cpu.complete_bios_wait();
-                self.dispatch_bios_irq(mask);
+                self.cpu.halted = false;
             } else {
-                self.advance(4);
-                return 4;
+                self.cpu.halted = true;
             }
         }
 
+        if self.bus.pending_irq() != 0 && !self.cpu.irq_masked() {
+            self.enter_irq();
+            self.advance(4);
+            return 4;
+        }
+
         if self.cpu.halted {
-            // HALT ends on any enabled interrupt even while IME is clear.
-            if self.bus.wake_irq() != 0 {
+            // HALT ends on any enabled interrupt even while IME is clear; an
+            // IntrWait only ends through its mirror flag.
+            if self.cpu.bios_wait_mask().is_none() && self.bus.wake_irq() != 0 {
                 self.cpu.halted = false;
             } else {
                 self.advance(4);
                 return 4;
             }
-        }
-
-        let pending = self.bus.pending_irq();
-        if pending != 0 && !self.cpu.irq_masked() {
-            let lr = self.cpu.pc();
-            self.cpu.irq(lr);
-            // Without a BIOS, dispatch the IRQ straight to the game's handler
-            // (the real BIOS's `ldr pc, [pc, #-4]` at vector 0x18 jumps through
-            // the handler pointer the game stores at 0x03007FFC).
-            if self.bus.bios.is_empty() {
-                self.cpu.set_pc(self.bus.read32(0x0300_7FFC));
-            }
-            self.advance(4);
-            return 4;
         }
 
         self.bus.begin_step();
@@ -556,42 +573,97 @@ mod tests {
         assert!(!gba.cpu.has_bios);
     }
 
-    #[test]
-    fn vblank_intr_wait_completes_at_vblank_without_ie() {
-        let mut gba = Gba::new(vec![0; 0x4000]);
-        assert!(crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05));
-        assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
-        gba.line = ppu::VISIBLE_LINES - 1;
-        gba.tick_line();
-        assert_eq!(gba.cpu.bios_wait_mask(), None);
-    }
-
-    #[test]
-    fn bios_if_flag_cleared_on_entry_and_set_at_vblank() {
-        let mut gba = Gba::new(vec![0; 0x4000]);
-        crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05);
-        // Flag cleared on IntrWait entry.
-        assert_eq!(gba.peek32(0x0300_7FF8) & 1, 0);
-        // Advance to VBlank.
-        gba.line = ppu::VISIBLE_LINES - 1;
-        gba.tick_line();
-        // Flag set, wait cleared.
-        assert_eq!(gba.cpu.bios_wait_mask(), None);
-        assert_eq!(gba.peek32(0x0300_7FF8) & 1, 1);
-    }
-
-    #[test]
-    fn bios_irq_dispatch_enters_irq_mode() {
-        let mut gba = Gba::new(vec![0; 0x4000]);
-        // Install a stub handler at 0x03007FFC pointing to IWRAM.
+    /// A cartridge that calls VBlankIntrWait and then spins, with an ARM IRQ
+    /// handler in IWRAM that acknowledges IF and returns with `bx lr`.
+    fn vblank_wait_machine(ie: u16) -> Gba {
+        let mut rom = vec![0u8; 0x4000];
+        rom[0..4].copy_from_slice(&0xEF05_0000u32.to_le_bytes()); // swi VBlankIntrWait
+        rom[4..8].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes()); // b .
+        let mut gba = Gba::new(rom);
         gba.bus.write32(0x0300_7FFC, 0x0300_0100);
-        // Install a NOP (MOV r0,r0) at that address.
-        gba.bus.write32(0x0300_0100, 0xE1A0_0000);
-        crate::bios::run(&mut gba.cpu, &mut gba.bus, 0x05);
-        gba.line = ppu::VISIBLE_LINES - 1;
-        gba.tick_line();
-        // After dispatch, CPU should be in IRQ mode at handler address.
-        assert_eq!(gba.cpu.pc(), 0x0300_0100);
-        assert_eq!(gba.cpu.cpsr() & 0x1F, crate::cpu::mode::IRQ);
+        for (i, w) in [
+            0xE3A0_0404u32, // mov r0, #0x04000000
+            0xE380_0C02,    // orr r0, r0, #0x200
+            0xE3A0_1001,    // mov r1, #1
+            0xE1C0_10B2,    // strh r1, [r0, #2]   (acknowledge VBlank in IF)
+            0xE12F_FF1E,    // bx lr
+        ]
+        .iter()
+        .enumerate()
+        {
+            gba.bus.write32(0x0300_0100 + i as u32 * 4, *w);
+        }
+        gba.bus.write16(0x0400_0200, ie as u32);
+        gba.bus.write16(0x0400_0004, 0x0008); // DISPSTAT: VBlank IRQ enable
+        gba
+    }
+
+    fn step_until(gba: &mut Gba, cond: impl Fn(&Gba) -> bool, max_steps: u32) -> bool {
+        for _ in 0..max_steps {
+            if cond(gba) {
+                return true;
+            }
+            gba.step();
+        }
+        cond(gba)
+    }
+
+    #[test]
+    fn vblank_intr_wait_returns_after_handler_sets_mirror() {
+        let mut gba = vblank_wait_machine(irq::VBLANK);
+        gba.step(); // swi
+        assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
+        assert!(gba.bus.io.ime(), "IntrWait enables IME");
+        assert_eq!(gba.cpu.pc(), 0x0800_0004);
+
+        // The VBlank IRQ enters the handler through the BIOS-style frame.
+        assert!(step_until(&mut gba, |g| g.cpu.pc() == 0x0300_0100, 400_000));
+        assert_eq!(gba.cpu.cpsr() & 0x1F, mode::IRQ);
+        assert_eq!(gba.cpu.reg_raw(0), 0x0400_0000);
+        assert_eq!(gba.cpu.reg_raw(14), Gba::IRQ_RETURN_STUB);
+        assert_eq!(gba.cpu.sp_raw(), 0x0300_7FA0 - 24);
+        assert_eq!(gba.peek32(0x0300_7FA0 - 4), 0x0800_0008, "saved LR");
+
+        // Handler (5) + stub (2) return to the wait in SYS mode; the mirror
+        // is still clear, so the wait continues.
+        for _ in 0..7 {
+            gba.step();
+        }
+        assert_eq!(gba.cpu.cpsr() & 0x1F, 0x1F);
+        assert_eq!(gba.cpu.pc(), 0x0800_0004);
+        assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
+        assert_eq!(gba.bus.io.iflags() & irq::VBLANK, 0, "handler acked IF");
+
+        // Once a handler flags the mirror the wait completes and the game
+        // continues with the next instruction.
+        gba.bus
+            .write16(crate::bios::BIOS_IF_ADDR, irq::VBLANK as u32);
+        gba.step();
+        assert_eq!(gba.cpu.bios_wait_mask(), None);
+        assert_eq!(gba.bus.read16(crate::bios::BIOS_IF_ADDR), 0);
+        gba.step();
+        assert_eq!(gba.cpu.pc(), 0x0800_0004, "b . keeps spinning");
+    }
+
+    #[test]
+    fn vblank_intr_wait_stays_halted_without_ie() {
+        let mut gba = vblank_wait_machine(0);
+        gba.step();
+        for _ in 0..3 {
+            gba.run_frame();
+        }
+        assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
+        assert_eq!(gba.cpu.pc(), 0x0800_0004, "never reached the handler");
+        assert!(gba.cpu.halted);
+    }
+
+    #[test]
+    fn irq_return_stub_is_installed_only_without_a_real_bios() {
+        let gba = Gba::new(vec![0; 0x4000]);
+        assert!(!gba.bus.has_real_bios());
+        assert_eq!(gba.bus.bios.len(), 0x28);
+        let real = Gba::with_bios(vec![0; 0x4000], vec![0; 0x4000], false);
+        assert!(real.bus.has_real_bios());
+        assert!(real.cpu.has_bios);
     }
 }

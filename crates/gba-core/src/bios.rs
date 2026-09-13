@@ -228,11 +228,10 @@ fn wait_for_irq(cpu: &mut Cpu, bus: &mut Bus, mask: u16, discard: bool) -> bool 
         bus.write32(BIOS_IF_ADDR, cur & !(mask as u32));
         return true;
     }
-    if bus.io.iflags() & mask != 0 {
-        bus.io.acknowledge(mask);
-    } else {
-        cpu.begin_bios_wait(mask);
-    }
+    // The BIOS enables IME so the game's handler can run and flag the
+    // mirror, then halts until it does.
+    bus.io.write16(0x208, 1);
+    cpu.begin_bios_wait(mask);
     true
 }
 

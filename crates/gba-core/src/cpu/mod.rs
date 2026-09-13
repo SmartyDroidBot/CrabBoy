@@ -97,6 +97,9 @@ pub struct Cpu {
     /// HLE BIOS wait mask used by IntrWait and VBlankIntrWait: the IRQ flags
     /// the routine is waiting for. `None` when no wait is in progress.
     bios_wait: Option<u16>,
+    /// Address the waiting routine returns to; the wait loop is only "in
+    /// progress" while the PC sits here, not while an IRQ handler runs.
+    bios_wait_pc: u32,
     /// A BIOS SWI recorded by the decoders, dispatched by the system once the
     /// instruction has finished executing. `None` when no SWI was executed.
     bios_call: Option<u32>,
@@ -137,6 +140,7 @@ impl Cpu {
             cycles: 0,
             halted: false,
             bios_wait: None,
+            bios_wait_pc: 0,
             bios_call: None,
             has_bios: false,
         }
@@ -361,11 +365,18 @@ impl Cpu {
     /// is raised.
     pub(crate) fn begin_bios_wait(&mut self, mask: u16) {
         self.bios_wait = Some(mask);
+        self.bios_wait_pc = self.pc;
     }
 
     /// The IRQ mask an HLE IntrWait is currently waiting for, if any.
     pub fn bios_wait_mask(&self) -> Option<u16> {
         self.bios_wait
+    }
+
+    /// Whether the CPU is sitting in the HLE IntrWait loop (as opposed to
+    /// running an interrupt handler that pre-empted it).
+    pub fn at_bios_wait(&self) -> bool {
+        self.bios_wait.is_some() && self.pc == self.bios_wait_pc
     }
 
     /// Finish the HLE IntrWait in progress.
@@ -447,6 +458,7 @@ pub(crate) struct CpuSave {
     pub cycles: u32,
     pub halted: bool,
     pub bios_wait: Option<u16>,
+    pub bios_wait_pc: u32,
 }
 
 impl Cpu {
@@ -463,6 +475,7 @@ impl Cpu {
             cycles: self.cycles,
             halted: self.halted,
             bios_wait: self.bios_wait,
+            bios_wait_pc: self.bios_wait_pc,
         }
     }
 
@@ -478,6 +491,7 @@ impl Cpu {
         self.cycles = s.cycles;
         self.halted = s.halted;
         self.bios_wait = s.bios_wait;
+        self.bios_wait_pc = s.bios_wait_pc;
         self.bios_call = None;
     }
 }
