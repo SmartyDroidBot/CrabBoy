@@ -10,10 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 emu-core = { workspace = true }
-gb-core = { workspace = true }
-wasm-bindgen = { version = "0.2", optional = true }
+crab-systems = { workspace = true }
 
-[features]
-default = []
-# Build the WebAssembly bindings. Requires wasm-bindgen and a wasm32 target.
-wasm = ["dep:wasm-bindgen"]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.127"

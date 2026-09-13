@@ -1012,8 +1012,8 @@ dependencies = [
 name = "crab-wasm"
 version = "0.1.0"
 dependencies = [
+ "crab-systems",
  "emu-core",
- "gb-core",
  "wasm-bindgen",
 ]
 
