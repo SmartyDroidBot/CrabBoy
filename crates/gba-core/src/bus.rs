@@ -185,6 +185,12 @@ pub struct Bus {
     /// If `true`, the previous access was a sequential ROM access (prefetch
     /// approximation, currently unused except for future refinement).
     last_seq: bool,
+    /// When true, record every RAM write to `ram_write_log` (diagnostics).
+    #[cfg(feature = "trace")]
+    pub log_ram_writes: bool,
+    /// Recent RAM writes as `(addr, width, value)` (diagnostics).
+    #[cfg(feature = "trace")]
+    pub ram_write_log: Vec<(u32, u8, u32)>,
 }
 
 impl Bus {
@@ -204,6 +210,10 @@ impl Bus {
             rtc: Rtc::new(),
             cycles: 0,
             last_seq: false,
+            #[cfg(feature = "trace")]
+            log_ram_writes: false,
+            #[cfg(feature = "trace")]
+            ram_write_log: Vec::new(),
         }
     }
 
@@ -217,6 +227,18 @@ impl Bus {
     pub fn has_real_bios(&self) -> bool {
         self.bios.len() >= 0x4000
     }
+
+    #[cfg(feature = "trace")]
+    #[inline]
+    fn trace_ram_write(&mut self, addr: u32, width: u8, value: u32) {
+        if self.log_ram_writes {
+            self.ram_write_log.push((addr, width, value));
+        }
+    }
+
+    #[cfg(not(feature = "trace"))]
+    #[inline(always)]
+    fn trace_ram_write(&mut self, _addr: u32, _width: u8, _value: u32) {}
 
     /// Wait-state cycles accumulated during the current instruction.
     pub fn cycles(&self) -> u32 {
@@ -365,7 +387,10 @@ impl Bus {
         self.last_seq = false;
         match region {
             Region::Ewram => self.ewram[Self::index_in(addr, EWRAM_SIZE - 1)] = value as u8,
-            Region::Iwram => self.iwram[Self::index_in(addr, IWRAM_SIZE - 1)] = value as u8,
+            Region::Iwram => {
+                self.trace_ram_write(addr, 1, value);
+                self.iwram[Self::index_in(addr, IWRAM_SIZE - 1)] = value as u8
+            }
             Region::Io => {
                 let off = Self::index_in(addr, 0x3FF);
                 self.io.write8(off, value as u8);
@@ -393,6 +418,7 @@ impl Bus {
                 self.ewram[i + 1] = (value >> 8) as u8;
             }
             Region::Iwram => {
+                self.trace_ram_write(base as u32, 2, value as u32);
                 let i = base & (IWRAM_SIZE - 1);
                 self.iwram[i] = value as u8;
                 self.iwram[i + 1] = (value >> 8) as u8;

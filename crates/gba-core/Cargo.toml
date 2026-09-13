@@ -8,3 +8,7 @@ license.workspace = true
 emu-core = { workspace = true }
 
 [dev-dependencies]
+
+[features]
+# Record I/O and RAM writes for the headless diagnostic tools.
+trace = []

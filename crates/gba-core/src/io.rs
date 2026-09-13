@@ -70,6 +70,12 @@ pub struct Io {
     /// Set by a write to HALTCNT (0x04000301); the system root reads and
     /// clears it to halt the CPU.
     pub halt_requested: bool,
+    /// When true, every write is recorded in `write_log` (diagnostics).
+    #[cfg(feature = "trace")]
+    pub log_writes: bool,
+    /// Pending I/O writes since the last drain as `(offset, width, value)`.
+    #[cfg(feature = "trace")]
+    pub write_log: Vec<(usize, u8, u16)>,
 }
 
 impl Default for Io {
@@ -83,6 +89,10 @@ impl Default for Io {
             ime: false,
             vcount: 0,
             halt_requested: false,
+            #[cfg(feature = "trace")]
+            log_writes: false,
+            #[cfg(feature = "trace")]
+            write_log: Vec::new(),
         };
         io.regs[0x2] = 1; // DISPSTAT: V-Blank flag must start set so games don't hang.
         io
@@ -139,8 +149,21 @@ impl Io {
         }
     }
 
+    #[cfg(feature = "trace")]
+    #[inline]
+    fn trace_write(&mut self, offset: usize, width: u8, value: u16) {
+        if self.log_writes {
+            self.write_log.push((offset, width, value));
+        }
+    }
+
+    #[cfg(not(feature = "trace"))]
+    #[inline(always)]
+    fn trace_write(&mut self, _offset: usize, _width: u8, _value: u16) {}
+
     /// Write a 16-bit I/O register.
     pub fn write16(&mut self, offset: usize, value: u16) {
+        self.trace_write(offset, 2, value);
         match offset {
             KEYINPUT | 0x06 => {}
             KEYCNT => {
@@ -174,6 +197,7 @@ impl Io {
     /// A 16-bit write that may split across a special register boundary is not
     /// supported; treat any non-16-bit access as a raw byte store.
     pub fn write8(&mut self, offset: usize, value: u8) {
+        self.trace_write(offset, 1, value as u16);
         self.regs[offset] = value;
     }
 

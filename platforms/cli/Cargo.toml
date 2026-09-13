@@ -21,6 +21,15 @@ path = "src/bin/wav.rs"
 name = "run_accuracy"
 path = "src/bin/run_accuracy.rs"
 
+[[bin]]
+name = "gba-diag"
+path = "src/bin/gba_diag.rs"
+
+[[bin]]
+name = "gba-disasm"
+path = "src/bin/gba_disasm.rs"
+
 [dependencies]
 emu-core = { workspace = true }
 gb-core = { workspace = true }
+gba-core = { workspace = true, features = ["trace"] }
