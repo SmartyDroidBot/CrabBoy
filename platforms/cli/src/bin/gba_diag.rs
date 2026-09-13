@@ -11,13 +11,14 @@
 //!                          full power-on path instead of the warm POSTFLG boot)
 //!   `--capture-pc=<hex>`   stop when PC equals the address and dump registers
 //!   `--dump-iwram=<path>`  write 0x03007E00-0x03007FFF to a file at the end
+//!   `--dump-vram=<path>`   write palette RAM, VRAM and OAM to a file at the end
 //!   `--dump-frame=<path>`  write the framebuffer as a binary PPM at the end
 //!                          (or at `--dump-frame-at=<frame>`)
 //!   `--frame-hash`         print an FNV-1a hash of the framebuffer per sample
 //!   `--input=SPEC`         press/release buttons on given frames, e.g.
 //!                          `START@120,A@300,!A@310` (`!` releases)
 //!   `--trace-io`           print every I/O register write while tracing
-//!   `--trace-ram`          print IWRAM writes to the IRQ handler area
+//!   `--trace-ram`          print writes to the IRQ handler area of IWRAM and to VRAM
 
 use emu_core::{Button, System};
 use gba_core::Gba;
@@ -32,6 +33,7 @@ struct Options {
     cold: bool,
     capture_pc: Option<u32>,
     dump_iwram: Option<String>,
+    dump_vram: Option<String>,
     dump_frame: Option<String>,
     dump_frame_at: Option<u64>,
     frame_hash: bool,
@@ -43,7 +45,7 @@ struct Options {
 fn usage() -> ! {
     eprintln!(
         "usage: gba-diag <rom.gba> [frames] [interval] [trace_steps] [--bios=<path>] [--cold] \
-         [--capture-pc=<hex>] [--dump-iwram=<path>] [--dump-frame=<path.ppm>] \
+         [--capture-pc=<hex>] [--dump-iwram=<path>] [--dump-vram=<path>] [--dump-frame=<path.png>] \
          [--dump-frame-at=<frame>] [--frame-hash] [--input=START@120,A@300,!A@310] \
          [--trace-io] [--trace-ram]"
     );
@@ -106,6 +108,7 @@ fn parse_args() -> Options {
         cold: false,
         capture_pc: None,
         dump_iwram: None,
+        dump_vram: None,
         dump_frame: None,
         dump_frame_at: None,
         frame_hash: false,
@@ -128,6 +131,8 @@ fn parse_args() -> Options {
             o.capture_pc = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok();
         } else if let Some(v) = a.strip_prefix("--dump-iwram=") {
             o.dump_iwram = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("--dump-vram=") {
+            o.dump_vram = Some(v.to_string());
         } else if let Some(v) = a.strip_prefix("--dump-frame=") {
             o.dump_frame = Some(v.to_string());
         } else if let Some(v) = a.strip_prefix("--dump-frame-at=") {
@@ -449,9 +454,11 @@ fn main() {
         }
         if o.trace_ram && !gba.bus.ram_write_log.is_empty() {
             for (addr, w, val) in std::mem::take(&mut gba.bus.ram_write_log) {
-                if (0x0300_2700..0x0300_2760).contains(&addr) {
+                if (0x0300_2700..0x0300_2760).contains(&addr)
+                    || (0x0600_0000..0x0700_0000).contains(&addr)
+                {
                     println!(
-                        "  ram@step {traced:>5} pc=0x{trace_pc:08X}  wr{w} 0x{addr:08X} = 0x{val:08X}"
+                        "  ram@step {total_steps:>8} pc=0x{pc:08X}  wr{w} 0x{addr:08X} = 0x{val:08X}"
                     );
                 }
             }
@@ -518,6 +525,17 @@ fn main() {
     if o.dump_frame_at.is_none() {
         if let Some(p) = &o.dump_frame {
             dump_frame(&gba, p);
+        }
+    }
+    if let Some(p) = &o.dump_vram {
+        // Palette RAM (1 KB), VRAM (96 KB) and OAM (1 KB), back to back.
+        let mut out = Vec::with_capacity(0x18800);
+        out.extend_from_slice(gba.bus.palram.as_ref());
+        out.extend_from_slice(gba.bus.vram.as_ref());
+        out.extend_from_slice(gba.bus.oam.as_ref());
+        match std::fs::write(p, &out) {
+            Ok(()) => println!("dumped palette, vram and oam to {p}"),
+            Err(e) => eprintln!("failed to write {p}: {e}"),
         }
     }
     dump_top_iwram(&mut gba, o.dump_iwram.as_deref());

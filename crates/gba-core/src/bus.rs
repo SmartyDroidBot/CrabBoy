@@ -481,7 +481,10 @@ impl Bus {
                 }
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
-            Region::Vram => self.vram[vram_index(addr as usize)] = value as u8,
+            Region::Vram => {
+                self.trace_ram_write(addr, 1, value);
+                self.vram[vram_index(addr as usize)] = value as u8
+            }
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
             Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
@@ -525,6 +528,7 @@ impl Bus {
                 self.palram[i + 1] = (value >> 8) as u8;
             }
             Region::Vram => {
+                self.trace_ram_write(base as u32, 2, value);
                 let i = vram_index(base);
                 self.vram[i] = value as u8;
                 self.vram[i + 1] = (value >> 8) as u8;
