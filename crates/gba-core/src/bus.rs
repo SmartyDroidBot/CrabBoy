@@ -346,7 +346,10 @@ impl Bus {
                     // RTC serial data: bit 0 is the RTC output pin during reads.
                     return (self.io.read16(off) & !1) as u32 | self.rtc.read_sio_bit() as u32;
                 }
-                self.io.read16(off) as u32
+                match off {
+                    0xB0..=0xDF => self.dma.read16(off) as u32,
+                    _ => self.io.read16(off) as u32,
+                }
             }
             Region::Palram => {
                 let i = base & (PALRAM_SIZE - 1);
@@ -510,9 +513,10 @@ impl Bus {
             let ub = if unit { 4u32 } else { 2u32 };
             let sa = ch.src_adjust();
             let da = ch.dst_adjust();
-            let mut s = ch.src;
-            let mut d = ch.dst;
-            for _ in 0..ch.count as usize {
+            // The low address bits are ignored for the selected unit size.
+            let mut s = ch.cur_src & !(ub - 1);
+            let mut d = ch.cur_dst & !(ub - 1);
+            for _ in 0..ch.cur_count {
                 if unit {
                     let v = self.read32(s);
                     self.write32(d, v);
@@ -524,13 +528,16 @@ impl Bus {
                 d = crate::dma::adjust(d, ub, da);
             }
             if ch.irq_enable() {
-                flags |= 1 << (4 + i);
+                flags |= 1 << (8 + i);
             }
-            if !ch.repeat() {
+            ch.cur_src = s;
+            ch.cur_dst = d;
+            if ch.repeat() {
+                ch.reload_for_repeat();
+            } else {
                 ch.enabled = false;
+                ch.control &= !(1 << 15);
             }
-            ch.src = s;
-            ch.dst = d;
             ch.done = !ch.enabled;
             self.dma.chans[i] = ch;
         }
@@ -637,6 +644,81 @@ mod tests {
         // Acknowledge: writing 1 to IF clears.
         b.write16(0x0400_0202, crate::io::IRQ_KEYPAD as u32);
         assert_eq!(b.io.iflags() & crate::io::IRQ_KEYPAD, 0);
+    }
+
+    fn setup_dma(b: &mut Bus, ch: u32, src: u32, dst: u32, count: u32, cnt_h: u32) {
+        let base = 0x0400_00B0 + ch * 0xC;
+        b.write32(base, src);
+        b.write32(base + 4, dst);
+        b.write16(base + 8, count);
+        b.write16(base + 10, cnt_h);
+    }
+
+    #[test]
+    fn dma_immediate_copy() {
+        let mut b = bus();
+        for i in 0..4 {
+            b.write16(0x0300_0000 + i * 2, 0x1000 + i);
+        }
+        setup_dma(&mut b, 0, 0x0300_0000, 0x0300_1000, 4, 0x8000);
+        b.run_dma(crate::dma::Timing::Immediate);
+        for i in 0..4 {
+            assert_eq!(b.read16(0x0300_1000 + i * 2), 0x1000 + i);
+        }
+        // A non-repeating channel disables itself and clears CNT_H bit 15.
+        assert!(!b.dma.chans[0].enabled);
+        assert_eq!(b.read16(0x0400_00BA) & 0x8000, 0);
+    }
+
+    #[test]
+    fn dma_timed_channel_waits_for_its_trigger() {
+        let mut b = bus();
+        setup_dma(&mut b, 0, 0x0300_0000, 0x0300_1000, 2, 0x8000 | (1 << 12));
+        b.run_dma(crate::dma::Timing::Immediate);
+        assert!(b.dma.chans[0].enabled, "VBlank channel must not run yet");
+        b.run_dma(crate::dma::Timing::VBlank);
+        assert!(!b.dma.chans[0].enabled);
+    }
+
+    #[test]
+    fn dma_repeat_reloads_destination_in_mode_3() {
+        let mut b = bus();
+        b.write32(0x0300_0000, 0x1111_1111);
+        b.write32(0x0300_0004, 0x2222_2222);
+        // Repeat, 32-bit, HBlank, dst increment+reload, src increment.
+        setup_dma(
+            &mut b,
+            1,
+            0x0300_0000,
+            0x0300_2000,
+            2,
+            0x8000 | (1 << 9) | (1 << 10) | (2 << 12) | (3 << 5),
+        );
+        b.run_dma(crate::dma::Timing::HBlank);
+        assert_eq!(b.read32(0x0300_2004), 0x2222_2222);
+        let ch = b.dma.chans[1];
+        assert!(ch.enabled, "repeating channel stays enabled");
+        assert_eq!(ch.cur_dst, 0x0300_2000, "destination reloaded");
+        assert_eq!(ch.cur_src, 0x0300_0008, "source keeps advancing");
+        assert_eq!(ch.cur_count, 2, "count reloaded");
+        assert_eq!(b.dma.irq_flags(), 0, "no IRQ requested");
+    }
+
+    #[test]
+    fn dma_irq_flags_use_if_bits_8_to_11() {
+        let mut b = bus();
+        setup_dma(&mut b, 3, 0x0300_0000, 0x0300_1000, 1, 0x8000 | (1 << 14));
+        b.run_dma(crate::dma::Timing::Immediate);
+        assert_eq!(b.dma.irq_flags(), 1 << 11);
+    }
+
+    #[test]
+    fn dma3_count_zero_means_0x10000_units() {
+        let mut b = bus();
+        setup_dma(&mut b, 3, 0x0300_0000, 0x0200_0000, 0, 0x8000 | (1 << 10));
+        assert_eq!(b.dma.chans[3].cur_count, 0x10000);
+        b.run_dma(crate::dma::Timing::Immediate);
+        assert_eq!(b.dma.chans[3].cur_dst, 0x0200_0000 + 0x10000 * 4);
     }
 
     #[test]

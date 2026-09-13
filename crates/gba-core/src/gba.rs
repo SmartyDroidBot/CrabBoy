@@ -114,7 +114,7 @@ impl Gba {
         if dsa_timer == timer_idx && self.apu.fifo_a_count() <= 16 {
             let mut ch = self.bus.dma.chans[1];
             if ch.enabled && ch.timing() == Timing::Special {
-                let s = ch.src;
+                let s = ch.cur_src;
                 for _ in 0..4 {
                     let w = self.bus.read32(s);
                     self.apu.push_fifo_a(w as u8);
@@ -122,7 +122,7 @@ impl Gba {
                     self.apu.push_fifo_a((w >> 16) as u8);
                     self.apu.push_fifo_a((w >> 24) as u8);
                 }
-                ch.src = crate::dma::adjust(s, 16, ch.src_adjust());
+                ch.cur_src = crate::dma::adjust(s, 16, ch.src_adjust());
                 if ch.irq_enable() {
                     self.bus.dma.flags |= 1 << (8 + 1);
                 }
@@ -134,7 +134,7 @@ impl Gba {
         if dsb_timer == timer_idx && self.apu.fifo_b_count() <= 16 {
             let mut ch = self.bus.dma.chans[2];
             if ch.enabled && ch.timing() == Timing::Special {
-                let s = ch.src;
+                let s = ch.cur_src;
                 for _ in 0..4 {
                     let w = self.bus.read32(s);
                     self.apu.push_fifo_b(w as u8);
@@ -142,7 +142,7 @@ impl Gba {
                     self.apu.push_fifo_b((w >> 16) as u8);
                     self.apu.push_fifo_b((w >> 24) as u8);
                 }
-                ch.src = crate::dma::adjust(s, 16, ch.src_adjust());
+                ch.cur_src = crate::dma::adjust(s, 16, ch.src_adjust());
                 if ch.irq_enable() {
                     self.bus.dma.flags |= 1 << (8 + 2);
                 }
