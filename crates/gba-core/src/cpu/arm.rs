@@ -168,8 +168,8 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         cpu.add_cycles(3);
         return;
     }
-    // MRS
-    if inst & 0x0FFF_0FF0 == 0x010F_0000 {
+    // MRS: bit 22 selects SPSR, so it must be masked out of the match.
+    if inst & 0x0FBF_0FF0 == 0x010F_0000 {
         let rd = (inst >> 12) & 0xF;
         let from_spsr = (inst >> 22) & 1 != 0;
         let v = if from_spsr {
@@ -245,13 +245,22 @@ fn msr_write(cpu: &mut Cpu, inst: u32, value: u32) {
     let to_spsr = (inst >> 22) & 1 != 0;
     let field_mask = (inst >> 16) & 0xF;
     let m = cpu.cpsr & 0x1F;
-    let privileged = m != mode::USR && m != 0x1F;
-    let mut v = cpu.cpsr;
-    if field_mask & 1 != 0 {
-        v = (v & !field::FLAGS) | (value & field::FLAGS);
-    }
-    if field_mask & 2 != 0 && privileged {
+    // SYS is a privileged mode; only USR may not touch the control byte.
+    let privileged = m != mode::USR;
+    let mut v = if to_spsr { cpu.get_spsr(m) } else { cpu.cpsr };
+    // Field bits: 0 = c (control byte: mode/I/F/T), 1 = x, 2 = s, 3 = f
+    // (flags). The extension and status bytes are reserved on ARMv4T.
+    if field_mask & 1 != 0 && privileged {
         v = (v & !0xFF) | (value & 0xFF);
+    }
+    if field_mask & 2 != 0 {
+        v = (v & !0xFF00) | (value & 0xFF00);
+    }
+    if field_mask & 4 != 0 {
+        v = (v & !0x00FF_0000) | (value & 0x00FF_0000);
+    }
+    if field_mask & 8 != 0 {
+        v = (v & !field::FLAGS) | (value & field::FLAGS);
     }
     if to_spsr {
         if privileged {
@@ -354,12 +363,16 @@ fn data_processing(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     if !is_test {
         if rd == 15 {
             if s {
+                // `Rd = 15` with S set is an exception return (`subs pc, lr,
+                // #4`, `movs pc, lr`): restore CPSR from the current mode's
+                // SPSR *before* branching so the restored T flag aligns the
+                // target. Unpredictable in USR/SYS; treat as a plain branch.
                 let m = cpu.cpsr & 0x1F;
                 if m != mode::USR && m != 0x1F {
-                    // Write flag bits into SPSR (pseudo MSR).
                     let spsr = cpu.get_spsr(m);
-                    cpu.set_spsr(m, (spsr & !field::FLAGS) | (result & field::FLAGS));
+                    cpu.set_cpsr(spsr);
                 }
+                cpu.branch(result);
             } else {
                 cpu.branch(result);
             }
@@ -491,14 +504,9 @@ fn halfword_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             },
         )
     } else {
-        (
-            base,
-            if w {
-                Some(base.wrapping_add(delta))
-            } else {
-                None
-            },
-        )
+        // Post-indexed: the base is always written back (W=1 here selects a
+        // user-mode access, not "no writeback").
+        (base, Some(base.wrapping_add(delta)))
     };
 
     if l {
@@ -516,8 +524,10 @@ fn halfword_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     } else if sh == 0b01 {
         bus.write16(addr, cpu.reg(rd));
     }
+    // Writeback: for a load with rn == rd the loaded value wins; a store
+    // still updates its base.
     if let Some(v) = wb {
-        if rn != 15 && rn != rd {
+        if rn != 15 && !(l && rn == rd) {
             cpu.set_reg(rn, v);
         }
     }
@@ -555,14 +565,9 @@ fn single_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             },
         )
     } else {
-        (
-            base,
-            if w {
-                Some(base.wrapping_add(delta))
-            } else {
-                None
-            },
-        )
+        // Post-indexed: the base is always written back (W=1 here selects a
+        // user-mode access, not "no writeback").
+        (base, Some(base.wrapping_add(delta)))
     };
 
     if l {
@@ -619,26 +624,30 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
 
     let mut lr_value: Option<u32> = None;
     if l {
+        // `LDM ^` without r15 loads the user bank; with r15 it is an
+        // exception return that restores CPSR from SPSR.
+        let load_usr = s && list & (1 << 15) == 0;
         for r in 0..16u32 {
             if list & (1 << r) != 0 {
                 let v = bus.read32(addr);
                 addr = addr.wrapping_add(4);
                 if r == 15 {
                     lr_value = Some(v);
+                } else if load_usr {
+                    cpu.set_usr_reg(r, v);
                 } else {
                     cpu.set_reg(r, v);
                 }
             }
         }
-        // ^ with r15 in list: load CPSR from SPSR.
-        if s {
-            let m = cpu.cpsr & 0x1F;
-            if m != mode::USR && m != 0x1F && list & (1 << 15) != 0 {
-                let spsr = cpu.get_spsr(m);
-                cpu.cpsr = spsr;
-            }
-        }
         if let Some(v) = lr_value {
+            if s {
+                let m = cpu.cpsr & 0x1F;
+                if m != mode::USR && m != 0x1F {
+                    let spsr = cpu.get_spsr(m);
+                    cpu.set_cpsr(spsr);
+                }
+            }
             cpu.branch(v);
         }
     } else {
@@ -667,7 +676,9 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             }
         }
     }
-    if w && !(rn == 15 && list & (1 << 15) != 0) {
+    // Writeback: a loaded base keeps the loaded value (ARM7TDMI); a stored
+    // base is updated after the transfer.
+    if w && rn != 15 && !(l && list & (1 << rn) != 0) {
         cpu.set_reg(rn, wb_val);
     }
     cpu.add_cycles(1);

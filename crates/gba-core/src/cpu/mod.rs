@@ -325,8 +325,11 @@ impl Cpu {
     /// appropriate interrupts. `lr_value` is the link address to store.
     pub fn take_exception(&mut self, vector: u32, mode: u32, lr_value: u32, disable_fiq: bool) {
         self.change_mode(mode, true);
-        self.lr[bank_index(mode)] = lr_value;
-        self.spsr[bank_index(mode)] = self.cpsr;
+        let idx = bank_index(mode);
+        self.lr[idx] = lr_value;
+        // change_mode already loaded regs[14] from the (stale) bank slot.
+        self.regs[14] = lr_value;
+        self.spsr[idx] = self.cpsr;
         self.cpsr &= !flag::T; // exceptions run in ARM mode
         self.cpsr |= flag::I;
         if disable_fiq {
@@ -930,13 +933,85 @@ mod tests {
         cpu.pc = 0;
         cpu.execute(&mut bus);
         assert_eq!(cpu.regs[1], mode::USR | flag::Z | flag::C);
-        // MSR cpsr_f, r1 (write flags field with f/c bits, USR mode)
+        // MSR cpsr_f, r1: the flags field is bit 3 of the field mask (0x8).
         cpu.regs[1] = flag::V | mode::USR;
-        arm(&mut bus, 0, 0xE121F001);
+        arm(&mut bus, 0, 0xE128F001);
         cpu.pc = 0;
         cpu.execute(&mut bus);
         assert_eq!(cpu.cpsr & field::FLAGS, flag::V);
         assert_eq!(cpu.cpsr & 0x1F, mode::USR);
+        // MRS r2, spsr must decode (bit 22 set) and read the SPSR of the
+        // current mode.
+        cpu.set_cpsr(mode::IRQ);
+        cpu.set_spsr(mode::IRQ, 0xF000_0010);
+        arm(&mut bus, 0, 0xE14F2000);
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[2], 0xF000_0010);
+    }
+
+    #[test]
+    fn arm_subs_pc_lr_restores_spsr() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        cpu.regs[13] = 0x0300_7F00;
+        cpu.irq(0x0800_0102 + 4);
+        assert_eq!(cpu.cpsr & 0x1F, mode::IRQ);
+        assert_eq!(cpu.regs[14], 0x0800_0106);
+        assert!(!cpu.in_thumb());
+        let mut bus = TestBus::new();
+        arm(&mut bus, VECTOR_IRQ, 0xE25EF004); // subs pc, lr, #4
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.cpsr & 0x1F, mode::USR);
+        assert!(cpu.in_thumb());
+        assert_eq!(cpu.pc, 0x0800_0102);
+        // The user-mode stack pointer is back in r13.
+        assert_eq!(cpu.regs[13], 0x0300_7F00);
+    }
+
+    #[test]
+    fn arm_ldm_user_bank_without_pc() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        cpu.regs[13] = 0x1111;
+        cpu.set_cpsr(mode::IRQ);
+        cpu.regs[13] = 0x2222;
+        let mut bus = TestBus::new();
+        cpu.regs[0] = 0x400;
+        bus.write32(0x400, 0xABCD);
+        arm(&mut bus, 0, 0xE8D0_2000); // ldmia r0, {r13}^
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[13], 0x2222, "IRQ sp untouched");
+        assert_eq!(cpu.usr_reg(13), 0xABCD, "user sp loaded");
+    }
+
+    #[test]
+    fn arm_strh_post_index_same_reg_writes_back() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        cpu.regs[0] = 0x200;
+        arm(&mut bus, 0, 0xE0C0_00B2); // strh r0, [r0], #2
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(bus.read16(0x200), 0x200);
+        assert_eq!(cpu.regs[0], 0x202);
+    }
+
+    #[test]
+    fn arm_ldm_writeback_loaded_base_wins() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        cpu.regs[0] = 0x400;
+        bus.write32(0x400, 0x1234);
+        bus.write32(0x404, 0x5678);
+        arm(&mut bus, 0, 0xE8B0_0003); // ldmia r0!, {r0, r1}
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[0], 0x1234);
+        assert_eq!(cpu.regs[1], 0x5678);
     }
 
     #[test]
