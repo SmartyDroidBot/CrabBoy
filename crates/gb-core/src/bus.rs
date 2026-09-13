@@ -233,7 +233,7 @@ impl Bus {
                 self.vram[bank + addr - 0x8000]
             }
             0xA000..=0xBFFF => self.cart.read_ram(addr as u16),
-            0xC000..=0xDFFF | 0xE000..=0xFDFF => self.wram[self.wram_offset(addr as u16)],
+            0xC000..=0xFDFF => self.wram[self.wram_offset(addr as u16)],
             _ => 0,
         }
     }

@@ -356,12 +356,8 @@ impl Apu {
         self.power = on;
         if !on {
             // Powering off clears all audio registers.
-            for r in 0x10..=0x25 {
-                io[r] = 0;
-            }
-            for r in 0x30..=0x3F {
-                io[r] = 0;
-            }
+            io[0x10..=0x25].fill(0);
+            io[0x30..=0x3F].fill(0);
             io[0x26] = 0;
             self.ch1 = Square::new();
             self.ch2 = Square::new();
@@ -519,7 +515,7 @@ impl Apu {
         // Step 0..7: length on even steps, sweep on 1/5, envelope on 3/7.
         let step = self.frame_step_n;
         self.frame_step_n = (self.frame_step_n + 1) % 8;
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             self.tick_lengths();
         }
         match step {
@@ -690,7 +686,7 @@ mod tests {
 
     #[test]
     fn retrigger_keeps_length_counter() {
-        let (mut io, wave_ram) = regs();
+        let (mut io, _wave_ram) = regs();
         let mut apu = Apu::new();
         io[0x26] = 0x80;
         apu.write(0xFF26, 0x80, &mut io);
@@ -756,7 +752,7 @@ mod tests {
 
     #[test]
     fn envelope_write_does_not_reload_timer() {
-        let (mut io, wave_ram) = regs();
+        let (mut io, _wave_ram) = regs();
         let mut apu = Apu::new();
         io[0x26] = 0x80;
         apu.write(0xFF26, 0x80, &mut io);

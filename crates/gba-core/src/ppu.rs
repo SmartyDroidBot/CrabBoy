@@ -354,10 +354,8 @@ impl Ppu {
             let sy = (iy + (pc as i64) * (eff_x as i64)) >> 8;
             let w = tile_w as i64 * 8;
             let h = tile_h as i64 * 8;
-            if !wrap {
-                if sx < 0 || sx >= w || sy < 0 || sy >= h {
-                    continue;
-                }
+            if !wrap && (sx < 0 || sx >= w || sy < 0 || sy >= h) {
+                continue;
             }
             let sx = (sx.rem_euclid(w)) as usize;
             let sy = (sy.rem_euclid(h)) as usize;

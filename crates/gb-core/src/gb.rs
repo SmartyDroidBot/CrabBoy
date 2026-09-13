@@ -677,7 +677,6 @@ mod tests {
 
     #[test]
     fn cgb_hdma_hblank_transfer() {
-        use emu_core::System;
         let mut emu = Gb::new(cgb_cart());
         for i in 0..0x40 {
             emu.bus.wram[i] = i as u8;

@@ -660,60 +660,6 @@ impl std::fmt::Debug for Apu {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn square_trigger_produces_audio() {
-        let mut apu = Apu::new();
-        apu.write16(0x60, 0);
-        apu.write16(0x62, 0x8F0 | 0x00F0);
-        apu.write16(0x64, 0x8000 | (1 << 8));
-        apu.write16(0x80, 0x00FF);
-        apu.write16(0x82, (2 << 2) | (1 << 6) | (1 << 7));
-        apu.step(CYCLES_PER_SAMPLE * 4);
-        let audio = apu.take_audio();
-        assert_eq!(audio.samples.len(), 8);
-        assert!(audio.samples.iter().any(|&s| s != 0.0));
-    }
-
-    #[test]
-    fn fifo_produces_output() {
-        let mut apu = Apu::new();
-        apu.write16(0x82, (1 << 6) | (1 << 7));
-        apu.write16(0xA0, 0x80 | 0x20);
-        // Nothing reaches the DAC until the selected timer (0) overflows.
-        apu.step(CYCLES_PER_SAMPLE);
-        assert_eq!(apu.take_audio().samples, vec![0.0, 0.0]);
-        apu.timer_overflow(0);
-        apu.step(CYCLES_PER_SAMPLE);
-        let audio = apu.take_audio();
-        assert_eq!(audio.samples.len(), 2);
-        assert!(audio.samples[0] != 0.0 || audio.samples[1] != 0.0);
-    }
-
-    #[test]
-    fn fifo_samples_are_signed() {
-        let mut apu = Apu::new();
-        apu.write16(0x82, 1 << 6);
-        apu.write16(0xA0, 0x80);
-        apu.timer_overflow(0);
-        apu.step(CYCLES_PER_SAMPLE);
-        let audio = apu.take_audio();
-        assert_eq!(audio.samples[0], -1.0);
-    }
-
-    #[test]
-    fn fifo_empty_is_silent() {
-        let mut apu = Apu::new();
-        apu.write16(0x82, (1 << 6) | (1 << 7));
-        apu.step(CYCLES_PER_SAMPLE);
-        let audio = apu.take_audio();
-        assert_eq!(audio.samples, vec![0.0, 0.0]);
-    }
-}
-
 // Save-state serialisation of the channel state.
 impl Envelope {
     fn save(&self, w: &mut crate::state::Writer) {
@@ -826,5 +772,59 @@ impl DirectSound {
         self.fifo_count = (r.u8()? as usize).min(32);
         self.fifo_read = (r.u8()? as usize) % 32;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn square_trigger_produces_audio() {
+        let mut apu = Apu::new();
+        apu.write16(0x60, 0);
+        apu.write16(0x62, 0x8F0 | 0x00F0);
+        apu.write16(0x64, 0x8000 | (1 << 8));
+        apu.write16(0x80, 0x00FF);
+        apu.write16(0x82, (2 << 2) | (1 << 6) | (1 << 7));
+        apu.step(CYCLES_PER_SAMPLE * 4);
+        let audio = apu.take_audio();
+        assert_eq!(audio.samples.len(), 8);
+        assert!(audio.samples.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn fifo_produces_output() {
+        let mut apu = Apu::new();
+        apu.write16(0x82, (1 << 6) | (1 << 7));
+        apu.write16(0xA0, 0x80 | 0x20);
+        // Nothing reaches the DAC until the selected timer (0) overflows.
+        apu.step(CYCLES_PER_SAMPLE);
+        assert_eq!(apu.take_audio().samples, vec![0.0, 0.0]);
+        apu.timer_overflow(0);
+        apu.step(CYCLES_PER_SAMPLE);
+        let audio = apu.take_audio();
+        assert_eq!(audio.samples.len(), 2);
+        assert!(audio.samples[0] != 0.0 || audio.samples[1] != 0.0);
+    }
+
+    #[test]
+    fn fifo_samples_are_signed() {
+        let mut apu = Apu::new();
+        apu.write16(0x82, 1 << 6);
+        apu.write16(0xA0, 0x80);
+        apu.timer_overflow(0);
+        apu.step(CYCLES_PER_SAMPLE);
+        let audio = apu.take_audio();
+        assert_eq!(audio.samples[0], -1.0);
+    }
+
+    #[test]
+    fn fifo_empty_is_silent() {
+        let mut apu = Apu::new();
+        apu.write16(0x82, (1 << 6) | (1 << 7));
+        apu.step(CYCLES_PER_SAMPLE);
+        let audio = apu.take_audio();
+        assert_eq!(audio.samples, vec![0.0, 0.0]);
     }
 }

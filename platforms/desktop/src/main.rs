@@ -404,19 +404,17 @@ impl CrabBoyApp {
         for e in raw {
             match e {
                 egui::Event::Key {
-                    physical_key,
+                    physical_key: Some(k),
                     pressed,
                     ..
                 } => {
-                    if let Some(k) = physical_key {
-                        if pressed {
-                            if !keys.contains(&k) {
-                                newly.push(k);
-                            }
-                            keys.insert(k);
-                        } else {
-                            keys.remove(&k);
+                    if pressed {
+                        if !keys.contains(&k) {
+                            newly.push(k);
                         }
+                        keys.insert(k);
+                    } else {
+                        keys.remove(&k);
                     }
                 }
                 egui::Event::WindowFocused(false) => {

@@ -196,7 +196,7 @@ impl Cartridge {
                     if self.rtc[2] >= 24 {
                         self.rtc[2] = 0;
                         // Day counter spans 9 bits across rtc[3] and bit 0 of rtc[4].
-                        let mut day = (self.rtc[4] & 0x01) as u16 * 256 | self.rtc[3] as u16;
+                        let mut day = ((self.rtc[4] & 0x01) as u16 * 256) | self.rtc[3] as u16;
                         day = day.wrapping_add(1);
                         if day > 0x1FF {
                             day = 0;
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn sram_dirty_flag_tracks_writes() {
-        let mut rom = make_rom(0x13, 0x03); // MBC3+RAM+BATTERY
+        let rom = make_rom(0x13, 0x03); // MBC3+RAM+BATTERY
         let mut cart = Cartridge::load(&rom).unwrap();
 
         // Nothing written yet -> not dirty.
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn rtc_persistence_round_trip() {
-        let mut rom = make_rom(0x0F, 0x02); // MBC3+TIMER+BATTERY
+        let rom = make_rom(0x0F, 0x02); // MBC3+TIMER+BATTERY
         let mut cart = Cartridge::load(&rom).unwrap();
         assert_eq!(cart.rtc_data().len(), 5, "timer cartridge exposes RTC");
 
