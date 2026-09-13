@@ -197,8 +197,14 @@ pub struct Bus {
     pub dma: Dma,
     /// Timers.
     pub timers: Timers,
-    /// Real-time clock (serial I/O).
+    /// Real-time clock on the cartridge GPIO port.
     pub rtc: Rtc,
+    /// Cartridge GPIO (0x080000C4 data, 0xC6 direction, 0xC8 read enable):
+    /// the four data bits, their direction (1 = output from the GBA) and
+    /// whether the registers are readable in ROM space.
+    pub(crate) gpio_data: u8,
+    pub(crate) gpio_dir: u8,
+    pub(crate) gpio_readable: bool,
     /// Last value driven onto the bus; unmapped reads return it (open bus).
     pub(crate) open_bus: u32,
     /// Wait-state cycles added by accesses during the current instruction.
@@ -234,6 +240,9 @@ impl Bus {
             dma: Dma::new(),
             timers: Timers::new(),
             rtc: Rtc::new(),
+            gpio_data: 0,
+            gpio_dir: 0,
+            gpio_readable: false,
             open_bus: 0,
             cycles: 0,
             last_seq: false,
@@ -345,7 +354,13 @@ impl Bus {
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)],
             Region::Vram => self.vram[vram_index(addr as usize)],
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)],
-            Region::Rom => self.rom_byte(addr as usize & ROM_MASK),
+            Region::Rom => {
+                let off = addr as usize & ROM_MASK;
+                match self.gpio_read16(off & !1) {
+                    Some(v) => (v >> ((off & 1) * 8)) as u8,
+                    None => self.rom_byte(off),
+                }
+            }
             Region::Eeprom => match self.save.eeprom_read_bit() {
                 Some(bit) => bit,
                 None => self.rom_byte(addr as usize & ROM_MASK),
@@ -370,6 +385,40 @@ impl Bus {
         (self.rom_byte(off) as u32) | (self.rom_byte(off + 1) as u32) << 8
     }
 
+    /// A read of the cartridge GPIO registers, when they are enabled for
+    /// reading. Input pins show the level the RTC drives.
+    fn gpio_read16(&self, off: usize) -> Option<u16> {
+        if !self.gpio_readable {
+            return None;
+        }
+        match off {
+            0xC4 => {
+                let mut v = self.gpio_data & self.gpio_dir;
+                if self.gpio_dir & 0b010 == 0 && self.rtc.sio_out() {
+                    v |= 0b010;
+                }
+                Some(v as u16)
+            }
+            0xC6 => Some(self.gpio_dir as u16),
+            0xC8 => Some(self.gpio_readable as u16),
+            _ => None,
+        }
+    }
+
+    /// A write to the cartridge GPIO registers (writes elsewhere in ROM
+    /// space are ignored). Output pins are driven to the RTC.
+    fn gpio_write16(&mut self, off: usize, value: u16) {
+        match off {
+            0xC4 => {
+                self.gpio_data = (value & 0x0F) as u8;
+                self.rtc.write_pins(self.gpio_data & self.gpio_dir);
+            }
+            0xC6 => self.gpio_dir = (value & 0x0F) as u8,
+            0xC8 => self.gpio_readable = value & 1 != 0,
+            _ => {}
+        }
+    }
+
     /// Read an aligned 16-bit I/O register, routing to the device that owns
     /// it.
     fn io_read16(&self, off: usize) -> u32 {
@@ -379,8 +428,6 @@ impl Bus {
             0x104 => self.timers.read_cnt_l(1) as u32,
             0x108 => self.timers.read_cnt_l(2) as u32,
             0x10C => self.timers.read_cnt_l(3) as u32,
-            // RTC serial data: bit 0 is the RTC output pin during reads.
-            0x120 => (self.io.read16(off) & !1) as u32 | self.rtc.read_sio_bit() as u32,
             _ => self.io.read16(off) as u32,
         }
     }
@@ -423,7 +470,13 @@ impl Bus {
                 let i = base & (OAM_SIZE - 1);
                 (self.oam[i] as u32) | (self.oam[i + 1] as u32) << 8
             }
-            Region::Rom => self.rom_half(base & ROM_MASK),
+            Region::Rom => {
+                let off = base & ROM_MASK;
+                match self.gpio_read16(off) {
+                    Some(v) => v as u32,
+                    None => self.rom_half(off),
+                }
+            }
             Region::Eeprom => match self.save.eeprom_read_bit() {
                 Some(bit) => bit as u32,
                 None => self.rom_half(base & ROM_MASK),
@@ -488,7 +541,8 @@ impl Bus {
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
             Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
-            Region::Rom | Region::Bios => {}
+            Region::Rom => self.gpio_write16(addr as usize & ROM_MASK & !1, value as u16),
+            Region::Bios => {}
         }
     }
 
@@ -518,7 +572,6 @@ impl Bus {
                 match off {
                     0xB0..=0xDF => self.dma.write16(off, value as u16),
                     0x100..=0x110 => self.write_timer(off, value as u16),
-                    0x120 | 0x122 => self.rtc.write_sio(value as u16),
                     _ => {}
                 }
             }
@@ -543,7 +596,8 @@ impl Bus {
                 self.save.write16(i, value as u16);
             }
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
-            Region::Rom | Region::Bios => {}
+            Region::Rom => self.gpio_write16(base & ROM_MASK, value as u16),
+            Region::Bios => {}
         }
     }
 
@@ -887,6 +941,47 @@ mod tests {
         assert_eq!(b.read8(0x0D00_0010), 0xAB);
         b.write16(0x0D00_0000, 1);
         assert_eq!(b.save.kind, SaveType::Flash, "flash cart stays flash");
+    }
+
+    #[test]
+    fn gpio_registers_shadow_rom_only_when_readable() {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0xC4] = 0xAB;
+        rom[0xC5] = 0xCD;
+        let mut b = Bus::new(rom);
+        assert_eq!(b.read16(0x0800_00C4), 0xCDAB, "plain ROM until enabled");
+        b.write16(0x0800_00C8, 1);
+        b.write16(0x0800_00C6, 0b0111); // all three RTC pins as outputs
+        b.write16(0x0800_00C4, 0b0101);
+        assert_eq!(b.read16(0x0800_00C4), 0b0101);
+        assert_eq!(b.read16(0x0800_00C6), 0b0111);
+        assert_eq!(b.read8(0x0800_00C8), 1);
+        b.write16(0x0800_00C8, 0);
+        assert_eq!(b.read16(0x0800_00C4), 0xCDAB);
+    }
+
+    #[test]
+    fn rtc_status_is_read_through_the_gpio_port() {
+        let mut b = bus();
+        b.write16(0x0800_00C8, 1);
+        b.write16(0x0800_00C6, 0b0111);
+        // siirtc: CS low with SCK high, then CS high, then the command 0x63
+        // (read status) MSB first, then SIO becomes an input for the reply.
+        b.write16(0x0800_00C4, 0b001);
+        b.write16(0x0800_00C4, 0b101);
+        for i in (0..8).rev() {
+            let sio = ((0x63 >> i) & 1) << 1;
+            b.write16(0x0800_00C4, 0b100 | sio);
+            b.write16(0x0800_00C4, 0b101 | sio);
+        }
+        b.write16(0x0800_00C6, 0b0101);
+        let mut v = 0u32;
+        for i in 0..8 {
+            b.write16(0x0800_00C4, 0b100);
+            b.write16(0x0800_00C4, 0b101);
+            v |= ((b.read16(0x0800_00C4) >> 1) & 1) << i;
+        }
+        assert_eq!(v, 0x40, "24-hour mode, no power failure");
     }
 
     #[test]

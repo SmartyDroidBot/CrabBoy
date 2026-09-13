@@ -131,6 +131,7 @@ impl Gba {
 
     /// Advance the machine by `cycles` (timers, APU, PPU scanlines, DMA).
     fn advance(&mut self, cycles: u32) {
+        self.bus.rtc.advance(cycles);
         self.bus.timers.step(cycles);
         for i in 0..4 {
             if self.bus.timers.just_overflowed(i) {
