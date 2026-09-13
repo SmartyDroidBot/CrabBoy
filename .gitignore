@@ -1,18 +1,29 @@
 # Build artifacts
 /target
 /dist
+platforms/wasm/web/pkg/
 
-# Save files / battery RAM
+# Save files / battery RAM / save states (never commit)
 *.sav
 *.srm
+*.ram
+*.state*
 
-# Test ROMs are fetched by script, not committed
-roms/tests/*.gb
-roms/tests/*.gbc
-roms/tests/*.gba
-roms/tests/*.zip
-roms/tests/*.ppm
-roms/tests/*.bin
+# ROMs: never commit any cartridge image, wherever it lives
+roms/**
+**/*.gba
+**/*.gb
+**/*.gbc
+**/*.zip
+**/*.ppm
+
+# BIOS dumps and debug memory/framebuffer dumps (never commit)
+gba_bios.bin
+iwram_dump.bin
+**/*.bin
+
+# Local tool settings
+.claude/settings.local.json
 
 # Stuck Windows build scripts (leftover from an aborted Windows build)
 target_stuck_windows/
