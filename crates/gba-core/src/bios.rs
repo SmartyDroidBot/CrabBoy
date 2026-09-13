@@ -13,8 +13,11 @@ use crate::cpu::Cpu;
 /// implemented; the caller records it and continues at the next instruction.
 pub(crate) fn run(cpu: &mut Cpu, bus: &mut Bus, num: u32) -> bool {
     match num {
+        0x00 | 0x26 => soft_reset(cpu, bus),
         0x01 => register_ram_reset(cpu, bus),
         0x02 => halt(cpu),
+        0x03 => stop(cpu),
+        0x04 => intr_wait(cpu, bus),
         0x05 => vblank_intr_wait(cpu, bus),
         0x06 => div(cpu),
         0x07 => div_arm(cpu),
@@ -35,18 +38,48 @@ pub(crate) fn run(cpu: &mut Cpu, bus: &mut Bus, num: u32) -> bool {
         0x16 => diff8(cpu, bus, Unit::Byte),
         0x17 => diff8(cpu, bus, Unit::Half),
         0x18 => diff16(cpu, bus),
+        0x19 => sound_bias(cpu, bus),
+        // Sound driver, MultiBoot and debugging entry points that no
+        // shipped game relies on: return immediately.
+        0x1A..=0x1E | 0x20..=0x25 | 0x28..=0x2A => true,
+        0x1F => midi_key_to_freq(cpu, bus),
+        0x27 => custom_halt(cpu, bus),
         _ => false,
     }
 }
 
-/// 0x01 RegisterRamReset: r0 bit flags select regions to zero.
+/// 0x00 SoftReset / 0x26 HardReset: clear the BIOS area at the top of IWRAM,
+/// zero the registers, set up the three stacks and restart the cartridge in
+/// SYS mode (or EWRAM when the return-address flag at 0x03007FFA is set).
+fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let to_ewram = bus.read8(0x0300_7FFA) != 0;
+    zero(bus, 0x0300_7E00, 0x200);
+    for r in 0..13 {
+        cpu.set_reg(r, 0);
+    }
+    cpu.set_mode_sp(crate::cpu::mode::SVC, 0x0300_7FE0);
+    cpu.set_mode_sp(crate::cpu::mode::IRQ, 0x0300_7FA0);
+    cpu.set_mode_sp(crate::cpu::mode::USR, 0x0300_7F00);
+    cpu.set_cpsr(0x1F);
+    cpu.set_reg(14, 0);
+    cpu.halted = false;
+    cpu.complete_bios_wait();
+    bus.io.write16(0x208, 0); // IME off, as after the BIOS boot
+    cpu.set_pc(if to_ewram { 0x0200_0000 } else { 0x0800_0000 });
+    true
+}
+
+/// 0x01 RegisterRamReset: r0 bit flags select what to clear. DISPCNT is
+/// forced blank unconditionally, and bit 1 spares the top 0x200 bytes of
+/// IWRAM that hold the BIOS state (stacks, IF mirror, IRQ vector).
 fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     let flags = cpu.reg_raw(0);
+    bus.io.write16(0x00, 0x0080);
     if flags & 0x01 != 0 {
         zero(bus, 0x0200_0000, crate::bus::EWRAM_SIZE);
     }
     if flags & 0x02 != 0 {
-        zero(bus, 0x0300_0000, crate::bus::IWRAM_SIZE);
+        zero(bus, 0x0300_0000, crate::bus::IWRAM_SIZE - 0x200);
     }
     if flags & 0x04 != 0 {
         zero(bus, 0x0500_0000, crate::bus::PALRAM_SIZE);
@@ -57,6 +90,101 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     if flags & 0x10 != 0 {
         zero(bus, 0x0700_0000, crate::bus::OAM_SIZE);
     }
+    if flags & 0x20 != 0 {
+        // Serial: SIOCNT, SIOMLT_SEND, RCNT (start value), JOYCNT, JOY_*.
+        for (off, v) in [
+            (0x128u32, 0u16),
+            (0x12A, 0),
+            (0x134, 0x8000),
+            (0x140, 0),
+            (0x150, 0),
+            (0x152, 0),
+            (0x154, 0),
+            (0x156, 0),
+        ] {
+            bus.write16(0x0400_0000 + off, v as u32);
+        }
+    }
+    if flags & 0x40 != 0 {
+        for off in (0x60..=0x84u32).step_by(2) {
+            bus.write16(0x0400_0000 + off, 0);
+        }
+        bus.write16(0x0400_0088, 0x200); // SOUNDBIAS
+        for off in (0x90..=0x9Eu32).step_by(2) {
+            bus.write16(0x0400_0000 + off, 0);
+        }
+    }
+    if flags & 0x80 != 0 {
+        // Video (except DISPCNT), DMA, timers, interrupt and wait-state
+        // registers; the affine matrices return to identity.
+        for off in (0x04..=0x56u32).step_by(2) {
+            bus.write16(0x0400_0000 + off, 0);
+        }
+        for off in [0x20u32, 0x26, 0x30, 0x36] {
+            bus.write16(0x0400_0000 + off, 0x100);
+        }
+        for off in (0xB0..=0xDEu32).step_by(2) {
+            bus.write16(0x0400_0000 + off, 0);
+        }
+        for off in (0x100..=0x10Eu32).step_by(2) {
+            bus.write16(0x0400_0000 + off, 0);
+        }
+        bus.write16(0x0400_0200, 0); // IE
+        bus.write16(0x0400_0202, 0xFFFF); // IF: acknowledge everything
+        bus.write16(0x0400_0204, 0); // WAITCNT
+        bus.write16(0x0400_0208, 0); // IME
+    }
+    true
+}
+
+/// 0x03 Stop: enter low-power mode until a keypad, cartridge or serial
+/// interrupt. Approximated as a halt.
+fn stop(cpu: &mut Cpu) -> bool {
+    cpu.halted = true;
+    true
+}
+
+/// 0x27 CustomHalt: write r2 to HALTCNT (0 = halt, 0x80 = stop).
+fn custom_halt(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    bus.write8(0x0400_0301, cpu.reg_raw(2) & 0xFF);
+    true
+}
+
+/// 0x19 SoundBias: r0 = 0 sets the bias level to 0, otherwise to 0x200.
+fn sound_bias(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let bias = if cpu.reg_raw(0) == 0 { 0 } else { 0x200 };
+    bus.write16(0x0400_0088, bias);
+    true
+}
+
+/// 2^31 * 2^(n/12) for the twelve semitones.
+const SEMITONE_TABLE: [u32; 12] = [
+    2147483648, 2275179671, 2410468894, 2553802834, 2705659852, 2866546760, 3037000500, 3217589947,
+    3408917802, 3611622603, 3826380858, 4053909305,
+];
+
+/// Frequency multiplier for a MIDI key as a 32-bit fraction of 2^(16+key/12):
+/// the semitone table shifted down by the octaves below the 15th.
+fn key_scale(key: u32) -> u32 {
+    let key = key.min(179);
+    SEMITONE_TABLE[(key % 12) as usize] >> (15 - key / 12)
+}
+
+/// 0x1F MidiKey2Freq: r0 = WaveData (sample rate at r0+4), r1 = MIDI key,
+/// r2 = fine adjust (1/256 semitone) -> r0 = playback rate. Keys above 178
+/// clamp to 178 with maximum fine adjust, as in the sound driver source.
+fn midi_key_to_freq(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let freq = bus.read32(cpu.reg_raw(0).wrapping_add(4)) as u64;
+    let mut key = cpu.reg_raw(1) & 0xFF;
+    let mut fine = cpu.reg_raw(2) & 0xFF;
+    if key > 178 {
+        key = 178;
+        fine = 255;
+    }
+    let lo = key_scale(key) as u64;
+    let hi = key_scale(key + 1) as u64;
+    let scale = lo + (((hi - lo) * fine as u64) >> 8);
+    cpu.set_reg(0, ((freq * scale) >> 32) as u32);
     true
 }
 
@@ -79,15 +207,31 @@ fn halt(cpu: &mut Cpu) -> bool {
 /// Interrupt Functions").
 pub(crate) const BIOS_IF_ADDR: u32 = 0x0300_7FF8;
 
-/// 0x05 VBlankIntrWait: clear the VBlank flag and wait until the next one.
+/// 0x04 IntrWait: r0 = 1 discards flags already set, r1 = mask of IRQ flags
+/// to wait for.
+fn intr_wait(cpu: &mut Cpu, bus: &mut Bus) -> bool {
+    let discard = cpu.reg_raw(0) & 1 != 0;
+    let mask = cpu.reg_raw(1) as u16;
+    wait_for_irq(cpu, bus, mask, discard)
+}
+
+/// 0x05 VBlankIntrWait: `IntrWait(1, 1)`.
 fn vblank_intr_wait(cpu: &mut Cpu, bus: &mut Bus) -> bool {
-    const VBLANK: u16 = 1 << 0;
+    wait_for_irq(cpu, bus, 1 << 0, true)
+}
+
+fn wait_for_irq(cpu: &mut Cpu, bus: &mut Bus, mask: u16, discard: bool) -> bool {
     let cur = bus.read32(BIOS_IF_ADDR);
-    bus.write32(BIOS_IF_ADDR, cur & !(VBLANK as u32));
-    if bus.io.iflags() & VBLANK != 0 {
-        bus.io.acknowledge(VBLANK);
+    if discard {
+        bus.write32(BIOS_IF_ADDR, cur & !(mask as u32));
+    } else if cur & mask as u32 != 0 {
+        bus.write32(BIOS_IF_ADDR, cur & !(mask as u32));
+        return true;
+    }
+    if bus.io.iflags() & mask != 0 {
+        bus.io.acknowledge(mask);
     } else {
-        cpu.begin_bios_wait(VBLANK);
+        cpu.begin_bios_wait(mask);
     }
     true
 }
@@ -857,8 +1001,8 @@ mod tests {
         assert_eq!((pa, pb, pc, pd), (0, -0x100, 0x100, 0));
         let dx = bus.read32(0x0300_0108) as i32;
         let dy = bus.read32(0x0300_010C) as i32;
-        assert_eq!(dx, (0x1000 << 8) - (0 * 120 + -0x100 * 80));
-        assert_eq!(dy, (0x2000 << 8) - (0x100 * 120 + 0 * 80));
+        assert_eq!(dx, (0x1000 << 8) + 0x100 * 80);
+        assert_eq!(dy, (0x2000 << 8) - 0x100 * 120);
     }
 
     #[test]
@@ -947,6 +1091,106 @@ mod tests {
     fn unknown_swi_is_not_handled() {
         let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
         let mut c = Cpu::new();
-        assert!(!crate::bios::run(&mut c, &mut bus, 0x1F));
+        assert!(!crate::bios::run(&mut c, &mut bus, 0x2B));
+        // Stubbed driver/multiboot entry points report success.
+        assert!(crate::bios::run(&mut c, &mut bus, 0x1A));
+        assert!(crate::bios::run(&mut c, &mut bus, 0x25));
+    }
+
+    #[test]
+    fn midi_key_to_freq_scales_by_semitones() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write32(0x0300_0004, 0x1000_0000); // WaveData.freq
+        let run = |c: &mut Cpu, bus: &mut crate::bus::Bus, key: u32, fine: u32| {
+            c.set_reg(0, 0x0300_0000);
+            c.set_reg(1, key);
+            c.set_reg(2, fine);
+            crate::bios::run(c, bus, 0x1F);
+            c.reg_raw(0)
+        };
+        let mut c = Cpu::new();
+        let at60 = run(&mut c, &mut bus, 60, 0);
+        assert_eq!(at60, 0x1000_0000 >> 11);
+        assert_eq!(run(&mut c, &mut bus, 72, 0), at60 * 2, "octave doubles");
+        let at61 = run(&mut c, &mut bus, 61, 0);
+        let between = run(&mut c, &mut bus, 60, 128);
+        assert!(at60 < between && between < at61, "fine adjust interpolates");
+        assert_eq!(
+            run(&mut c, &mut bus, 200, 0),
+            run(&mut c, &mut bus, 178, 255),
+            "keys above 178 clamp"
+        );
+    }
+
+    #[test]
+    fn soft_reset_restarts_the_cartridge_in_sys_mode() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write32(0x0300_7FFC, 0x0300_2750);
+        let mut c = Cpu::new();
+        c.set_reg(0, 0x1234);
+        assert!(crate::bios::run(&mut c, &mut bus, 0x00));
+        assert_eq!(c.pc(), 0x0800_0000);
+        assert_eq!(c.cpsr() & 0x1F, 0x1F);
+        assert_eq!(c.reg_raw(13), 0x0300_7F00);
+        assert_eq!(c.reg_raw(0), 0);
+        assert_eq!(bus.read32(0x0300_7FFC), 0, "BIOS area cleared");
+        c.set_cpsr(crate::cpu::mode::IRQ);
+        assert_eq!(c.reg_raw(13), 0x0300_7FA0);
+        // The return-address flag selects EWRAM.
+        bus.write8(0x0300_7FFA, 1);
+        assert!(crate::bios::run(&mut c, &mut bus, 0x00));
+        assert_eq!(c.pc(), 0x0200_0000);
+    }
+
+    #[test]
+    fn register_ram_reset_preserves_top_of_iwram_and_blanks_dispcnt() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write32(0x0300_0000, 0xCAFE_BABE);
+        bus.write32(0x0300_7E00, 0x1234_5678);
+        bus.write32(0x0300_7FFC, 0xDEAD_BEEF);
+        bus.io.write16(0x00, 0x0103);
+        let mut c = Cpu::new();
+        c.set_reg(0, 0x02);
+        crate::bios::run(&mut c, &mut bus, 0x01);
+        assert_eq!(bus.read32(0x0300_0000), 0);
+        assert_eq!(bus.read32(0x0300_7DFC), 0);
+        assert_eq!(bus.read32(0x0300_7E00), 0x1234_5678);
+        assert_eq!(bus.read32(0x0300_7FFC), 0xDEAD_BEEF);
+        assert_eq!(bus.io.read16(0x00), 0x0080);
+    }
+
+    #[test]
+    fn register_ram_reset_resets_io_groups() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write16(0x0400_0200, 0x3FFF); // IE
+        bus.io.raise_irq(0xFFFF);
+        bus.write16(0x0400_0088, 0xFFFF); // SOUNDBIAS
+        bus.write16(0x0400_0134, 0x0000); // RCNT
+        bus.write16(0x0400_0020, 0x0000); // BG2PA
+        let mut c = Cpu::new();
+        c.set_reg(0, 0xE0);
+        crate::bios::run(&mut c, &mut bus, 0x01);
+        assert_eq!(bus.io.ie(), 0);
+        assert_eq!(bus.io.iflags(), 0);
+        assert_eq!(bus.read16(0x0400_0088), 0x200);
+        assert_eq!(bus.read16(0x0400_0134), 0x8000);
+        assert_eq!(bus.read16(0x0400_0020), 0x100);
+    }
+
+    #[test]
+    fn intr_wait_without_discard_returns_on_a_set_mirror_flag() {
+        let mut bus = crate::bus::Bus::new(vec![0; 0x8000]);
+        bus.write32(super::BIOS_IF_ADDR, 0x0001);
+        let mut c = Cpu::new();
+        c.set_reg(0, 0);
+        c.set_reg(1, 1);
+        assert!(crate::bios::run(&mut c, &mut bus, 0x04));
+        assert_eq!(c.bios_wait_mask(), None);
+        assert_eq!(bus.read32(super::BIOS_IF_ADDR), 0, "flag consumed");
+        // With discard set the stale flag is dropped and the wait begins.
+        bus.write32(super::BIOS_IF_ADDR, 0x0001);
+        c.set_reg(0, 1);
+        assert!(crate::bios::run(&mut c, &mut bus, 0x04));
+        assert_eq!(c.bios_wait_mask(), Some(1));
     }
 }
