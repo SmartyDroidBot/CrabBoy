@@ -991,10 +991,9 @@ dependencies = [
 name = "crab-desktop"
 version = "0.1.0"
 dependencies = [
+ "crab-systems",
  "eframe",
  "emu-core",
- "gb-core",
- "gba-core",
  "rfd",
  "rodio",
 ]

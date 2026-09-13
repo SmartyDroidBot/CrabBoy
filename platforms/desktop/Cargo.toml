@@ -14,5 +14,4 @@ eframe = "0.28"
 rfd = "0.15"
 rodio = "0.19"
 emu-core = { workspace = true }
-gb-core = { workspace = true }
-gba-core = { workspace = true }
+crab-systems = { workspace = true }

@@ -1,6 +1,5 @@
 use eframe::egui;
 use emu_core::{Button, System};
-use gb_core::cartridge::Cartridge;
 use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -43,31 +42,25 @@ fn state_path_for(sav: &str, suffix: &str) -> Option<String> {
 /// File suffixes for the four state slots plus the quicksave slot.
 const STATE_SLOTS: [&str; 5] = [".state0", ".state1", ".state2", ".state3", ".stateq"];
 
-/// The 8 buttons a Game Boy exposes (subset of emu_core::Button).
-const GB_BUTTONS: [Button; 8] = [
-    Button::Up,
-    Button::Down,
-    Button::Left,
-    Button::Right,
-    Button::A,
-    Button::B,
-    Button::Start,
-    Button::Select,
-];
-
-/// The 10 buttons a GBA exposes (adds L/R).
-const GBA_BUTTONS: [Button; 10] = [
-    Button::Up,
-    Button::Down,
-    Button::Left,
-    Button::Right,
-    Button::A,
-    Button::B,
-    Button::L,
-    Button::R,
-    Button::Start,
-    Button::Select,
-];
+/// Locate a GBA BIOS image: an explicit `--bios` path, else `gba_bios.bin`
+/// next to the ROM, else next to the executable. Returns `None` when no
+/// image is found; the GBA then boots with high-level BIOS emulation.
+fn find_gba_bios(explicit: Option<&str>, rom_path: &str) -> Option<Vec<u8>> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(p) = explicit {
+        candidates.push(p.into());
+    }
+    if let Some(dir) = std::path::Path::new(rom_path).parent() {
+        candidates.push(dir.join("gba_bios.bin"));
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_owned()))
+    {
+        candidates.push(dir.join("gba_bios.bin"));
+    }
+    candidates.into_iter().find_map(|p| std::fs::read(p).ok())
+}
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -122,9 +115,9 @@ const PALETTES: [(&str, Palette); 4] = [
 ];
 
 struct CrabBoyApp {
-    rom_data: Option<Vec<u8>>,
     system: Option<Box<dyn System>>,
     sav_path: Option<String>,
+    bios_path: Option<String>,
     keymap: HashMap<Button, egui::Key>,
     prev_keys: HashSet<egui::Key>,
     paused: bool,
@@ -149,16 +142,19 @@ impl CrabBoyApp {
     fn new(
         cc: &eframe::CreationContext<'_>,
         rom_path: Option<String>,
+        bios_path: Option<String>,
         audio: Option<(OutputStream, Sink)>,
     ) -> Self {
         let mut keymap = HashMap::new();
-        for b in GBA_BUTTONS {
-            keymap.insert(b, default_key(b));
+        for b in Button::ALL {
+            if let Some(k) = default_key(b) {
+                keymap.insert(b, k);
+            }
         }
         let mut app = CrabBoyApp {
-            rom_data: None,
             system: None,
             sav_path: None,
+            bios_path,
             keymap,
             prev_keys: HashSet::new(),
             paused: false,
@@ -192,69 +188,59 @@ impl CrabBoyApp {
                 return;
             }
         };
-        let ext = std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase());
-        let is_gba = ext.as_deref() == Some("gba");
-
-        let sav_path = sav_path_for(path);
-
-        let system: Box<dyn System> = if is_gba {
-            let title = String::from_utf8_lossy(&data[0xA0..data.len().min(0xB0)])
-                .trim_end_matches('\0')
-                .trim()
-                .to_string();
-            self.rom_title = if title.is_empty() {
-                "GBA".to_string()
+        let kind = match crab_systems::detect(&data) {
+            Some(k) => k,
+            None => {
+                self.status = format!("'{}' is not a Game Boy or GBA ROM", path);
+                return;
+            }
+        };
+        let opts = crab_systems::LoadOptions {
+            gba_bios: if kind == crab_systems::Kind::Gba {
+                find_gba_bios(self.bios_path.as_deref(), path)
             } else {
-                title
-            };
-            let mut s = gba_core::Gba::system(data.clone());
+                None
+            },
+            cold: false,
+        };
+        let bios_note = if opts.gba_bios.is_some() {
+            ", BIOS boot"
+        } else {
+            ""
+        };
+        let mut system = match crab_systems::load_with(data, &opts) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Failed to load cartridge: {e}");
+                return;
+            }
+        };
+        let sav_path = sav_path_for(path);
+        self.rom_title = system.title();
+        if self.rom_title.is_empty() {
+            self.rom_title = kind.name().to_ascii_uppercase();
+        }
+        self.status = format!("Loaded '{}'{bios_note}", system.info());
+        if system.battery_backed() {
             if let Some(sav) = &sav_path {
                 if let Ok(d) = std::fs::read(sav) {
-                    s.load_data(&d);
+                    system.load_data(&d);
+                    self.status =
+                        format!("Loaded '{}'{bios_note} (battery save found)", system.info());
                 }
-            }
-            s
-        } else {
-            let cart = match Cartridge::load(&data) {
-                Ok(c) => c,
-                Err(e) => {
-                    self.status = format!("Failed to load cartridge: {e}");
-                    return;
-                }
-            };
-            let info = format!("{} ({})", cart.title, cart.mbc);
-            let battery = cart.has_battery();
-            self.rom_title = cart.title.trim().to_string();
-
-            let mut system: Box<dyn System> = gb_core::gb::Gb::system(cart);
-            if battery {
-                if let Some(sav) = &sav_path {
-                    if let Ok(d) = std::fs::read(sav) {
-                        system.load_data(&d);
-                        self.status = format!("Loaded '{}' (battery save found)", info);
-                    }
-                }
-                if let Some(rtc) = sav_path.as_ref().and_then(|s| rtc_path_for(s)) {
+                if let Some(rtc) = rtc_path_for(sav) {
                     if let Ok(d) = std::fs::read(&rtc) {
                         system.load_rtc(&d);
                     }
                 }
             }
-            system
-        };
+        }
 
-        self.rom_data = Some(data);
         self.system = Some(system);
         self.sav_path = sav_path;
         self.frame_count = 0;
         self.accum = 0.0;
         self.paused = false;
-        if !self.status.starts_with("Loaded") {
-            self.status = format!("Loaded '{}'", self.rom_title);
-        }
         ctx.request_repaint();
     }
 
@@ -441,18 +427,11 @@ impl CrabBoyApp {
         }
 
         if let Some(system) = &mut self.system {
-            let is_gba = system.name() == "gba";
-            let buttons: &[Button] = if is_gba { &GBA_BUTTONS } else { &GB_BUTTONS };
-            for b in buttons {
-                let held = self
-                    .keymap
-                    .get(b)
-                    .map(|k| keys.contains(k))
-                    .unwrap_or(false);
-                if held {
-                    system.press(*b);
+            for (&b, k) in &self.keymap {
+                if keys.contains(k) {
+                    system.press(b);
                 } else {
-                    system.release(*b);
+                    system.release(b);
                 }
             }
         }
@@ -541,8 +520,8 @@ impl CrabBoyApp {
     }
 }
 
-fn default_key(b: Button) -> egui::Key {
-    match b {
+fn default_key(b: Button) -> Option<egui::Key> {
+    Some(match b {
         Button::Up => egui::Key::ArrowUp,
         Button::Down => egui::Key::ArrowDown,
         Button::Left => egui::Key::ArrowLeft,
@@ -553,8 +532,8 @@ fn default_key(b: Button) -> egui::Key {
         Button::Select => egui::Key::Backspace,
         Button::L => egui::Key::A,
         Button::R => egui::Key::S,
-        _ => egui::Key::Space,
-    }
+        _ => return None,
+    })
 }
 
 impl eframe::App for CrabBoyApp {
@@ -671,15 +650,23 @@ impl eframe::App for CrabBoyApp {
 }
 
 fn main() -> eframe::Result<()> {
-    let rom_path: Option<String> = {
-        let mut args = std::env::args();
-        let mut path = None;
+    let (rom_path, bios_path) = {
+        let mut args = std::env::args().skip(1);
+        let mut rom = None;
+        let mut bios = None;
         while let Some(a) = args.next() {
-            if a == "--rom" {
-                path = args.next();
+            match a.as_str() {
+                "--rom" => rom = args.next(),
+                "--bios" => bios = args.next(),
+                "-h" | "--help" => {
+                    println!("usage: CrabBoy [--rom <file>] [--bios <gba_bios.bin>] [<file>]");
+                    return Ok(());
+                }
+                _ if rom.is_none() && !a.starts_with('-') => rom = Some(a),
+                _ => {}
             }
         }
-        path
+        (rom, bios)
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -698,6 +685,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "CrabBoy Emulator",
         options,
-        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, audio)))),
+        Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, bios_path, audio)))),
     )
 }
