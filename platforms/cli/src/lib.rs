@@ -105,7 +105,7 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(height as usize * (width as usize * 3 + 1));
     for row in rgba.chunks(stride) {
         raw.push(0);
-        for px in row.chunks_exact(4) {
+        for px in row.as_chunks::<4>().0 {
             raw.extend_from_slice(&px[..3]);
         }
     }
@@ -139,7 +139,7 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
 /// Encode an RGBA8888 image as a binary PPM (P6).
 pub fn encode_ppm(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         out.extend_from_slice(&px[..3]);
     }
     out

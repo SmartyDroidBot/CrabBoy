@@ -256,7 +256,7 @@ pub fn save_state(gba: &Gba) -> Vec<u8> {
     w.u32(gba.ppu.bg2_ref_y as u32);
     w.u32(gba.ppu.bg3_ref_x as u32);
     w.u32(gba.ppu.bg3_ref_y as u32);
-    w.u32(gba.last_unknown_swi.map_or(u32::MAX, |n| n));
+    w.u32(gba.last_unknown_swi.unwrap_or(u32::MAX));
 
     w.buf
 }

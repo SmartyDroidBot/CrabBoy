@@ -61,16 +61,17 @@ impl Frame {
     pub fn write_rgba(&self, palette: &[[u8; 4]; 4], out: &mut [u8]) {
         let pixels = self.width as usize * self.height as usize;
         assert_eq!(out.len(), pixels * 4, "rgba buffer size");
+        let (dst, _) = out.as_chunks_mut::<4>();
         match &self.rgb {
             Some(rgb) => {
-                for (dst, src) in out.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
-                    dst[..3].copy_from_slice(src);
-                    dst[3] = 0xFF;
+                let (src, _) = rgb.as_chunks::<3>();
+                for (dst, src) in dst.iter_mut().zip(src) {
+                    *dst = [src[0], src[1], src[2], 0xFF];
                 }
             }
             None => {
-                for (dst, &s) in out.chunks_exact_mut(4).zip(&self.shades) {
-                    dst.copy_from_slice(&palette[s as usize & 3]);
+                for (dst, &s) in dst.iter_mut().zip(&self.shades) {
+                    *dst = palette[s as usize & 3];
                 }
             }
         }

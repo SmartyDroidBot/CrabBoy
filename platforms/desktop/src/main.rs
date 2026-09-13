@@ -464,7 +464,7 @@ impl CrabBoyApp {
 
     fn rgb_image(&self, rgb: &[u8], w: usize, h: usize) -> egui::ColorImage {
         let mut img = egui::ColorImage::new([w, h], egui::Color32::BLACK);
-        for (i, px) in rgb.chunks_exact(3).enumerate() {
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
             img.pixels[i] = egui::Color32::from_rgb(px[0], px[1], px[2]);
         }
         img
