@@ -10,8 +10,8 @@
 /// Prescaler dividers for the two-bit prescaler field.
 const DIVIDERS: [u32; 4] = [1, 64, 256, 1024];
 
-/// IRQ flags for each timer overflow.
-pub const IRQ: [u16; 4] = [1 << 0, 1 << 1, 1 << 2, 1 << 3];
+/// IRQ flags for each timer overflow (IF bits 3-6).
+pub const IRQ: [u16; 4] = [1 << 3, 1 << 4, 1 << 5, 1 << 6];
 
 #[derive(Clone, Copy, Debug)]
 struct Timer {
@@ -67,24 +67,26 @@ impl Timers {
         self.overflowed[i]
     }
 
-    /// Write to the low 16-bit reload register of timer `idx`.
+    /// Write to the low 16-bit reload register of timer `idx`. This only
+    /// sets the reload value; the counter picks it up on the next overflow or
+    /// when the timer is (re-)enabled.
     pub fn write_cnt_l(&mut self, idx: usize, value: u16) {
         self.t[idx].reload = value;
-        self.t[idx].counter = value;
     }
 
-    /// Write to the high 16-bit control register of timer `idx`.
+    /// Write to the high 16-bit control register of timer `idx`. A 0 -> 1
+    /// transition of the enable bit loads the counter from the reload value
+    /// and restarts the prescaler.
     pub fn write_cnt_h(&mut self, idx: usize, value: u16) {
         let t = &mut self.t[idx];
+        let was_enabled = t.enabled;
         t.prescaler = (value & 0x03) as u8;
         t.cascade = value & 0x04 != 0;
         t.irq_enable = value & 0x40 != 0;
         t.enabled = value & 0x80 != 0;
-        if t.enabled {
+        if t.enabled && !was_enabled {
+            t.counter = t.reload;
             t.ticks = 0;
-            if t.counter == 0 && t.reload != 0 {
-                t.counter = t.reload;
-            }
         }
     }
 
@@ -100,7 +102,7 @@ impl Timers {
 
     /// Clear pending overflow IRQ flags (on IF write).
     pub fn clear_irq(&mut self, mask: u16) {
-        self.flags &= !(mask & 0x0F);
+        self.flags &= !(mask & 0x78);
     }
 
     /// Advance the timers by `cycles` CPU cycles.
@@ -126,34 +128,25 @@ impl Timers {
         }
     }
 
+    /// Clock timer `i` once.
     fn tick(&mut self, i: usize) {
-        let t = &mut self.t[i];
-        if t.counter == 0xFFFF {
-            t.counter = t.reload;
-            self.overflowed[i] = true;
-            if t.irq_enable {
-                self.flags |= IRQ[i];
-            }
-            // Cascade: clock the next timer if it is in cascade mode.
-            if i + 1 < 4 {
-                let next = &self.t[i + 1];
-                if next.enabled && next.cascade {
-                    let irq_enable = self.t[i + 1].irq_enable;
-                    let reload = self.t[i + 1].reload;
-                    let c = self.t[i + 1].counter;
-                    self.t[i + 1].counter = if c == 0xFFFF {
-                        self.overflowed[i + 1] = true;
-                        if irq_enable {
-                            self.flags |= IRQ[i + 1];
-                        }
-                        reload
-                    } else {
-                        c + 1
-                    };
-                }
-            }
+        if self.t[i].counter == 0xFFFF {
+            self.overflow(i);
         } else {
-            t.counter = t.counter.wrapping_add(1);
+            self.t[i].counter += 1;
+        }
+    }
+
+    /// Timer `i` overflowed: reload, flag the IRQ and clock a cascaded
+    /// successor, which may itself overflow and continue the chain.
+    fn overflow(&mut self, i: usize) {
+        self.t[i].counter = self.t[i].reload;
+        self.overflowed[i] = true;
+        if self.t[i].irq_enable {
+            self.flags |= IRQ[i];
+        }
+        if i + 1 < 4 && self.t[i + 1].enabled && self.t[i + 1].cascade {
+            self.tick(i + 1);
         }
     }
 
@@ -179,6 +172,36 @@ mod tests {
         // Overflow: reload to 0xFFFE, raise IRQ.
         assert_eq!(tm.read_cnt_l(0), 0xFFFE);
         assert_eq!(tm.irq_flags() & IRQ[0], IRQ[0]);
+    }
+
+    #[test]
+    fn reload_write_does_not_touch_a_running_counter() {
+        let mut tm = Timers::new();
+        tm.write_cnt_l(0, 0x1000);
+        tm.write_cnt_h(0, 0x80);
+        assert_eq!(tm.read_cnt_l(0), 0x1000, "enable loads the reload value");
+        tm.step(4);
+        tm.write_cnt_l(0, 0x2000);
+        assert_eq!(tm.read_cnt_l(0), 0x1004, "reload is latched, not loaded");
+        // Re-writing CNT_H with enable still set does not reload either.
+        tm.write_cnt_h(0, 0x80);
+        assert_eq!(tm.read_cnt_l(0), 0x1004);
+    }
+
+    #[test]
+    fn three_timer_cascade_chain_overflows() {
+        let mut tm = Timers::new();
+        for i in 0..3 {
+            tm.write_cnt_l(i, 0xFFFF);
+        }
+        tm.write_cnt_h(0, 0x80); // free-running, overflows every cycle
+        tm.write_cnt_h(1, 0x80 | 0x04); // cascade
+        tm.write_cnt_h(2, 0x80 | 0x04 | 0x40); // cascade + IRQ
+        tm.step(1);
+        assert!(tm.just_overflowed(0));
+        assert!(tm.just_overflowed(1));
+        assert!(tm.just_overflowed(2), "overflow propagates two levels");
+        assert_eq!(tm.irq_flags(), IRQ[2]);
     }
 
     #[test]
