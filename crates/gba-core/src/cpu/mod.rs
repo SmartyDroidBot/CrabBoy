@@ -250,13 +250,14 @@ impl Cpu {
 
     /// `BX`: branch with possible switch to Thumb mode (value bit 0).
     pub fn bx(&mut self, value: u32) {
-        let thumb = value & 1 != 0;
-        let addr = value & !1;
-        self.branch(addr);
-        if thumb {
+        // Switch state first: the target is aligned for the *new* state
+        // (halfword for Thumb, word for ARM), not the one we are leaving.
+        if value & 1 != 0 {
             self.cpsr |= flag::T;
+            self.pc = value & !1;
         } else {
             self.cpsr &= !flag::T;
+            self.pc = value & !3;
         }
     }
 
@@ -619,6 +620,34 @@ mod tests {
         cpu.pc = 0;
         cpu.execute(&mut bus);
         assert_eq!(cpu.cpsr & flag::T, 0);
+        assert_eq!(cpu.pc, 0x400);
+    }
+
+    #[test]
+    fn arm_bx_keeps_halfword_aligned_thumb_target() {
+        // An ARM-state `BX` to a Thumb address that is 2 mod 4 must land on
+        // that halfword, not be word-aligned by the state being left.
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        cpu.regs[14] = 0x082E_0023;
+        arm(&mut bus, 0, 0xE12FFF1E); // BX lr
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert!(cpu.in_thumb());
+        assert_eq!(cpu.pc, 0x082E_0022);
+    }
+
+    #[test]
+    fn thumb_bx_to_arm_word_aligns_target() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR | flag::T);
+        let mut bus = TestBus::new();
+        cpu.regs[0] = 0x402;
+        thumb(&mut bus, 0, 0x4700); // BX r0
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert!(!cpu.in_thumb());
         assert_eq!(cpu.pc, 0x400);
     }
 
