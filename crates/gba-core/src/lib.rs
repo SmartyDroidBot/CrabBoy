@@ -9,6 +9,7 @@ pub mod bios;
 pub mod bus;
 pub mod cpu;
 pub mod dma;
+pub mod eeprom;
 pub mod gba;
 pub mod io;
 pub mod ppu;

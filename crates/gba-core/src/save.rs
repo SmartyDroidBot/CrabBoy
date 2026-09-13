@@ -4,8 +4,10 @@
 //! access: a write to the FLASH command addresses (`0x5555`/`0x2AAA`) selects
 //! FLASH, otherwise the region behaves as plain SRAM. FLASH implements the
 //! standard command interface (program, sector erase, ID and bank select for
-//! 128K parts). EEPROM uses a separate serial protocol and is not implemented
-//! here (it reads as 0xFF).
+//! 128K parts). EEPROM lives on the cartridge bus at `0x0D000000` and speaks
+//! the serial protocol implemented in [`crate::eeprom`]. Commercial ROMs also
+//! carry an identifier string (`EEPROM_V`, `SRAM_V`, `FLASH1M_V`, ...) that
+//! selects the type up front.
 
 /// Maximum FLASH capacity (128 KB).
 pub const FLASH_SIZE: usize = 0x20000;
@@ -33,14 +35,16 @@ enum Cmd {
 }
 
 use crate::bus::Mem;
+use crate::eeprom::Eeprom;
 
 /// The battery-backed save cartridge.
 pub struct SaveCartridge {
     pub kind: SaveType,
-    /// Detected automatically on first access.
+    /// Detected automatically on first access or from the ROM identifier.
     detected: bool,
     flash: Mem<u8, FLASH_SIZE>,
     sram: Mem<u8, SRAM_SIZE>,
+    pub eeprom: Eeprom,
     bank: usize,
     cmd: Cmd,
     id_mode: bool,
@@ -55,6 +59,7 @@ impl Default for SaveCartridge {
             detected: false,
             flash: Mem::filled(0xFF),
             sram: Mem::zeroed(),
+            eeprom: Eeprom::new(),
             bank: 0,
             cmd: Cmd::Idle,
             id_mode: false,
@@ -68,17 +73,38 @@ impl SaveCartridge {
         SaveCartridge::default()
     }
 
+    /// Detect the save type from the identifier string commercial ROMs embed
+    /// (word-aligned, per GBATEK "Cart Backup IDs").
+    pub fn detect_from_rom(rom: &[u8]) -> SaveType {
+        const TAGS: [(&[u8], SaveType); 4] = [
+            (b"EEPROM_V", SaveType::Eeprom),
+            (b"SRAM_V", SaveType::Sram),
+            (b"SRAM_F_V", SaveType::Sram),
+            (b"FLASH", SaveType::Flash), // FLASH_V, FLASH512_V, FLASH1M_V
+        ];
+        for (tag, kind) in TAGS {
+            let found = (0..rom.len().saturating_sub(tag.len()))
+                .step_by(4)
+                .any(|i| &rom[i..i + tag.len()] == tag);
+            if found {
+                return kind;
+            }
+        }
+        SaveType::None
+    }
+
     /// Whether a battery-backed cartridge is present.
     pub fn battery_backed(&self) -> bool {
         self.kind != SaveType::None
     }
 
-    /// The save region as raw bytes (FLASH or SRAM).
+    /// The save region as raw bytes (FLASH, SRAM or EEPROM).
     pub fn raw(&self) -> &[u8] {
         match self.kind {
             SaveType::Flash => self.flash.as_ref(),
             SaveType::Sram => self.sram.as_ref(),
-            _ => &[],
+            SaveType::Eeprom => self.eeprom.raw(),
+            SaveType::None => &[],
         }
     }
 
@@ -87,12 +113,11 @@ impl SaveCartridge {
     pub fn load(&mut self, data: &[u8]) {
         if self.kind == SaveType::None {
             self.detected = true;
-            self.kind = if data.len() > SRAM_SIZE {
-                SaveType::Flash
-            } else if !data.is_empty() {
-                SaveType::Sram
-            } else {
-                SaveType::None
+            self.kind = match data.len() {
+                0 => SaveType::None,
+                512 | 8192 => SaveType::Eeprom,
+                n if n > SRAM_SIZE => SaveType::Flash,
+                _ => SaveType::Sram,
             };
         }
         match self.kind {
@@ -104,16 +129,40 @@ impl SaveCartridge {
                 let n = data.len().min(SRAM_SIZE);
                 self.sram[..n].copy_from_slice(&data[..n]);
             }
-            _ => {}
+            SaveType::Eeprom => self.eeprom.load(data),
+            SaveType::None => {}
         }
         self.dirty = false;
+        self.eeprom.dirty = false;
     }
 
     /// Read the dirty flag and clear it.
     pub fn take_dirty(&mut self) -> bool {
-        let d = self.dirty;
+        let d = self.dirty || self.eeprom.dirty;
         self.dirty = false;
+        self.eeprom.dirty = false;
         d
+    }
+
+    /// A halfword write in the EEPROM address range: the first such write on
+    /// an undetected cartridge selects EEPROM; other save types ignore it.
+    pub fn eeprom_write_bit(&mut self, bit: u8) {
+        if !self.detected {
+            self.set_kind(SaveType::Eeprom);
+        }
+        if self.kind == SaveType::Eeprom {
+            self.eeprom.write_bit(bit);
+        }
+    }
+
+    /// A read in the EEPROM address range, or `None` when the cartridge has
+    /// no EEPROM and the region mirrors ROM.
+    pub fn eeprom_read_bit(&mut self) -> Option<u8> {
+        if self.kind == SaveType::Eeprom {
+            Some(self.eeprom.read_bit())
+        } else {
+            None
+        }
     }
 
     /// The detected save type.

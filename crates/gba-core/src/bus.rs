@@ -139,6 +139,9 @@ enum Region {
     Vram,
     Oam,
     Rom,
+    /// Top 16 MB of the cartridge space: the EEPROM chip select on carts
+    /// that have one, otherwise a ROM mirror.
+    Eeprom,
     Sram,
 }
 
@@ -152,7 +155,8 @@ impl Region {
             0x0500_0000..=0x05FF_FFFF => Region::Palram,
             0x0600_0000..=0x06FF_FFFF => Region::Vram,
             0x0700_0000..=0x07FF_FFFF => Region::Oam,
-            0x0800_0000..=0x0DFF_FFFF => Region::Rom,
+            0x0800_0000..=0x0CFF_FFFF => Region::Rom,
+            0x0D00_0000..=0x0DFF_FFFF => Region::Eeprom,
             0x0E00_0000..=0x0EFF_FFFF => Region::Sram,
             _ => return None,
         })
@@ -197,6 +201,11 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(rom: Vec<u8>) -> Bus {
+        let mut save = SaveCartridge::new();
+        let kind = SaveCartridge::detect_from_rom(&rom);
+        if kind != SaveType::None {
+            save.set_kind(kind);
+        }
         Bus {
             bios: Vec::new(),
             ewram: Mem::zeroed(),
@@ -204,7 +213,7 @@ impl Bus {
             palram: Mem::zeroed(),
             vram: Mem::zeroed(),
             oam: Mem::zeroed(),
-            save: SaveCartridge::new(),
+            save,
             rom,
             io: Io::new(),
             dma: Dma::new(),
@@ -273,7 +282,7 @@ impl Bus {
             }
             Region::Vram | Region::Palram => 1,
             Region::Oam => 2,
-            Region::Rom => {
+            Region::Rom | Region::Eeprom => {
                 // Wait-state 0 timing from WAITCNT (no prefetch buffer yet):
                 // a 16-bit access costs the non-sequential count, a 32-bit
                 // access adds the sequential count for its second halfword.
@@ -322,6 +331,10 @@ impl Bus {
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)],
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)],
             Region::Rom => self.rom_byte(addr as usize & ROM_MASK),
+            Region::Eeprom => match self.save.eeprom_read_bit() {
+                Some(bit) => bit,
+                None => self.rom_byte(addr as usize & ROM_MASK),
+            },
             Region::Sram => self.save.read8(Self::index_in(addr, 0x1FFFF)),
         }) as u32;
         self.open_bus = v;
@@ -335,6 +348,11 @@ impl Bus {
         } else {
             self.rom[off % self.rom.len()]
         }
+    }
+
+    #[inline]
+    fn rom_half(&self, off: usize) -> u32 {
+        (self.rom_byte(off) as u32) | (self.rom_byte(off + 1) as u32) << 8
     }
 
     /// Read an aligned 16-bit I/O register, routing to the device that owns
@@ -390,10 +408,11 @@ impl Bus {
                 let i = base & (OAM_SIZE - 1);
                 (self.oam[i] as u32) | (self.oam[i + 1] as u32) << 8
             }
-            Region::Rom => {
-                let i = base & ROM_MASK;
-                (self.rom_byte(i) as u32) | (self.rom_byte(i + 1) as u32) << 8
-            }
+            Region::Rom => self.rom_half(base & ROM_MASK),
+            Region::Eeprom => match self.save.eeprom_read_bit() {
+                Some(bit) => bit as u32,
+                None => self.rom_half(base & ROM_MASK),
+            },
             Region::Sram => {
                 let i = base & 0x1FFFF;
                 self.save.read16(i) as u32
@@ -450,6 +469,7 @@ impl Bus {
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)] = value as u8,
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
             Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
+            Region::Eeprom => self.save.eeprom_write_bit(value as u8),
             Region::Rom | Region::Bios => {}
         }
     }
@@ -503,6 +523,7 @@ impl Bus {
                 let i = base & 0x1FFFF;
                 self.save.write16(i, value as u16);
             }
+            Region::Eeprom => self.save.eeprom_write_bit(value as u8),
             Region::Rom | Region::Bios => {}
         }
     }
@@ -560,6 +581,13 @@ impl Bus {
             }
             if timing == crate::dma::Timing::Special {
                 continue;
+            }
+            // A DMA to or from the EEPROM chip select reveals the part size
+            // through its length (9/73 halfwords = 512 B, 17/81 = 8 KB).
+            if i == 3 && matches!(Region::of(ch.cur_dst), Some(Region::Eeprom))
+                || matches!(Region::of(ch.cur_src), Some(Region::Eeprom))
+            {
+                self.save.eeprom.set_size_from_dma_count(ch.cur_count);
             }
             let unit = ch.unit_32();
             let ub = if unit { 4u32 } else { 2u32 };
@@ -797,6 +825,49 @@ mod tests {
         b.write16(0x0400_0202, crate::io::irq::DMA3 as u32);
         b.sync_dev_irq();
         assert_eq!(b.io.iflags() & crate::io::irq::DMA3, 0);
+    }
+
+    #[test]
+    fn eeprom_type_is_detected_from_the_rom_identifier() {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x100..0x10B].copy_from_slice(b"EEPROM_V124");
+        let b = Bus::new(rom);
+        assert_eq!(b.save.kind, SaveType::Eeprom);
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x200..0x20A].copy_from_slice(b"FLASH1M_V1");
+        assert_eq!(Bus::new(rom).save.kind, SaveType::Flash);
+        assert_eq!(Bus::new(vec![0u8; 0x1000]).save.kind, SaveType::None);
+    }
+
+    #[test]
+    fn eeprom_dma_sizes_the_part_and_transfers_bits() {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x100..0x108].copy_from_slice(b"EEPROM_V");
+        let mut b = Bus::new(rom);
+        // A 9-halfword read request (512 B part): "11", address 3, stop.
+        let bits: [u16; 9] = [1, 1, 0, 0, 0, 0, 1, 1, 0];
+        for (i, bit) in bits.iter().enumerate() {
+            b.write16(0x0300_0000 + i as u32 * 2, *bit as u32);
+        }
+        setup_dma(&mut b, 3, 0x0300_0000, 0x0D00_0000, 9, 0x8000);
+        b.run_dma(crate::dma::Timing::Immediate);
+        assert!(!b.save.eeprom.is_8k());
+        // Read the 68-bit reply back through DMA: 4 dummy + 64 data (0xFF fill).
+        setup_dma(&mut b, 3, 0x0D00_0000, 0x0300_1000, 68, 0x8000);
+        b.run_dma(crate::dma::Timing::Immediate);
+        assert_eq!(b.read16(0x0300_1000), 0, "dummy bit");
+        assert_eq!(b.read16(0x0300_1000 + 4 * 2), 1, "first data bit of 0xFF");
+    }
+
+    #[test]
+    fn eeprom_region_mirrors_rom_without_an_eeprom() {
+        let mut rom = vec![0u8; 0x1000];
+        rom[0x100..0x108].copy_from_slice(b"FLASH_V1");
+        rom[0x10] = 0xAB;
+        let mut b = Bus::new(rom);
+        assert_eq!(b.read8(0x0D00_0010), 0xAB);
+        b.write16(0x0D00_0000, 1);
+        assert_eq!(b.save.kind, SaveType::Flash, "flash cart stays flash");
     }
 
     #[test]
