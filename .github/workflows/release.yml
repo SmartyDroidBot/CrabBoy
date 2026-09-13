@@ -138,6 +138,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          # Only the release archives; the github-pages artifact is deployed
+          # by the pages job and must not become a release asset.
+          pattern: "{linux-*,windows-*,web}"
           path: uploads
           merge-multiple: true
 
