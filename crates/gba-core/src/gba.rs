@@ -34,6 +34,8 @@ pub struct Gba {
     pub(crate) frame_count: u64,
     /// The first unrecognised BIOS SWI executed (diagnostics).
     pub last_unknown_swi: Option<u32>,
+    /// Whether a real-BIOS boot runs the cold-boot intro (kept for reset).
+    cold: bool,
 }
 
 impl Gba {
@@ -61,6 +63,7 @@ impl Gba {
             line: 0x7E,
             frame_count: 0,
             last_unknown_swi: None,
+            cold: false,
         }
     }
 
@@ -86,7 +89,13 @@ impl Gba {
         gba.bus.io.regs[0x300] = u8::from(!cold);
         gba.bus.io.set_vcount(0);
         gba.line = 0;
+        gba.cold = cold;
         gba
+    }
+
+    /// Boxed [`Gba::with_bios`] for frontends.
+    pub fn system_with_bios(rom: Vec<u8>, bios: Vec<u8>, cold: bool) -> Box<dyn emu_core::System> {
+        Box::new(Gba::with_bios(rom, bios, cold))
     }
 
     /// BIOS address of the IRQ return stub used by the skip-BIOS boot.
@@ -417,7 +426,12 @@ impl emu_core::System for Gba {
 
     fn reset(&mut self) {
         let rom = self.bus.rom.clone();
-        *self = Gba::new(rom);
+        *self = if self.bus.has_real_bios() {
+            let bios = std::mem::take(&mut self.bus.bios);
+            Gba::with_bios(rom, bios, self.cold)
+        } else {
+            Gba::new(rom)
+        };
     }
 
     fn press(&mut self, button: emu_core::Button) {
@@ -529,6 +543,28 @@ mod tests {
         assert_eq!(gba.info(), "POKEMON EMER (GBA)");
         assert_eq!(gba.screen(), emu_core::Screen::new(240, 160));
         assert_eq!(Gba::new(vec![0; 0x4000]).info(), "unknown (GBA)");
+    }
+
+    #[test]
+    fn reset_keeps_a_real_bios_and_boot_mode() {
+        let rom = vec![0u8; 0x4000];
+        let mut bios = vec![0u8; 0x4000];
+        bios[0] = 0xAA;
+        let mut gba = Gba::with_bios(rom, bios, true);
+        gba.run_frame();
+        gba.reset();
+        assert!(gba.bus.has_real_bios());
+        assert_eq!(gba.bus.bios[0], 0xAA);
+        assert!(gba.cpu.has_bios);
+        assert!(gba.cold);
+        assert_eq!(gba.bus.io.regs[0x300], 0, "cold boot leaves POSTFLG clear");
+        assert_eq!(gba.cpu.pc(), 0);
+
+        let mut gba = Gba::new(vec![0u8; 0x4000]);
+        gba.run_frame();
+        gba.reset();
+        assert!(!gba.bus.has_real_bios());
+        assert_eq!(gba.cpu.pc(), 0x0800_0000);
     }
 
     #[test]
