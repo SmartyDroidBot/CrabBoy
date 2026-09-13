@@ -491,8 +491,12 @@ impl Bus {
 
     /// Raise timer/DMA overflow IRQs into the IO flags.
     pub fn sync_dev_irq(&mut self) {
-        self.io.raise_irq(self.timers.irq_flags());
-        self.io.raise_irq(self.dma.irq_flags());
+        // Edge-triggered: each device flag is moved into IF exactly once, so
+        // writing 1 to IF acknowledges it for good.
+        let flags = self.timers.take_irq() | self.dma.take_irq();
+        if flags != 0 {
+            self.io.raise_irq(flags);
+        }
     }
 
     /// Run any enabled DMA channel whose start timing matches `timing`.
@@ -719,6 +723,32 @@ mod tests {
         assert_eq!(b.dma.chans[3].cur_count, 0x10000);
         b.run_dma(crate::dma::Timing::Immediate);
         assert_eq!(b.dma.chans[3].cur_dst, 0x0200_0000 + 0x10000 * 4);
+    }
+
+    #[test]
+    fn timer_irq_acknowledge_is_not_reasserted() {
+        let mut b = bus();
+        b.write16(0x0400_0100, 0xFFFF); // TM0 reload
+        b.write16(0x0400_0102, 0x80 | 0x40); // enable + IRQ
+        b.timers.step(1);
+        b.sync_dev_irq();
+        assert_ne!(b.io.iflags() & crate::io::irq::TIMER0, 0);
+        b.write16(0x0400_0202, crate::io::irq::TIMER0 as u32);
+        assert_eq!(b.io.iflags() & crate::io::irq::TIMER0, 0);
+        b.sync_dev_irq();
+        assert_eq!(b.io.iflags() & crate::io::irq::TIMER0, 0, "stale flag");
+    }
+
+    #[test]
+    fn dma_irq_clears_on_if_write() {
+        let mut b = bus();
+        setup_dma(&mut b, 3, 0x0300_0000, 0x0300_1000, 1, 0x8000 | (1 << 14));
+        b.run_dma(crate::dma::Timing::Immediate);
+        b.sync_dev_irq();
+        assert_ne!(b.io.iflags() & crate::io::irq::DMA3, 0);
+        b.write16(0x0400_0202, crate::io::irq::DMA3 as u32);
+        b.sync_dev_irq();
+        assert_eq!(b.io.iflags() & crate::io::irq::DMA3, 0);
     }
 
     #[test]

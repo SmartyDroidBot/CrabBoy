@@ -206,9 +206,10 @@ impl Dma {
         self.flags
     }
 
-    /// Clear pending DMA IRQ flags (on IF write).
-    pub fn clear_irq(&mut self, mask: u16) {
-        self.flags &= !(mask & 0x0F00);
+    /// Take the completion IRQ flags raised since the last call. The bus ORs
+    /// them into IF once, so an acknowledged flag is not re-asserted.
+    pub fn take_irq(&mut self) -> u16 {
+        std::mem::take(&mut self.flags)
     }
 }
 
