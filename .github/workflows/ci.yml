@@ -5,34 +5,169 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # ROMs the smoke test runs on every platform; their frame hashes must agree
+  # across x86_64, aarch64 and wasm (see the determinism job).
+  SMOKE_ROMS: >-
+    roms/test-suites/gb/dmg-acid2/dmg-acid2.gb
+    roms/test-suites/gb/cgb-acid2/cgb-acid2.gbc
+    roms/test-suites/gba/jsmolka/arm/arm.gba
 
 jobs:
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
+      - name: Install rustup (Windows on Arm image ships without it)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe -OutFile rustup-init.exe
+            .\rustup-init.exe -y --default-toolchain none --profile minimal
+            Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build (workspace)
-        run: cargo build --workspace
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test (workspace)
-        run: cargo test --workspace
+      - name: Test
+        run: cargo test --workspace --locked
 
-      - name: Rustfmt check
-        run: cargo fmt --all -- --check
+      - name: Fetch test suites
+        run: cargo run --release --locked -p crab-cli --bin fetch_test_roms
+
+      - name: Smoke-run test ROMs and record frame hashes
+        shell: bash
+        run: |
+          cargo build --release --locked -p crab-cli --bin crab
+          out="hashes-${{ matrix.os }}.txt"
+          : > "$out"
+          for rom in $SMOKE_ROMS; do
+            line=$(target/release/crab run "$rom" --frames 120 --hash | grep '^hash')
+            echo "$(basename "$rom") $line" | tee -a "$out"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashes-${{ matrix.os }}
+          path: hashes-${{ matrix.os }}.txt
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.127
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clippy (wasm32)
+        run: cargo clippy -p crab-wasm --target wasm32-unknown-unknown --locked -- -D warnings
+
+      - name: Build wasm module
+        run: cargo build -p crab-wasm --release --locked --target wasm32-unknown-unknown
+
+      - name: Generate bindings
+        run: |
+          wasm-bindgen --target nodejs --out-dir target/wasm-node target/wasm32-unknown-unknown/release/crab_wasm.wasm
+          wasm-bindgen --target web --out-dir platforms/wasm/web/pkg target/wasm32-unknown-unknown/release/crab_wasm.wasm
+
+      - name: Fetch test suites
+        run: cargo run --release --locked -p crab-cli --bin fetch_test_roms
+
+      - name: Compare wasm frame hashes with native
+        run: |
+          cargo build --release --locked -p crab-cli --bin crab
+          : > hashes-wasm.txt
+          for rom in $SMOKE_ROMS; do
+            native=$(target/release/crab run "$rom" --frames 120 --hash | grep '^hash')
+            wasm=$(node platforms/wasm/tests/run.js "$rom" --frames 120 --hash | grep '^hash')
+            echo "$(basename "$rom") native: $native wasm: $wasm"
+            test "$native" = "$wasm"
+            echo "$(basename "$rom") $wasm" >> hashes-wasm.txt
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashes-wasm
+          path: hashes-wasm.txt
+
+  determinism:
+    name: determinism (x86_64 vs aarch64 vs wasm)
+    needs: [test, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hashes-*
+          merge-multiple: true
+          path: hashes
+
+      - name: Every platform must produce identical frames
+        run: |
+          cd hashes
+          ls -la
+          ref=$(ls | head -n1)
+          for f in *; do
+            echo "== $f"; cat "$f"
+            diff "$ref" "$f"
+          done
+
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
