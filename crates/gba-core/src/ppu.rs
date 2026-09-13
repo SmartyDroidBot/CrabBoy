@@ -584,7 +584,7 @@ impl Ppu {
         let bldalpha = Self::reg16(bus, 0x52);
         let bldy = Self::reg16(bus, 0x54);
 
-        let effect = (bldcnt >> 10) & 3;
+        let effect = (bldcnt >> 6) & 3;
         let first_tgt = bldcnt & 0x3F;
         let second_tgt = (bldcnt >> 8) & 0x3F;
         let eva = (bldalpha & 0x1F) as u32;
@@ -606,16 +606,15 @@ impl Ppu {
                 winout & 0x3F
             };
 
-            let order = [LAYER_OBJ, BG3, BG2, BG1, BG0];
-            let mut color = Self::bg_palette(bus, 0);
-            let mut top_layer = LAYER_BACKDROP;
-            let mut found_top = false;
-            let mut second_color = 0u16;
-            let mut have_second = false;
-            for p in 0..4u8 {
+            // At equal priority OBJ wins, then the lower-numbered background.
+            let order = [LAYER_OBJ, BG0, BG1, BG2, BG3];
+            let backdrop = Self::bg_palette(bus, 0);
+            let mut top = (LAYER_BACKDROP, backdrop);
+            let mut second = (LAYER_BACKDROP, backdrop);
+            let mut found = 0u8;
+            'layers: for p in 0..4u8 {
                 for &layer in &order {
-                    let bit = 1u16 << layer;
-                    if mask & bit == 0 {
+                    if mask & (1u16 << layer) == 0 {
                         continue;
                     }
                     let (prio, layer_color) = if layer == LAYER_OBJ {
@@ -629,29 +628,39 @@ impl Ppu {
                     if prio == 0 || prio - 1 != p {
                         continue;
                     }
-                    if !found_top {
-                        found_top = true;
-                        top_layer = layer;
-                        color = layer_color;
-                    } else if second_tgt & (1u16 << layer) != 0 && !have_second {
-                        second_color = layer_color;
-                        have_second = true;
+                    if found == 0 {
+                        top = (layer, layer_color);
+                    } else {
+                        // The second target is whatever lies directly beneath
+                        // the top pixel, whether or not it may blend.
+                        second = (layer, layer_color);
+                        break 'layers;
                     }
+                    found += 1;
                 }
             }
+            let (top_layer, color) = top;
+            let (second_layer, second_color) = second;
             self.top_layer[x] = top_layer;
             self.top_color[x] = color;
 
+            // Windows can disable colour effects; a semi-transparent sprite
+            // always alpha-blends when the pixel beneath it is a second target.
+            let effects_on = mask & (1 << 5) != 0;
             let in_first = first_tgt & (1 << top_layer) != 0;
+            let in_second = second_tgt & (1 << second_layer) != 0;
             let semi = top_layer == LAYER_OBJ && self.obj_semi[x];
-            let out = if semi && have_second {
-                Self::alpha_blend(color, second_color, eva, evb)
+            let out = if !effects_on {
+                color
+            } else if semi {
+                if in_second {
+                    Self::alpha_blend(color, second_color, eva, evb)
+                } else {
+                    color
+                }
             } else {
                 match effect {
-                    1 if in_first => {
-                        let dst = if have_second { second_color } else { 0 };
-                        Self::alpha_blend(color, dst, eva, evb)
-                    }
+                    1 if in_first && in_second => Self::alpha_blend(color, second_color, eva, evb),
                     2 if in_first => Self::brighten(color, evy),
                     3 if in_first => Self::darken(color, evy),
                     _ => color,
@@ -786,6 +795,105 @@ mod tests {
         let mut ppu = Ppu::new();
         ppu.render_scanline(&bus, 0);
         assert_eq!(ppu.framebuffer[0], cyan);
+    }
+
+    /// Give text background `bg` (char/screen base `bg`, priority `prio`) a
+    /// solid pixel at (0,0) of BG palette colour `index`.
+    fn text_bg(bus: &mut Bus, bg: usize, prio: u16, index: u8) {
+        let cnt = prio | ((bg as u16) << 2) | ((bg as u16) << 8);
+        set16(bus, 0x08 + bg * 2, cnt);
+        bus.vram[bg * 0x800] = 1; // map entry (0,0) -> tile 1
+        bus.vram[bg * 0x4000 + 32] = index; // tile 1 pixel (0,0)
+    }
+
+    fn set_palette(bus: &mut Bus, index: usize, color: u16) {
+        bus.palram[index * 2] = color as u8;
+        bus.palram[index * 2 + 1] = (color >> 8) as u8;
+    }
+
+    #[test]
+    fn same_priority_backgrounds_prefer_the_lower_number() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x0300); // mode 0, BG0 + BG1
+        text_bg(&mut bus, 0, 0, 1);
+        text_bg(&mut bus, 1, 0, 2);
+        let red = rgb(31, 0, 0);
+        let blue = rgb(0, 0, 31);
+        set_palette(&mut bus, 1, red);
+        set_palette(&mut bus, 2, blue);
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], red);
+        // A lower priority number on BG1 puts it on top.
+        text_bg(&mut bus, 0, 1, 1);
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], blue);
+    }
+
+    #[test]
+    fn alpha_blend_uses_the_layer_directly_below() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x0700); // BG0-2
+        text_bg(&mut bus, 0, 0, 1);
+        text_bg(&mut bus, 1, 1, 2);
+        text_bg(&mut bus, 2, 2, 3);
+        let red = rgb(31, 0, 0);
+        let green = rgb(0, 31, 0);
+        let blue = rgb(0, 0, 31);
+        set_palette(&mut bus, 1, red);
+        set_palette(&mut bus, 2, green);
+        set_palette(&mut bus, 3, blue);
+        // Effect 1 (alpha), first target BG0, second target BG2 only.
+        set16(&mut bus, 0x50, 0x0001 | (1 << 6) | (1 << 10));
+        set16(&mut bus, 0x52, 0x0808);
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(
+            ppu.framebuffer[0], red,
+            "BG1 lies beneath and is not a target"
+        );
+        // Make BG1 the second target instead: now it blends.
+        set16(&mut bus, 0x50, 0x0001 | (1 << 6) | (1 << 9));
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], Ppu::alpha_blend(red, green, 8, 8));
+        assert_ne!(ppu.framebuffer[0], Ppu::alpha_blend(red, blue, 8, 8));
+    }
+
+    #[test]
+    fn alpha_blend_with_the_backdrop_as_second_target() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x0100);
+        text_bg(&mut bus, 0, 0, 1);
+        let red = rgb(31, 0, 0);
+        let grey = rgb(16, 16, 16);
+        set_palette(&mut bus, 1, red);
+        set_palette(&mut bus, 0, grey);
+        set16(&mut bus, 0x50, 0x0001 | (1 << 6) | (1 << 13));
+        set16(&mut bus, 0x52, 0x0808);
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], Ppu::alpha_blend(red, grey, 8, 8));
+    }
+
+    #[test]
+    fn brightness_effect_reads_bldcnt_bits_6_and_7() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x0100);
+        text_bg(&mut bus, 0, 0, 1);
+        let red = rgb(31, 0, 0);
+        set_palette(&mut bus, 1, red);
+        set16(&mut bus, 0x50, 0x0001 | (3 << 6)); // darken BG0
+        set16(&mut bus, 0x54, 16); // fully dark
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], 0);
+        // A window with colour effects disabled leaves the pixel untouched.
+        set16(&mut bus, 0, 0x2100); // + WIN0
+        set16(&mut bus, 0x40, 0x0010); // x1 = 0, x2 = 16
+        set16(&mut bus, 0x44, 0x0010); // y1 = 0, y2 = 16
+        set16(&mut bus, 0x48, 0x0001); // BG0 inside, effects off
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], red);
     }
 
     #[test]
