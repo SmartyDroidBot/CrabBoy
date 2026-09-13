@@ -10,6 +10,7 @@
 //!   `--bios=<path>`        boot through a real BIOS image (`--cold` for the
 //!                          full power-on path instead of the warm POSTFLG boot)
 //!   `--capture-pc=<hex>`   stop when PC equals the address and dump registers
+//!   `--capture-all`        instead report r0-r3 at every hit of the capture PC
 //!   `--dump-iwram=<path>`  write 0x03007E00-0x03007FFF to a file at the end
 //!   `--dump-vram=<path>`   write palette RAM, VRAM and OAM to a file at the end
 //!   `--dump-frame=<path>`  write the framebuffer as a binary PPM at the end
@@ -32,6 +33,7 @@ struct Options {
     bios: Option<String>,
     cold: bool,
     capture_pc: Option<u32>,
+    capture_all: bool,
     dump_iwram: Option<String>,
     dump_vram: Option<String>,
     dump_frame: Option<String>,
@@ -107,6 +109,7 @@ fn parse_args() -> Options {
         bios: None,
         cold: false,
         capture_pc: None,
+        capture_all: false,
         dump_iwram: None,
         dump_vram: None,
         dump_frame: None,
@@ -123,6 +126,8 @@ fn parse_args() -> Options {
             o.trace_io = true;
         } else if a == "--trace-ram" {
             o.trace_ram = true;
+        } else if a == "--capture-all" {
+            o.capture_all = true;
         } else if a == "--frame-hash" {
             o.frame_hash = true;
         } else if let Some(v) = a.strip_prefix("--bios=") {
@@ -337,14 +342,31 @@ fn main() {
         let mut steps: u64 = 0;
         loop {
             if gba.pc() == target {
-                dump_capture(&mut gba, target, steps);
-                dump_top_iwram(&mut gba, o.dump_iwram.as_deref());
-                return;
+                if o.capture_all {
+                    // Report r0-r3 at every hit until the frame budget runs out.
+                    let r = gba.regs();
+                    println!(
+                        "hit pc=0x{target:08X} frame={} step={steps} r0=0x{:08X} r1=0x{:08X} \
+                         r2=0x{:08X} r3=0x{:08X}",
+                        gba.frames(),
+                        r[0],
+                        r[1],
+                        r[2],
+                        r[3]
+                    );
+                    if gba.frames() >= o.total_frames {
+                        return;
+                    }
+                } else {
+                    dump_capture(&mut gba, target, steps);
+                    dump_top_iwram(&mut gba, o.dump_iwram.as_deref());
+                    return;
+                }
             }
             gba.step();
             steps += 1;
-            if steps > 200_000_000 {
-                println!("capture target 0x{target:08X} not reached after {steps} steps");
+            if gba.frames() >= o.total_frames || steps > 400_000_000 {
+                println!("capture target 0x{target:08X}: stopped after {steps} steps");
                 dump_top_iwram(&mut gba, o.dump_iwram.as_deref());
                 return;
             }
