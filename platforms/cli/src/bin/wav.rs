@@ -17,10 +17,7 @@ fn main() {
         }
     };
     let out_path = args.next().unwrap_or_else(|| "out.wav".to_string());
-    let frames: u32 = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+    let frames: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(60);
 
     let data = std::fs::read(&rom_path).expect("read ROM");
     let cart = Cartridge::load(&data).expect("load cartridge");

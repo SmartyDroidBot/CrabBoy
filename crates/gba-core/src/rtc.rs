@@ -185,8 +185,7 @@ impl Rtc {
                 }
                 if self.rw {
                     // Shift in a data bit into buf[buf_pos].
-                    self.buf[self.buf_pos] =
-                        (self.buf[self.buf_pos] << 1) | sio as u8;
+                    self.buf[self.buf_pos] = (self.buf[self.buf_pos] << 1) | sio as u8;
                     self.bits += 1;
                     if self.bits == 8 {
                         self.bits = 0;

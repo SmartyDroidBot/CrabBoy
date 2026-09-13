@@ -107,7 +107,12 @@ const PALETTES: [(&str, Palette); 4] = [
     (
         "Grayscale",
         Palette {
-            colors: [[0xFF, 0xFF, 0xFF, 0xFF], [0xAA, 0xAA, 0xAA, 0xFF], [0x55, 0x55, 0x55, 0xFF], [0, 0, 0, 0xFF]],
+            colors: [
+                [0xFF, 0xFF, 0xFF, 0xFF],
+                [0xAA, 0xAA, 0xAA, 0xFF],
+                [0x55, 0x55, 0x55, 0xFF],
+                [0, 0, 0, 0xFF],
+            ],
         },
     ),
 ];
@@ -137,7 +142,11 @@ struct CrabBoyApp {
 }
 
 impl CrabBoyApp {
-    fn new(cc: &eframe::CreationContext<'_>, rom_path: Option<String>, audio: Option<(OutputStream, Sink)>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        rom_path: Option<String>,
+        audio: Option<(OutputStream, Sink)>,
+    ) -> Self {
         let mut keymap = HashMap::new();
         for b in GBA_BUTTONS {
             keymap.insert(b, default_key(b));
@@ -192,7 +201,11 @@ impl CrabBoyApp {
                 .trim_end_matches('\0')
                 .trim()
                 .to_string();
-            self.rom_title = if title.is_empty() { "GBA".to_string() } else { title };
+            self.rom_title = if title.is_empty() {
+                "GBA".to_string()
+            } else {
+                title
+            };
             let mut s = gba_core::Gba::system(data.clone());
             if let Some(sav) = &sav_path {
                 if let Ok(d) = std::fs::read(sav) {
@@ -255,7 +268,9 @@ impl CrabBoyApp {
     /// and reset, so `.sav`/`.rtc` reflect the game's own saves rather than a
     /// wall-clock timer.
     fn flush_save(&mut self) {
-        let Some(system) = &mut self.system else { return };
+        let Some(system) = &mut self.system else {
+            return;
+        };
         if !system.battery_backed() {
             return;
         }
@@ -331,9 +346,12 @@ impl CrabBoyApp {
                     // Sample rate changed (e.g. CGB double-speed toggle); drop
                     // the old sink and open a fresh one at the new rate.
                     self.audio.take();
-                    self.audio = rodio::OutputStream::try_default()
-                        .ok()
-                        .and_then(|(stream, handle)| Sink::try_new(&handle).ok().map(|sink| (stream, sink)));
+                    self.audio =
+                        rodio::OutputStream::try_default()
+                            .ok()
+                            .and_then(|(stream, handle)| {
+                                Sink::try_new(&handle).ok().map(|sink| (stream, sink))
+                            });
                     self.audio_rate = rate;
                 }
                 if let Some((_, sink)) = &self.audio {
@@ -395,7 +413,11 @@ impl CrabBoyApp {
         let mut newly: Vec<egui::Key> = Vec::new();
         for e in raw {
             match e {
-                egui::Event::Key { physical_key, pressed, .. } => {
+                egui::Event::Key {
+                    physical_key,
+                    pressed,
+                    ..
+                } => {
                     if let Some(k) = physical_key {
                         if pressed {
                             if !keys.contains(&k) {
@@ -418,7 +440,11 @@ impl CrabBoyApp {
             let is_gba = system.name() == "gba";
             let buttons: &[Button] = if is_gba { &GBA_BUTTONS } else { &GB_BUTTONS };
             for b in buttons {
-                let held = self.keymap.get(b).map(|k| keys.contains(k)).unwrap_or(false);
+                let held = self
+                    .keymap
+                    .get(b)
+                    .map(|k| keys.contains(k))
+                    .unwrap_or(false);
                 if held {
                     system.press(*b);
                 } else {
@@ -476,7 +502,8 @@ impl CrabBoyApp {
             None => self.shade_image(&frame.shades, w, h),
         };
         let tex = self.screen_texture.get_or_insert_with(|| {
-            ui.ctx().load_texture("gb-screen", img.clone(), egui::TextureOptions::NEAREST)
+            ui.ctx()
+                .load_texture("gb-screen", img.clone(), egui::TextureOptions::NEAREST)
         });
         tex.set(img, egui::TextureOptions::NEAREST);
         let avail = ui.available_size();
@@ -487,7 +514,10 @@ impl CrabBoyApp {
 
     fn palette_ui(&mut self, ui: &mut egui::Ui) {
         for (name, pal) in PALETTES {
-            if ui.selectable_label(self.palette_name == name, name).clicked() {
+            if ui
+                .selectable_label(self.palette_name == name, name)
+                .clicked()
+            {
                 self.palette = pal;
                 self.palette_name = name.to_string();
             }

@@ -26,7 +26,15 @@ struct Timer {
 
 impl Timer {
     fn new() -> Self {
-        Timer { counter: 0, reload: 0, prescaler: 0, cascade: false, irq_enable: false, enabled: false, ticks: 0 }
+        Timer {
+            counter: 0,
+            reload: 0,
+            prescaler: 0,
+            cascade: false,
+            irq_enable: false,
+            enabled: false,
+            ticks: 0,
+        }
     }
 }
 
@@ -41,7 +49,11 @@ pub struct Timers {
 
 impl Default for Timers {
     fn default() -> Self {
-        Timers { t: [Timer::new(); 4], flags: 0, overflowed: [false; 4] }
+        Timers {
+            t: [Timer::new(); 4],
+            flags: 0,
+            overflowed: [false; 4],
+        }
     }
 }
 

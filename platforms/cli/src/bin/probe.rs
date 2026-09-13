@@ -4,10 +4,22 @@ use gb_core::joypad::*;
 
 fn main() {
     let rom = std::env::args().nth(1).expect("rom");
-    let press_f: u32 = std::env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(400);
-    let end_f: u32 = std::env::args().nth(3).and_then(|v| v.parse().ok()).unwrap_or(560);
-    let dfrom: u32 = std::env::args().nth(4).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let force_f9: i64 = std::env::args().nth(5).and_then(|v| v.parse().ok()).unwrap_or(-1);
+    let press_f: u32 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    let end_f: u32 = std::env::args()
+        .nth(3)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(560);
+    let dfrom: u32 = std::env::args()
+        .nth(4)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let force_f9: i64 = std::env::args()
+        .nth(5)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-1);
 
     let data = std::fs::read(&rom).expect("read rom");
     let cart = Cartridge::load(&data).expect("load cart");
@@ -53,7 +65,10 @@ fn main() {
             f, f8, f9, b5, lcdc, ly, key1, emu.bus.ppu.vblank_interrupts
         );
     }
-    eprintln!("=== vblank gap samples: {} ===", stamps.len().saturating_sub(1));
+    eprintln!(
+        "=== vblank gap samples: {} ===",
+        stamps.len().saturating_sub(1)
+    );
     for (i, w) in stamps.windows(2).enumerate().take(20) {
         eprintln!("gap[{}] = {} cycles", i, w[1] - w[0]);
     }

@@ -42,7 +42,14 @@ pub(crate) struct Channel {
 
 impl Channel {
     fn new() -> Self {
-        Channel { src: 0, dst: 0, count: 0, control: 0, enabled: false, done: false }
+        Channel {
+            src: 0,
+            dst: 0,
+            count: 0,
+            control: 0,
+            enabled: false,
+            done: false,
+        }
     }
     pub(crate) fn timing(&self) -> Timing {
         match (self.control >> 11) & 3 {
@@ -87,7 +94,10 @@ pub struct Dma {
 
 impl Default for Dma {
     fn default() -> Self {
-        Dma { chans: [Channel::new(); 4], flags: 0 }
+        Dma {
+            chans: [Channel::new(); 4],
+            flags: 0,
+        }
     }
 }
 
@@ -107,7 +117,9 @@ impl Dma {
 
     /// Write a 16-bit register in the DMA region.
     pub fn write16(&mut self, offset: usize, value: u16) {
-        let Some((i, sub)) = Self::chan_index(offset) else { return };
+        let Some((i, sub)) = Self::chan_index(offset) else {
+            return;
+        };
         let ch = &mut self.chans[i];
         match sub {
             0 => ch.src = (ch.src & 0xFFFF_0000) | value as u32,

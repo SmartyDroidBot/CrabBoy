@@ -30,8 +30,16 @@ impl Joypad {
         // bit 4 (P14) = 0 selects the D-pad row, bit 5 (P15) = 0 selects the
         // buttons row. Output lines are shared (open-collector, active low),
         // so when both groups are selected the result is the AND of both rows.
-        let buttons = if p1 & 0x20 == 0 { self.state & 0x0F } else { 0x0F };
-        let dpad = if p1 & 0x10 == 0 { (self.state >> 4) & 0x0F } else { 0x0F };
+        let buttons = if p1 & 0x20 == 0 {
+            self.state & 0x0F
+        } else {
+            0x0F
+        };
+        let dpad = if p1 & 0x10 == 0 {
+            (self.state >> 4) & 0x0F
+        } else {
+            0x0F
+        };
         0xC0 | (buttons & dpad)
     }
 }

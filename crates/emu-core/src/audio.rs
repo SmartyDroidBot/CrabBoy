@@ -10,11 +10,15 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     pub fn new() -> Self {
-        AudioBuffer { samples: Vec::new() }
+        AudioBuffer {
+            samples: Vec::new(),
+        }
     }
 
     pub fn with_capacity(n: usize) -> Self {
-        AudioBuffer { samples: Vec::with_capacity(n) }
+        AudioBuffer {
+            samples: Vec::with_capacity(n),
+        }
     }
 
     pub fn push(&mut self, left: Sample, right: Sample) {

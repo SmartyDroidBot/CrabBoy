@@ -6,8 +6,8 @@
 //! the frontend via [`Gb::take_audio`].
 
 use emu_core::audio::AudioBuffer;
-use emu_core::device::Device;
 use emu_core::bus::Bus;
+use emu_core::device::Device;
 
 const DUTY: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
@@ -39,7 +39,12 @@ pub(crate) struct Envelope {
 
 impl Envelope {
     fn new() -> Self {
-        Envelope { volume: 0, up: false, period: 0, timer: 0 }
+        Envelope {
+            volume: 0,
+            up: false,
+            period: 0,
+            timer: 0,
+        }
     }
     fn reload(&mut self, nr: u8) {
         self.set(nr);
@@ -118,7 +123,11 @@ impl Square {
         self.freq = nr3 as u16 | (((nr4 & 0x07) as u16) << 8);
         self.freq_timer = (2048 - self.freq as u32) * 4;
         self.phase = 0;
-        self.sweep_timer = if self.sweep_period == 0 { 8 } else { self.sweep_period };
+        self.sweep_timer = if self.sweep_period == 0 {
+            8
+        } else {
+            self.sweep_period
+        };
         self.sweep_enabled = self.sweep_period != 0 || self.sweep_shift != 0;
         if self.sweep_shift != 0 {
             self.calc_sweep(true);
@@ -170,7 +179,11 @@ impl Square {
             self.sweep_timer -= 1;
             return;
         }
-        self.sweep_timer = if self.sweep_period == 0 { 8 } else { self.sweep_period };
+        self.sweep_timer = if self.sweep_period == 0 {
+            8
+        } else {
+            self.sweep_period
+        };
         self.calc_sweep(true);
         self.calc_sweep(false);
     }
@@ -285,7 +298,11 @@ impl Noise {
     }
 
     fn clock(&self) -> u32 {
-        let divisor_clock = if self.divisor == 0 { 8 } else { (self.divisor as u32) << 4 };
+        let divisor_clock = if self.divisor == 0 {
+            8
+        } else {
+            (self.divisor as u32) << 4
+        };
         divisor_clock << self.shift
     }
 
@@ -647,7 +664,11 @@ mod tests {
         assert!(apu.ch2.on, "CH2 enabled after trigger");
 
         apu.step(8192, &mut io, &wave_ram);
-        assert!(apu.produced >= 8, "samples produced at 8192 Hz: {}", apu.produced);
+        assert!(
+            apu.produced >= 8,
+            "samples produced at 8192 Hz: {}",
+            apu.produced
+        );
 
         // Non-silent: CH2 is a 50% square at max volume, panned to both sides.
         let has_audio = apu.buffer.samples.iter().any(|&s| s.abs() > 0.1);
@@ -679,12 +700,18 @@ mod tests {
         apu.write(0xFF24, 0x77, &mut io);
         apu.write(0xFF25, 0xFF, &mut io);
         apu.write(0xFF19, 0x80, &mut io); // trigger CH2 (length 0 -> 64)
-        assert_eq!(apu.ch2.length, 64, "length loaded to max on trigger-from-zero");
+        assert_eq!(
+            apu.ch2.length, 64,
+            "length loaded to max on trigger-from-zero"
+        );
 
         // Length counted down; retriggering must NOT reload the counter.
         apu.ch2.length = 32;
         apu.write(0xFF19, 0x80, &mut io); // retrigger
-        assert_eq!(apu.ch2.length, 32, "retrigger must not reload length counter");
+        assert_eq!(
+            apu.ch2.length, 32,
+            "retrigger must not reload length counter"
+        );
     }
 
     #[test]
@@ -699,7 +726,7 @@ mod tests {
         apu.write(0xFF12, 0xF0, &mut io);
         apu.write(0xFF13, 0xFD, &mut io); // freq 0x7FD -> timer 12
         apu.write(0xFF14, 0x87, &mut io); // trigger
-        // CH2: 50% duty, volume 15, different frequency.
+                                          // CH2: 50% duty, volume 15, different frequency.
         apu.write(0xFF16, 0x80, &mut io);
         apu.write(0xFF17, 0xF0, &mut io);
         apu.write(0xFF18, 0xFB, &mut io); // freq 0x7FB -> timer 20
@@ -712,13 +739,19 @@ mod tests {
         assert!(!samples.is_empty());
         let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
         let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!(max - min > 0.1, "mix must vary (AC), got min {min} max {max}");
+        assert!(
+            max - min > 0.1,
+            "mix must vary (AC), got min {min} max {max}"
+        );
         assert!(max > 0.0, "mix should be audible, max {max}");
         assert!(min < 0.0, "mix should swing negative too, min {min}");
         // Two loud channels clip at the amp, so the output pins to +-1.0; that
         // is authentic hard saturation, NOT a constant-DC silence. The signal
         // still alternates (min < 0 < max), so it stays audible.
-        assert!(min != max, "clipped mix must still alternate, got min {min} max {max}");
+        assert!(
+            min != max,
+            "clipped mix must still alternate, got min {min} max {max}"
+        );
     }
 
     #[test]
@@ -738,7 +771,13 @@ mod tests {
         // Rewriting NRx2 must update parameters but NOT reset the timer.
         apu.ch2.env.timer = 1;
         apu.write(0xFF17, 0xE2, &mut io);
-        assert_eq!(apu.ch2.env.timer, 1, "NRx2 write must not reload envelope timer");
-        assert_eq!(apu.ch2.env.volume, 14, "NRx2 write updates volume immediately");
+        assert_eq!(
+            apu.ch2.env.timer, 1,
+            "NRx2 write must not reload envelope timer"
+        );
+        assert_eq!(
+            apu.ch2.env.volume, 14,
+            "NRx2 write updates volume immediately"
+        );
     }
 }

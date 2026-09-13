@@ -56,17 +56,26 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
     fn u16(&mut self) -> Result<u16, String> {
-        let b = self.data.get(self.pos..self.pos + 2).ok_or("unexpected end of state")?;
+        let b = self
+            .data
+            .get(self.pos..self.pos + 2)
+            .ok_or("unexpected end of state")?;
         self.pos += 2;
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
     fn u32(&mut self) -> Result<u32, String> {
-        let b = self.data.get(self.pos..self.pos + 4).ok_or("unexpected end of state")?;
+        let b = self
+            .data
+            .get(self.pos..self.pos + 4)
+            .ok_or("unexpected end of state")?;
         self.pos += 4;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
     fn u64(&mut self) -> Result<u64, String> {
-        let b = self.data.get(self.pos..self.pos + 8).ok_or("unexpected end of state")?;
+        let b = self
+            .data
+            .get(self.pos..self.pos + 8)
+            .ok_or("unexpected end of state")?;
         self.pos += 8;
         let mut arr = [0u8; 8];
         arr.copy_from_slice(b);
@@ -74,7 +83,10 @@ impl<'a> Reader<'a> {
     }
     fn bytes(&mut self) -> Result<Vec<u8>, String> {
         let len = self.u32()? as usize;
-        let b = self.data.get(self.pos..self.pos + len).ok_or("unexpected end of state")?;
+        let b = self
+            .data
+            .get(self.pos..self.pos + len)
+            .ok_or("unexpected end of state")?;
         self.pos += len;
         Ok(b.to_vec())
     }

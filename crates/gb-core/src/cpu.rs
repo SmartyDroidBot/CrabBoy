@@ -171,7 +171,15 @@ impl Cpu {
             if n >= start && n < start + count {
                 eprintln!(
                     "T{} {:04X} {:02X} A={:02X} F={:02X} BC={:04X} DE={:04X} HL={:04X} SP={:04X}",
-                    n, pc, op, self.a, self.f, self.bc(), self.de(), self.hl(), self.sp
+                    n,
+                    pc,
+                    op,
+                    self.a,
+                    self.f,
+                    self.bc(),
+                    self.de(),
+                    self.hl(),
+                    self.sp
                 );
             }
         }
@@ -1744,7 +1752,10 @@ mod tests {
 
         cpu.execute(&mut bus); // inc b, second run (PC rewound)
         assert_eq!(cpu.b, 0x07);
-        assert_eq!(cpu.pc, 0x0102, "continues at the byte after the doubled instruction");
+        assert_eq!(
+            cpu.pc, 0x0102,
+            "continues at the byte after the doubled instruction"
+        );
     }
 
     #[test]

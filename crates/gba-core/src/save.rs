@@ -83,7 +83,7 @@ impl SaveCartridge {
     }
 
     /// Load raw save bytes into the active region, detecting the type from the
-/// payload length if it has not been set yet.
+    /// payload length if it has not been set yet.
     pub fn load(&mut self, data: &[u8]) {
         if self.kind == SaveType::None {
             self.detected = true;

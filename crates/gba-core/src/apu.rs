@@ -35,7 +35,12 @@ struct Envelope {
 
 impl Envelope {
     fn new() -> Self {
-        Envelope { volume: 0, up: false, period: 0, timer: 0 }
+        Envelope {
+            volume: 0,
+            up: false,
+            period: 0,
+            timer: 0,
+        }
     }
     /// Update parameters from NRx2 without reloading the timer.
     fn set(&mut self, nr: u8) {
@@ -113,7 +118,11 @@ impl Square {
         self.phase = 0;
         self.env.timer = self.env.period;
         if has_sweep {
-            self.sweep_timer = if self.sweep_period == 0 { 8 } else { self.sweep_period };
+            self.sweep_timer = if self.sweep_period == 0 {
+                8
+            } else {
+                self.sweep_period
+            };
             self.sweep_enabled = self.sweep_period != 0 || self.sweep_shift != 0;
             if self.sweep_shift != 0 {
                 self.calc_sweep(true);
@@ -128,7 +137,11 @@ impl Square {
     }
     fn calc_sweep(&mut self, load: bool) {
         let delta = self.freq >> self.sweep_shift;
-        let new = if self.sweep_negate { self.freq.wrapping_sub(delta) } else { self.freq + delta };
+        let new = if self.sweep_negate {
+            self.freq.wrapping_sub(delta)
+        } else {
+            self.freq + delta
+        };
         if new > 0x7FF {
             self.on = false;
         }
@@ -149,7 +162,11 @@ impl Square {
             return 0.0;
         }
         let a = amp(self.env.volume);
-        if DUTY[self.duty as usize][self.phase as usize] == 1 { a } else { -a }
+        if DUTY[self.duty as usize][self.phase as usize] == 1 {
+            a
+        } else {
+            -a
+        }
     }
     fn sweep_tick(&mut self) {
         if !self.sweep_enabled {
@@ -159,7 +176,11 @@ impl Square {
             self.sweep_timer -= 1;
             return;
         }
-        self.sweep_timer = if self.sweep_period == 0 { 8 } else { self.sweep_period };
+        self.sweep_timer = if self.sweep_period == 0 {
+            8
+        } else {
+            self.sweep_period
+        };
         self.calc_sweep(true);
         self.calc_sweep(false);
     }
@@ -216,7 +237,11 @@ impl Wave {
             return 0.0;
         }
         let byte = wave_ram[(self.phase >> 1) as usize];
-        let nibble = if self.phase & 1 == 0 { byte >> 4 } else { byte & 0x0F };
+        let nibble = if self.phase & 1 == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0F
+        };
         let v = nibble >> (self.volume_shift - 1);
         v as f32 / 7.5 - 1.0
     }
@@ -262,13 +287,21 @@ impl Noise {
         self.divisor = ((value >> 8) & 0x07) as u8;
         self.width = value & 0x0800 != 0;
         self.shift = ((value >> 12) & 0x0F) as u8;
-        self.freq_timer = if self.divisor == 0 { 8 } else { self.divisor as u32 * 16 };
+        self.freq_timer = if self.divisor == 0 {
+            8
+        } else {
+            self.divisor as u32 * 16
+        };
         self.lfsr = 0x7FFF;
         self.on = true;
     }
     fn tick_freq(&mut self) {
         if self.freq_timer == 0 {
-            self.freq_timer = if self.divisor == 0 { 8 } else { self.divisor as u32 * 16 };
+            self.freq_timer = if self.divisor == 0 {
+                8
+            } else {
+                self.divisor as u32 * 16
+            };
             let xor = (self.lfsr & 1) ^ ((self.lfsr >> 1) & 1);
             self.lfsr >>= 1;
             self.lfsr |= xor << 14;
@@ -283,7 +316,11 @@ impl Noise {
             return 0.0;
         }
         let a = amp(self.env.volume);
-        if self.lfsr & 1 == 0 { a } else { -a }
+        if self.lfsr & 1 == 0 {
+            a
+        } else {
+            -a
+        }
     }
 }
 

@@ -14,21 +14,21 @@ fn cond_holds(cpu: &Cpu, cond: u32) -> bool {
     let c = cpu.cpsr & super::flag::C != 0;
     let v = cpu.cpsr & super::flag::V != 0;
     match cond {
-        0x0 => z,                            // EQ
-        0x1 => !z,                           // NE
-        0x2 => c,                            // CS
-        0x3 => !c,                           // CC
-        0x4 => n,                            // MI
-        0x5 => !n,                           // PL
-        0x6 => v,                            // VS
-        0x7 => !v,                           // VC
-        0x8 => c && !z,                      // HI
-        0x9 => !c || z,                      // LS
-        0xA => n == v,                       // GE
-        0xB => n != v,                       // LT
-        0xC => !z && n == v,                 // GT
-        0xD => z || n != v,                  // LE
-        _ => true,                           // AL
+        0x0 => z,            // EQ
+        0x1 => !z,           // NE
+        0x2 => c,            // CS
+        0x3 => !c,           // CC
+        0x4 => n,            // MI
+        0x5 => !n,           // PL
+        0x6 => v,            // VS
+        0x7 => !v,           // VC
+        0x8 => c && !z,      // HI
+        0x9 => !c || z,      // LS
+        0xA => n == v,       // GE
+        0xB => n != v,       // LT
+        0xC => !z && n == v, // GT
+        0xD => z || n != v,  // LE
+        _ => true,           // AL
     }
 }
 
@@ -41,7 +41,10 @@ pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -
             if amount == 0 {
                 (operand, carry_in)
             } else if amount < 32 {
-                (operand.wrapping_shl(amount), operand & (1u32 << (32 - amount)) != 0)
+                (
+                    operand.wrapping_shl(amount),
+                    operand & (1u32 << (32 - amount)) != 0,
+                )
             } else if amount == 32 {
                 (0, operand & 1 != 0)
             } else {
@@ -63,7 +66,14 @@ pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -
         2 => {
             // ASR
             if amount == 0 || amount >= 32 {
-                (if operand & (1u32 << 31) != 0 { u32::MAX } else { 0 }, operand >> 31 != 0)
+                (
+                    if operand & (1u32 << 31) != 0 {
+                        u32::MAX
+                    } else {
+                        0
+                    },
+                    operand >> 31 != 0,
+                )
             } else {
                 let sign = operand >> 31 != 0;
                 let c = operand & (1u32 << (amount - 1)) != 0;
@@ -82,7 +92,10 @@ pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -
                 (v, operand & 1 != 0)
             } else {
                 let amt = amount & 31;
-                (operand.rotate_right(amt), operand & (1u32 << (amt - 1)) != 0)
+                (
+                    operand.rotate_right(amt),
+                    operand & (1u32 << (amt - 1)) != 0,
+                )
             }
         }
     }
@@ -301,34 +314,34 @@ fn data_processing(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let old_carry = cpu.cpsr & super::flag::C != 0;
 
     let (result, fc, fv) = match opcode {
-        0 => (rn_v & operand2, carry_out, false),                 // AND
-        1 => (rn_v ^ operand2, carry_out, false),                 // EOR
-        2 => sub(rn_v, operand2),                                 // SUB
-        3 => sub(operand2, rn_v),                                 // RSB
-        4 => add(rn_v, operand2),                                 // ADD
+        0 => (rn_v & operand2, carry_out, false), // AND
+        1 => (rn_v ^ operand2, carry_out, false), // EOR
+        2 => sub(rn_v, operand2),                 // SUB
+        3 => sub(operand2, rn_v),                 // RSB
+        4 => add(rn_v, operand2),                 // ADD
         5 => {
             let (t, c1, v1) = add(rn_v, operand2);
             let (t2, c2, v2) = add(t, if old_carry { 1 } else { 0 });
             (t2, c1 || c2, v1 || v2)
-        }                                                         // ADC
+        } // ADC
         6 => {
             let (t, c1, v1) = sub(rn_v, operand2);
             let (t2, c2, v2) = sub(t, if old_carry { 0 } else { 1 });
             (t2, c1 || c2, v1 || v2)
-        }                                                         // SBC
+        } // SBC
         7 => {
             let (t, c1, v1) = sub(operand2, rn_v);
             let (t2, c2, v2) = sub(t, if old_carry { 0 } else { 1 });
             (t2, c1 || c2, v1 || v2)
-        }                                                         // RSC
-        8 => (rn_v & operand2, carry_out, false),                 // TST
-        9 => (rn_v ^ operand2, carry_out, false),                 // TEQ
-        10 => sub(rn_v, operand2),                                // CMP
-        11 => add(rn_v, operand2),                                // CMN
-        12 => (rn_v | operand2, carry_out, false),                // ORR
-        13 => (operand2, carry_out, false),                       // MOV
-        14 => (rn_v & !operand2, carry_out, false),               // BIC
-        _ => (!operand2, carry_out, false),                       // MVN
+        } // RSC
+        8 => (rn_v & operand2, carry_out, false), // TST
+        9 => (rn_v ^ operand2, carry_out, false), // TEQ
+        10 => sub(rn_v, operand2),                // CMP
+        11 => add(rn_v, operand2),                // CMN
+        12 => (rn_v | operand2, carry_out, false), // ORR
+        13 => (operand2, carry_out, false),       // MOV
+        14 => (rn_v & !operand2, carry_out, false), // BIC
+        _ => (!operand2, carry_out, false),       // MVN
     };
 
     let is_test = (8..=11).contains(&opcode);
@@ -370,7 +383,12 @@ fn multiply(cpu: &mut Cpu, inst: u32) {
         result = result.wrapping_add(cpu.reg(rn));
     }
     if s {
-        set_flags(cpu, result, cpu.cpsr & super::flag::C != 0, cpu.cpsr & super::flag::V != 0);
+        set_flags(
+            cpu,
+            result,
+            cpu.cpsr & super::flag::C != 0,
+            cpu.cpsr & super::flag::V != 0,
+        );
     }
     if rd == 15 {
         cpu.branch(result);
@@ -464,9 +482,23 @@ fn halfword_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let base = cpu.reg(rn);
     let delta = if u { offset } else { offset.wrapping_neg() };
     let (addr, wb) = if p {
-        (base.wrapping_add(delta), if w { Some(base.wrapping_add(delta)) } else { None })
+        (
+            base.wrapping_add(delta),
+            if w {
+                Some(base.wrapping_add(delta))
+            } else {
+                None
+            },
+        )
     } else {
-        (base, if w { Some(base.wrapping_add(delta)) } else { None })
+        (
+            base,
+            if w {
+                Some(base.wrapping_add(delta))
+            } else {
+                None
+            },
+        )
     };
 
     if l {
@@ -514,17 +546,27 @@ fn single_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let base = cpu.reg(rn);
     let delta = if u { offset } else { offset.wrapping_neg() };
     let (addr, wb) = if p {
-        (base.wrapping_add(delta), if w { Some(base.wrapping_add(delta)) } else { None })
+        (
+            base.wrapping_add(delta),
+            if w {
+                Some(base.wrapping_add(delta))
+            } else {
+                None
+            },
+        )
     } else {
-        (base, if w { Some(base.wrapping_add(delta)) } else { None })
+        (
+            base,
+            if w {
+                Some(base.wrapping_add(delta))
+            } else {
+                None
+            },
+        )
     };
 
     if l {
-        let value = if b {
-            bus.read8(addr)
-        } else {
-            bus.read32(addr)
-        };
+        let value = if b { bus.read8(addr) } else { bus.read32(addr) };
         if rd == 15 {
             cpu.branch(value);
         } else {

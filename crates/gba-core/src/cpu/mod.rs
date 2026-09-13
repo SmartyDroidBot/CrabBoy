@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(cpu.cpsr & 0x1F, mode::SVC);
         assert_ne!(cpu.cpsr & flag::I, 0);
         assert_eq!(cpu.lr[1], 4); // SVC LR = return address
-        // SPSR_SVC saved USR mode + no T.
+                                  // SPSR_SVC saved USR mode + no T.
         assert_eq!(cpu.spsr[1] & 0x1F, mode::USR);
     }
 
@@ -664,7 +664,7 @@ mod tests {
         cpu.regs[2] = 0x22;
         cpu.regs[3] = 0x33;
         arm(&mut bus, 0, 0xE88A000C); // STMIA r2!, {r3,r4}? -> use r1 base, r2,r3
-        // STMIA r1!, {r2,r3} = 0xE8A1000C
+                                      // STMIA r1!, {r2,r3} = 0xE8A1000C
         arm(&mut bus, 0, 0xE8A1000C);
         cpu.pc = 0;
         cpu.execute(&mut bus);

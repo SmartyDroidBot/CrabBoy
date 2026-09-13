@@ -128,42 +128,46 @@ fn alu(cpu: &mut Cpu, inst: u32) {
     let b = rn(cpu, rs);
     let carry_in = cpu.cpsr & flag::C != 0;
     let (r, c, v) = match op {
-        0 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),          // AND
-        1 => (a ^ b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),          // EOR
+        0 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // AND
+        1 => (a ^ b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // EOR
         2 => {
             let (v, c) = shift_reg(a, 0, b & 0xFF, carry_in);
-            (v, c, cpu.cpsr & flag::V != 0)                                     // LSL
+            (v, c, cpu.cpsr & flag::V != 0) // LSL
         }
         3 => {
             let (v, c) = shift_reg(a, 1, b & 0xFF, carry_in);
-            (v, c, cpu.cpsr & flag::V != 0)                                     // LSR
+            (v, c, cpu.cpsr & flag::V != 0) // LSR
         }
         4 => {
             let (v, c) = shift_reg(a, 2, b & 0xFF, carry_in);
-            (v, c, cpu.cpsr & flag::V != 0)                                     // ASR
+            (v, c, cpu.cpsr & flag::V != 0) // ASR
         }
         5 => {
             let (t, c1, v1) = add(a, b);
             let (t2, c2, v2) = add(t, if carry_in { 1 } else { 0 });
-            (t2, c1 || c2, v1 || v2)                                           // ADC
+            (t2, c1 || c2, v1 || v2) // ADC
         }
         6 => {
             let (t, c1, v1) = sub(a, b);
             let (t2, c2, v2) = sub(t, if carry_in { 0 } else { 1 });
-            (t2, c1 || c2, v1 || v2)                                           // SBC
+            (t2, c1 || c2, v1 || v2) // SBC
         }
         7 => {
             let (v, c) = shift_reg(a, 3, b & 0xFF, carry_in);
-            (v, c, cpu.cpsr & flag::V != 0)                                     // ROR
+            (v, c, cpu.cpsr & flag::V != 0) // ROR
         }
-        8 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),         // TST
-        9 => sub(0, b),                                                          // NEG
-        10 => sub(a, b),                                                         // CMP
-        11 => add(a, b),                                                         // CMN
-        12 => (a | b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),         // ORR
-        13 => (a.wrapping_mul(b), cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // MUL
-        14 => (a & !b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),        // BIC
-        _ => (!b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),             // MVN
+        8 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // TST
+        9 => sub(0, b),                                                 // NEG
+        10 => sub(a, b),                                                // CMP
+        11 => add(a, b),                                                // CMN
+        12 => (a | b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // ORR
+        13 => (
+            a.wrapping_mul(b),
+            cpu.cpsr & flag::C != 0,
+            cpu.cpsr & flag::V != 0,
+        ), // MUL
+        14 => (a & !b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // BIC
+        _ => (!b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0),    // MVN
     };
     let test = op == 8 || op == 10 || op == 11;
     if !test {
@@ -231,11 +235,7 @@ fn ldr_str_reg(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let rd = inst & 7;
     let addr = rn(cpu, rb).wrapping_add(rn(cpu, ro));
     if l {
-        let v = if i {
-            bus.read8(addr)
-        } else {
-            bus.read32(addr)
-        };
+        let v = if i { bus.read8(addr) } else { bus.read32(addr) };
         cpu.set_reg(rd, v);
     } else {
         let v = rn(cpu, rd);
@@ -345,7 +345,14 @@ fn add_sub_sp(cpu: &mut Cpu, inst: u32) {
     let imm7 = inst & 0x7F;
     let delta = imm7 << 2;
     let sp = rn(cpu, 13);
-    cpu.set_reg(13, if s { sp.wrapping_sub(delta) } else { sp.wrapping_add(delta) });
+    cpu.set_reg(
+        13,
+        if s {
+            sp.wrapping_sub(delta)
+        } else {
+            sp.wrapping_add(delta)
+        },
+    );
     cpu.add_cycles(1);
 }
 

@@ -200,7 +200,12 @@ impl Ppu {
         }
     }
 
-    fn begin_scanline(&mut self, io: &mut [u8; 0x80], _vram: &mut [u8; 0x4000], oam: &mut [u8; 0xA0]) {
+    fn begin_scanline(
+        &mut self,
+        io: &mut [u8; 0x80],
+        _vram: &mut [u8; 0x4000],
+        oam: &mut [u8; 0xA0],
+    ) {
         self.scan_oam(io, oam);
         self.mode = 2;
         self.update_stat(io);
@@ -334,16 +339,19 @@ impl Ppu {
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
             let attr = if self.cgb { vram[0x2000 + addr] } else { 0 };
-            let bank = if self.cgb { (attr as usize >> 3) & 1 } else { 0 };
+            let bank = if self.cgb {
+                (attr as usize >> 3) & 1
+            } else {
+                0
+            };
             let pal = if self.cgb { attr & 7 } else { 0 };
             let row = if self.cgb && attr & 0x40 != 0 {
                 7 - row_in_tile as u8
             } else {
                 row_in_tile as u8
             };
-            let pixels = *cache[bank * 256 + tile_index as usize].get_or_insert_with(|| {
-                self.tile_pixels(vram, io, tile_index, row, bank)
-            });
+            let pixels = *cache[bank * 256 + tile_index as usize]
+                .get_or_insert_with(|| self.tile_pixels(vram, io, tile_index, row, bank));
             let col = if self.cgb && attr & 0x20 != 0 {
                 7 - (x & 7) as u8
             } else {
@@ -393,16 +401,19 @@ impl Ppu {
             let addr = map_base + tile_row * 32 + tile_col;
             let tile_index = vram[addr];
             let attr = if self.cgb { vram[0x2000 + addr] } else { 0 };
-            let bank = if self.cgb { (attr as usize >> 3) & 1 } else { 0 };
+            let bank = if self.cgb {
+                (attr as usize >> 3) & 1
+            } else {
+                0
+            };
             let pal = if self.cgb { attr & 7 } else { 0 };
             let row = if self.cgb && attr & 0x40 != 0 {
                 7 - row_in_tile as u8
             } else {
                 row_in_tile as u8
             };
-            let pixels = *cache[bank * 256 + tile_index as usize].get_or_insert_with(|| {
-                self.tile_pixels(vram, io, tile_index, row, bank)
-            });
+            let pixels = *cache[bank * 256 + tile_index as usize]
+                .get_or_insert_with(|| self.tile_pixels(vram, io, tile_index, row, bank));
             let col = if self.cgb && attr & 0x20 != 0 {
                 7 - (win_col & 7) as u8
             } else {
@@ -430,7 +441,8 @@ impl Ppu {
         pal: &mut [u8; SCREEN_W],
     ) {
         let mut sprites = [self.line_sprites[0]; 10];
-        sprites[..self.line_sprite_count].copy_from_slice(&self.line_sprites[..self.line_sprite_count]);
+        sprites[..self.line_sprite_count]
+            .copy_from_slice(&self.line_sprites[..self.line_sprite_count]);
         sprites[..self.line_sprite_count].sort_by_key(|s| s.x);
 
         let lcdc = io[0x40];
@@ -468,7 +480,11 @@ impl Ppu {
             }
             let tile_row = if flip_y { 7 - (row & 7) } else { row & 7 };
             // Sprite tiles are always indexed from 0x8000 (unsigned), independent of LCDC bit 4.
-            let bank = if self.cgb { (s.attr as usize >> 3) & 1 } else { 0 };
+            let bank = if self.cgb {
+                (s.attr as usize >> 3) & 1
+            } else {
+                0
+            };
             let base = ((0x8000 + tile as usize * 16) & 0x1FFF) | (bank * 0x2000);
             let lo = vram[base + tile_row as usize * 2];
             let hi = vram[base + tile_row as usize * 2 + 1];
@@ -478,7 +494,11 @@ impl Ppu {
                 *c = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
             }
 
-            let obp = if s.attr & 0x10 != 0 { io[0x49] } else { io[0x48] };
+            let obp = if s.attr & 0x10 != 0 {
+                io[0x49]
+            } else {
+                io[0x48]
+            };
             for p in 0..8 {
                 let px = s.x + p as i16;
                 if px < 0 || px >= SCREEN_W as i16 {
@@ -598,7 +618,11 @@ mod tests {
         io[0x41] = 0x20; // enable OAM (mode 2) STAT interrupt
         io[0x0F] = 0;
         ppu.step(456, &mut io, &mut vram, &mut oam); // complete the first line
-        assert_ne!(io[0x0F] & 0x02, 0, "OAM STAT interrupt fires entering mode 2");
+        assert_ne!(
+            io[0x0F] & 0x02,
+            0,
+            "OAM STAT interrupt fires entering mode 2"
+        );
     }
 
     #[test]
@@ -617,6 +641,10 @@ mod tests {
         io[0x41] = 0x40; // enable LYC STAT interrupt
         io[0x0F] = 0;
         ppu.step(456, &mut io, &mut vram, &mut oam); // LY goes 0 -> 1
-        assert_ne!(io[0x0F] & 0x02, 0, "LYC STAT interrupt fires on coincidence edge");
+        assert_ne!(
+            io[0x0F] & 0x02,
+            0,
+            "LYC STAT interrupt fires on coincidence edge"
+        );
     }
 }

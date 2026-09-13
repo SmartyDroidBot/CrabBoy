@@ -116,7 +116,11 @@ impl Io {
         }
         let pressed = !self.keypad & key::MASK & watched;
         let and = self.keycnt & (1 << 15) != 0;
-        let hit = if and { pressed == watched } else { pressed != 0 };
+        let hit = if and {
+            pressed == watched
+        } else {
+            pressed != 0
+        };
         if hit {
             self.iflags |= IRQ_KEYPAD;
         }

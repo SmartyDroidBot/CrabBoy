@@ -11,7 +11,9 @@ fn parse_input_script(s: &str) -> Vec<(u32, bool, u8)> {
         if ev.is_empty() {
             continue;
         }
-        let (name, frame) = ev.rsplit_once('@').expect("GB_INPUT event needs NAME@FRAME");
+        let (name, frame) = ev
+            .rsplit_once('@')
+            .expect("GB_INPUT event needs NAME@FRAME");
         let frame: u32 = frame.trim().parse().expect("bad frame");
         let (press, btn) = if let Some(n) = name.strip_prefix("RELEASE") {
             (false, n.trim())
@@ -37,7 +39,6 @@ fn parse_input_script(s: &str) -> Vec<(u32, bool, u8)> {
     }
     out
 }
-
 
 fn shade_to_rgb(shade: u8) -> (u8, u8, u8) {
     match shade & 3 {
@@ -100,9 +101,7 @@ fn main() -> ExitCode {
     let dump_frame: Option<u32> = std::env::var("GB_DUMP_FRAME")
         .ok()
         .and_then(|v| v.parse().ok());
-    let oam_frame: Option<u32> = std::env::var("GB_OAM")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    let oam_frame: Option<u32> = std::env::var("GB_OAM").ok().and_then(|v| v.parse().ok());
     let cap: u32 = std::env::var("GB_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -180,7 +179,9 @@ fn main() -> ExitCode {
         //   pass: B=3 C=5 D=8 E=13 H=21 L=34 (Fibonacci)
         //   fail: B=C=D=E=H=L=0x42
         // Emulators are encouraged to read these registers.
-        let regs = [emu.cpu.b, emu.cpu.c, emu.cpu.d, emu.cpu.e, emu.cpu.h, emu.cpu.l];
+        let regs = [
+            emu.cpu.b, emu.cpu.c, emu.cpu.d, emu.cpu.e, emu.cpu.h, emu.cpu.l,
+        ];
         if regs == [3, 5, 8, 13, 21, 34] {
             println!("PASSED (mooneye registers)");
             return ExitCode::SUCCESS;
@@ -224,12 +225,17 @@ fn main() -> ExitCode {
         }
         eprintln!("OAM nonzero entries: {n}  LCDC={:02X}", emu.bus.io[0x40]);
         eprintln!("line_sprites count={}", emu.bus.ppu.line_sprite_count);
-        for s in emu.bus.ppu
+        for s in emu
+            .bus
+            .ppu
             .line_sprites
             .iter()
             .take(emu.bus.ppu.line_sprite_count)
         {
-            eprintln!("  spr x={} y={} tile={:02X} attr={:02X} h={}", s.x, s.y, s.tile, s.attr, s.height);
+            eprintln!(
+                "  spr x={} y={} tile={:02X} attr={:02X} h={}",
+                s.x, s.y, s.tile, s.attr, s.height
+            );
         }
     }
     ExitCode::FAILURE

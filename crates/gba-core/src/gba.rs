@@ -8,9 +8,9 @@
 
 use crate::apu::Apu;
 use crate::bus::Bus;
-use crate::cpu::Cpu;
 use crate::cpu::flag;
 use crate::cpu::mode;
+use crate::cpu::Cpu;
 use crate::io::irq;
 use crate::ppu::Ppu;
 use crate::{dma::Timing, ppu};
@@ -52,7 +52,16 @@ impl Gba {
         cpu.set_reg(13, 0x0300_7F00); // SP_svc (current mode is SVC)
         cpu.set_mode_sp(mode::IRQ, 0x0300_7FA0); // SP_irq (BIOS default)
         let bus = Bus::new(rom);
-        Gba { cpu, bus, ppu: Ppu::new(), apu: Apu::new(), line_cycles: 0, line: 0, frame_count: 0, last_unknown_swi: None }
+        Gba {
+            cpu,
+            bus,
+            ppu: Ppu::new(),
+            apu: Apu::new(),
+            line_cycles: 0,
+            line: 0,
+            frame_count: 0,
+            last_unknown_swi: None,
+        }
     }
 
     /// Construct a `Box<dyn System>` from ROM bytes (frontend convenience).
@@ -169,7 +178,11 @@ impl Gba {
         if y == ppu::VISIBLE_LINES {
             self.ppu.reload_affine_refs(&self.bus);
             self.bus.run_dma(Timing::VBlank);
-            if self.cpu.bios_wait_mask().is_some_and(|mask| mask & irq::VBLANK != 0) {
+            if self
+                .cpu
+                .bios_wait_mask()
+                .is_some_and(|mask| mask & irq::VBLANK != 0)
+            {
                 self.cpu.complete_bios_wait();
                 self.dispatch_bios_irq(irq::VBLANK);
             }
@@ -200,7 +213,8 @@ impl Gba {
     /// branch to `[0x03007FFC]`. Called when a bios_wait completes.
     fn dispatch_bios_irq(&mut self, mask: u16) {
         let cur = self.bus.read32(crate::bios::BIOS_IF_ADDR);
-        self.bus.write32(crate::bios::BIOS_IF_ADDR, cur | mask as u32);
+        self.bus
+            .write32(crate::bios::BIOS_IF_ADDR, cur | mask as u32);
         let handler = self.bus.read32(0x0300_7FFC);
         if handler == 0 || handler == 0xFFFF_FFFF {
             return;
@@ -304,7 +318,7 @@ impl Gba {
         self.advance(total);
         total
     }
-/// Current DISPCNT register value (read diagnostics).
+    /// Current DISPCNT register value (read diagnostics).
     pub fn dispcnt(&self) -> u16 {
         self.bus.io.read16(0)
     }
@@ -377,7 +391,10 @@ impl emu_core::System for Gba {
                     .to_string()
             })
             .unwrap_or_default();
-        format!("{} (GBA)", if title.is_empty() { "unknown" } else { &title })
+        format!(
+            "{} (GBA)",
+            if title.is_empty() { "unknown" } else { &title }
+        )
     }
 
     fn reset(&mut self) {
@@ -414,7 +431,12 @@ impl emu_core::System for Gba {
             rgb[i * 3 + 1] = g as u8;
             rgb[i * 3 + 2] = b as u8;
         }
-        emu_core::Frame { width: SCREEN_W, height: SCREEN_H, shades: vec![], rgb: Some(rgb) }
+        emu_core::Frame {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            shades: vec![],
+            rgb: Some(rgb),
+        }
     }
 
     fn audio_rate(&self) -> u32 {

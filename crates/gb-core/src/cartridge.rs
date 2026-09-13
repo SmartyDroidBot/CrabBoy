@@ -104,7 +104,11 @@ impl Cartridge {
             _ => 0,
         };
         // MBC2 carries 512 x 4-bit built-in RAM regardless of the size field.
-        let ram_bytes = if mbc == MbcType::Mbc2 { 0x200 } else { ram_bytes };
+        let ram_bytes = if mbc == MbcType::Mbc2 {
+            0x200
+        } else {
+            ram_bytes
+        };
         let has_battery = matches!(
             mbc_code,
             0x03 | 0x06 | 0x09 | 0x0D | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E
@@ -307,7 +311,8 @@ impl Cartridge {
                 if self.bank_mode {
                     self.ram_bank = (value & 0x03) as usize % self.num_ram_banks.max(1);
                 } else {
-                    self.rom_bank = ((self.rom_bank & 0x1F) | ((value & 0x03) as usize) << 5) & 0x7F;
+                    self.rom_bank =
+                        ((self.rom_bank & 0x1F) | ((value & 0x03) as usize) << 5) & 0x7F;
                     self.rom_bank %= self.num_rom_banks.max(1);
                 }
             }
@@ -475,7 +480,11 @@ mod tests {
         // Store a byte: only the low nibble is kept, upper nibble reads as 1s.
         cart.write_ram(0xA005, 0xAB);
         assert_eq!(cart.read_ram(0xA005), 0xF0 | 0x0B);
-        assert_eq!(cart.read_ram(0xA605), 0xF0 | 0x0B, "MBC2 RAM mirrors every 0x200");
+        assert_eq!(
+            cart.read_ram(0xA605),
+            0xF0 | 0x0B,
+            "MBC2 RAM mirrors every 0x200"
+        );
 
         // ROM bank selected via an address with bit 8 set.
         cart.write(0x2100, 0x03);
@@ -520,7 +529,10 @@ mod tests {
         let saved = cart.rtc_data();
         // Re-load into a fresh cartridge.
         let mut cart2 = Cartridge::load(&rom).unwrap();
-        assert!(cart2.rtc_data().iter().all(|&b| b == 0), "fresh RTC is zeroed");
+        assert!(
+            cart2.rtc_data().iter().all(|&b| b == 0),
+            "fresh RTC is zeroed"
+        );
         cart2.load_rtc(&saved);
         assert_eq!(cart2.rtc[1], 0x3C, "RTC restored");
 

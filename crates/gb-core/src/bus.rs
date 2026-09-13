@@ -245,7 +245,8 @@ impl Bus {
     fn hdma_start(&mut self, value: u8) {
         self.io[0x55] = value;
         self.hdma_src = ((self.io[0x51] as usize) << 8 | self.io[0x52] as usize) & 0xFFF0;
-        self.hdma_dst = (((self.io[0x53] as usize) << 8 | self.io[0x54] as usize) & 0x1FF0) + 0x8000;
+        self.hdma_dst =
+            (((self.io[0x53] as usize) << 8 | self.io[0x54] as usize) & 0x1FF0) + 0x8000;
         let len = ((value & 0x7F) as usize + 1) * 0x10;
         let lcd_on = self.io[0x40] & 0x80 != 0;
         if value & 0x80 == 0 || !lcd_on {
@@ -426,7 +427,11 @@ mod tests {
         bus.step(4095);
         assert_eq!(bus.io[0x0F] & 0x08, 0, "not done yet before 4096 cycles");
         bus.step(1);
-        assert_ne!(bus.io[0x0F] & 0x08, 0, "serial interrupt raised at 4096 cycles");
+        assert_ne!(
+            bus.io[0x0F] & 0x08,
+            0,
+            "serial interrupt raised at 4096 cycles"
+        );
         assert_eq!(bus.io[0x02] & 0x80, 0, "transfer-complete bit cleared");
         assert_eq!(bus.io[0x01], 0xFF, "SB reflects received byte");
     }

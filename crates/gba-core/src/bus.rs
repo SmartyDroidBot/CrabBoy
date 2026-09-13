@@ -254,7 +254,11 @@ impl Bus {
                 // non-sequential access and 1 for sequential. Without the
                 // prefetch buffer we approximate a steady 1-cycle sequential
                 // cost per 16-bit unit.
-                if width == 32 { 2 } else { 1 }
+                if width == 32 {
+                    2
+                } else {
+                    1
+                }
             }
             Region::Bios | Region::Sram => 1,
             Region::Io => 0,
@@ -273,7 +277,11 @@ impl Bus {
         self.cycles += self.wait_for(region, 8);
         self.last_seq = false;
         (match region {
-            Region::Bios => self.bios.get((addr as usize) & 0x3FFF).copied().unwrap_or(0),
+            Region::Bios => self
+                .bios
+                .get((addr as usize) & 0x3FFF)
+                .copied()
+                .unwrap_or(0),
             Region::Ewram => self.ewram[Self::index_in(addr, EWRAM_SIZE - 1)],
             Region::Iwram => self.iwram[Self::index_in(addr, IWRAM_SIZE - 1)],
             Region::Io => {

@@ -334,8 +334,14 @@ mod tests {
         assert_eq!(emu.cpu.pc, 0x0101);
 
         emu.step(); // NOP (the instruction following EI)
-        assert!(emu.cpu.ime, "IME enabled after the instruction following EI");
-        assert_eq!(emu.cpu.pc, 0x0102, "NOP ran; interrupt not serviced before it");
+        assert!(
+            emu.cpu.ime,
+            "IME enabled after the instruction following EI"
+        );
+        assert_eq!(
+            emu.cpu.pc, 0x0102,
+            "NOP ran; interrupt not serviced before it"
+        );
 
         emu.step(); // now the pending interrupt fires
         assert_eq!(emu.cpu.pc, 0x0040, "interrupt serviced once IME is set");
@@ -405,7 +411,11 @@ mod tests {
         run(37, &mut test);
         run(37, &mut test);
 
-        assert_eq!(control.framebuffer(), test.framebuffer(), "framebuffer differs");
+        assert_eq!(
+            control.framebuffer(),
+            test.framebuffer(),
+            "framebuffer differs"
+        );
         assert_eq!(
             hash(&control.bus.serial_buf),
             hash(&test.bus.serial_buf),
@@ -419,8 +429,7 @@ mod tests {
         assert_eq!(control.bus.oam, test.bus.oam, "OAM differs");
         assert_eq!(control.bus.hram, test.bus.hram, "HRAM differs");
         assert_eq!(
-            control.bus.ppu.frame_buffer,
-            test.bus.ppu.frame_buffer,
+            control.bus.ppu.frame_buffer, test.bus.ppu.frame_buffer,
             "PPU frame buffer differs"
         );
         assert_eq!(control.bus.ppu.ly, test.bus.ppu.ly, "LY differs");
@@ -566,7 +575,11 @@ mod tests {
         emu.bus.write(0xFF70, 0x03);
         emu.bus.write(0xD000, 0x12);
         assert_eq!(emu.bus.read(0xF000), 0x12, "F000 mirrors D000 bank");
-        assert_eq!(emu.bus.read(0xE000), emu.bus.read(0xC000), "E000 mirrors C000");
+        assert_eq!(
+            emu.bus.read(0xE000),
+            emu.bus.read(0xC000),
+            "E000 mirrors C000"
+        );
         // SVBK 0 acts as bank 1.
         emu.bus.write(0xFF70, 0x00);
         assert_eq!(emu.bus.read(0xD000), 0xAA);
@@ -583,11 +596,18 @@ mod tests {
         emu.bus.write(0xFF4D, 0x01); // request double speed
         emu.step(); // STOP executes
         emu.step(); // STOP -> speed switch, no button wait
-        assert!(!emu.cpu.stopped, "STOP with KEY1 toggles speed instead of halting");
+        assert!(
+            !emu.cpu.stopped,
+            "STOP with KEY1 toggles speed instead of halting"
+        );
         assert!(emu.bus.double_speed);
         assert_eq!(emu.frame_cycles(), 140448);
         assert_eq!(emu.audio_rate(), 16384);
-        assert_eq!(emu.bus.read(0xFF4D) & 0x80, 0x80, "bit 7 reflects current speed");
+        assert_eq!(
+            emu.bus.read(0xFF4D) & 0x80,
+            0x80,
+            "bit 7 reflects current speed"
+        );
         // Toggle back.
         emu.bus.cart.rom[0x0100] = 0x10;
         emu.cpu.pc = 0x0100;
@@ -604,7 +624,11 @@ mod tests {
         emu.bus.write(0xFF68, 0x80); // BG index 0, auto-increment
         emu.bus.write(0xFF69, 0x34);
         emu.bus.write(0xFF69, 0x56);
-        assert_eq!(emu.bus.read(0xFF68) & 0x3F, 2, "auto-increment advances index");
+        assert_eq!(
+            emu.bus.read(0xFF68) & 0x3F,
+            2,
+            "auto-increment advances index"
+        );
         assert_eq!(emu.bus.ppu.bg_pal[0], 0x34);
         assert_eq!(emu.bus.ppu.bg_pal[1], 0x56);
         emu.bus.write(0xFF68, 0x01); // index 1, no auto-increment
@@ -667,7 +691,10 @@ mod tests {
         let rgb = emu.frame().rgb.expect("DMG-mode-on-CGB yields colour");
         // Row 1 is the first rendered row (line 0 is the boot HBlank); shade 3
         // -> BG palette 0 entry 3 = boot palette 29 (black).
-        assert_eq!(&rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3], &[0, 0, 0]);
+        assert_eq!(
+            &rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3],
+            &[0, 0, 0]
+        );
     }
 
     #[test]
@@ -686,7 +713,11 @@ mod tests {
         run(1, &mut emu);
         let rgb = emu.frame().rgb.unwrap();
         // Row 1 is the first rendered row; colour 3 -> BG palette 0 entry 3 (red).
-        assert_eq!(&rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3], &[255, 0, 0], "CGB renders palette RAM colour");
+        assert_eq!(
+            &rgb[SCREEN_W as usize * 3..SCREEN_W as usize * 3 + 3],
+            &[255, 0, 0],
+            "CGB renders palette RAM colour"
+        );
     }
 
     #[test]
@@ -701,8 +732,17 @@ mod tests {
         test.load_state(&saved).unwrap();
         assert_eq!(control.bus.vram, test.bus.vram, "VRAM matches");
         assert_eq!(control.bus.wram, test.bus.wram, "WRAM matches");
-        assert_eq!(control.bus.ppu.bg_pal, test.bus.ppu.bg_pal, "BG palettes match");
-        assert_eq!(control.bus.ppu.obj_pal, test.bus.ppu.obj_pal, "OBJ palettes match");
-        assert_eq!(control.bus.double_speed, test.bus.double_speed, "speed matches");
+        assert_eq!(
+            control.bus.ppu.bg_pal, test.bus.ppu.bg_pal,
+            "BG palettes match"
+        );
+        assert_eq!(
+            control.bus.ppu.obj_pal, test.bus.ppu.obj_pal,
+            "OBJ palettes match"
+        );
+        assert_eq!(
+            control.bus.double_speed, test.bus.double_speed,
+            "speed matches"
+        );
     }
 }
