@@ -27,6 +27,10 @@ name = "run_accuracy"
 path = "src/bin/run_accuracy.rs"
 
 [[bin]]
+name = "fetch_test_roms"
+path = "src/bin/fetch_test_roms.rs"
+
+[[bin]]
 name = "gba-diag"
 path = "src/bin/gba_diag.rs"
 
@@ -39,3 +43,6 @@ emu-core = { workspace = true }
 crab-systems = { workspace = true }
 gb-core = { workspace = true }
 gba-core = { workspace = true, features = ["trace"] }
+ureq = "3"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+sha2 = "0.11.0"
