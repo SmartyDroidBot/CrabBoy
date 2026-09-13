@@ -180,6 +180,8 @@ pub struct Bus {
     pub timers: Timers,
     /// Real-time clock (serial I/O).
     pub rtc: Rtc,
+    /// Last value driven onto the bus; unmapped reads return it (open bus).
+    pub(crate) open_bus: u32,
     /// Wait-state cycles added by accesses during the current instruction.
     cycles: u32,
     /// If `true`, the previous access was a sequential ROM access (prefetch
@@ -208,6 +210,7 @@ impl Bus {
             dma: Dma::new(),
             timers: Timers::new(),
             rtc: Rtc::new(),
+            open_bus: 0,
             cycles: 0,
             last_seq: false,
             #[cfg(feature = "trace")]
@@ -271,15 +274,16 @@ impl Bus {
             Region::Vram | Region::Palram => 1,
             Region::Oam => 2,
             Region::Rom => {
-                // Simplified cartridge timing (no prefetch yet): a 16-bit
-                // access costs 1 + (N-1) where N defaults to 3 for the first
-                // non-sequential access and 1 for sequential. Without the
-                // prefetch buffer we approximate a steady 1-cycle sequential
-                // cost per 16-bit unit.
+                // Wait-state 0 timing from WAITCNT (no prefetch buffer yet):
+                // a 16-bit access costs the non-sequential count, a 32-bit
+                // access adds the sequential count for its second halfword.
+                let waitcnt = u16::from_le_bytes([self.io.regs[0x204], self.io.regs[0x205]]);
+                let ws0_n = [4, 3, 2, 8][((waitcnt >> 2) & 3) as usize];
+                let ws0_s = if waitcnt & (1 << 4) != 0 { 1 } else { 2 };
                 if width == 32 {
-                    2
+                    ws0_n + ws0_s
                 } else {
-                    1
+                    ws0_n
                 }
             }
             Region::Bios | Region::Sram => 1,
@@ -294,11 +298,11 @@ impl Bus {
     /// Read a byte across the memory map, adding wait states.
     pub fn read8(&mut self, addr: u32) -> u32 {
         let Some(region) = Region::of(addr) else {
-            return 0;
+            return self.open_bus & 0xFF;
         };
         self.cycles += self.wait_for(region, 8);
         self.last_seq = false;
-        (match region {
+        let v = (match region {
             Region::Bios => self
                 .bios
                 .get((addr as usize) & 0x3FFF)
@@ -307,26 +311,59 @@ impl Bus {
             Region::Ewram => self.ewram[Self::index_in(addr, EWRAM_SIZE - 1)],
             Region::Iwram => self.iwram[Self::index_in(addr, IWRAM_SIZE - 1)],
             Region::Io => {
+                // Byte reads of the special registers (IE/IF/IME/VCOUNT,
+                // timer counters) must see the live values, not the raw
+                // backing bytes.
                 let off = Self::index_in(addr, 0x3FF);
-                self.io.regs[off]
+                let v = self.io_read16(off & !1);
+                (v >> ((off & 1) * 8)) as u8
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)],
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)],
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)],
-            Region::Rom => self.rom[(addr as usize & ROM_MASK) % self.rom.len()],
+            Region::Rom => self.rom_byte(addr as usize & ROM_MASK),
             Region::Sram => self.save.read8(Self::index_in(addr, 0x1FFFF)),
-        }) as u32
+        }) as u32;
+        self.open_bus = v;
+        v
+    }
+
+    #[inline]
+    fn rom_byte(&self, off: usize) -> u8 {
+        if self.rom.is_empty() {
+            0
+        } else {
+            self.rom[off % self.rom.len()]
+        }
+    }
+
+    /// Read an aligned 16-bit I/O register, routing to the device that owns
+    /// it.
+    fn io_read16(&self, off: usize) -> u32 {
+        match off {
+            0xB0..=0xDF => self.dma.read16(off) as u32,
+            0x100 => self.timers.read_cnt_l(0) as u32,
+            0x104 => self.timers.read_cnt_l(1) as u32,
+            0x108 => self.timers.read_cnt_l(2) as u32,
+            0x10C => self.timers.read_cnt_l(3) as u32,
+            // RTC serial data: bit 0 is the RTC output pin during reads.
+            0x120 => (self.io.read16(off) & !1) as u32 | self.rtc.read_sio_bit() as u32,
+            _ => self.io.read16(off) as u32,
+        }
     }
 
     /// Read a 16-bit value across the memory map.
+    /// Read a 16-bit value across the memory map. An odd address returns the
+    /// aligned halfword rotated right by 8 within 32 bits, as the ARM7TDMI
+    /// does for LDRH.
     pub fn read16(&mut self, addr: u32) -> u32 {
         let Some(region) = Region::of(addr) else {
-            return 0;
+            return self.open_bus;
         };
         self.cycles += self.wait_for(region, 16);
         self.last_seq = false;
         let base = (addr as usize) & !1;
-        match region {
+        let hw = match region {
             Region::Bios => {
                 let b = self.bios.get(base & 0x3FFF).copied().unwrap_or(0);
                 let b2 = self.bios.get((base + 1) & 0x3FFF).copied().unwrap_or(0);
@@ -340,17 +377,7 @@ impl Bus {
                 let i = base & (IWRAM_SIZE - 1);
                 (self.iwram[i] as u32) | (self.iwram[i + 1] as u32) << 8
             }
-            Region::Io => {
-                let off = base & 0x3FF;
-                if off == 0x120 {
-                    // RTC serial data: bit 0 is the RTC output pin during reads.
-                    return (self.io.read16(off) & !1) as u32 | self.rtc.read_sio_bit() as u32;
-                }
-                match off {
-                    0xB0..=0xDF => self.dma.read16(off) as u32,
-                    _ => self.io.read16(off) as u32,
-                }
-            }
+            Region::Io => self.io_read16(base & 0x3FF),
             Region::Palram => {
                 let i = base & (PALRAM_SIZE - 1);
                 (self.palram[i] as u32) | (self.palram[i + 1] as u32) << 8
@@ -364,21 +391,36 @@ impl Bus {
                 (self.oam[i] as u32) | (self.oam[i + 1] as u32) << 8
             }
             Region::Rom => {
-                let i = (base & ROM_MASK) % self.rom.len();
-                (self.rom[i] as u32) | (self.rom[i + 1] as u32) << 8
+                let i = base & ROM_MASK;
+                (self.rom_byte(i) as u32) | (self.rom_byte(i + 1) as u32) << 8
             }
             Region::Sram => {
                 let i = base & 0x1FFFF;
                 self.save.read16(i) as u32
             }
-        }
+        };
+        let v = if addr & 1 != 0 {
+            hw.rotate_right(8)
+        } else {
+            hw
+        };
+        self.open_bus = v;
+        v
     }
 
-    /// Read a 32-bit value across the memory map.
+    /// Read a 32-bit value across the memory map. An unaligned address reads
+    /// the aligned word rotated right by 8 bits per byte of misalignment.
     pub fn read32(&mut self, addr: u32) -> u32 {
-        let lo = self.read16(addr);
-        let hi = self.read16(addr.wrapping_add(2));
-        lo | hi << 16
+        if Region::of(addr).is_none() {
+            return self.open_bus;
+        }
+        let aligned = addr & !3;
+        let lo = self.read16(aligned);
+        let hi = self.read16(aligned.wrapping_add(2));
+        let word = lo | hi << 16;
+        let v = word.rotate_right((addr & 3) * 8);
+        self.open_bus = v;
+        v
     }
 
     /// Write a byte across the memory map.
@@ -396,7 +438,13 @@ impl Bus {
             }
             Region::Io => {
                 let off = Self::index_in(addr, 0x3FF);
-                self.io.write8(off, value as u8);
+                if off == 0x301 {
+                    // HALTCNT: bit 7 clear = HALT, set = STOP. Both park the
+                    // CPU until an enabled interrupt arrives.
+                    self.io.halt_requested = true;
+                } else {
+                    self.io.write8(off, value as u8);
+                }
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
             Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)] = value as u8,
@@ -421,7 +469,7 @@ impl Bus {
                 self.ewram[i + 1] = (value >> 8) as u8;
             }
             Region::Iwram => {
-                self.trace_ram_write(base as u32, 2, value as u32);
+                self.trace_ram_write(base as u32, 2, value);
                 let i = base & (IWRAM_SIZE - 1);
                 self.iwram[i] = value as u8;
                 self.iwram[i + 1] = (value >> 8) as u8;
@@ -788,10 +836,64 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_region_reads_zero() {
+    fn unmapped_region_reads_open_bus() {
         let mut b = bus();
         assert_eq!(b.read8(0x0FFF_0000), 0);
         assert_eq!(b.read32(0x0FFF_0000), 0);
+        b.write32(0x0300_0000, 0xDEAD_BEEF);
+        b.read32(0x0300_0000);
+        assert_eq!(b.read32(0x0FFF_0000), 0xDEAD_BEEF);
+        assert_eq!(b.read8(0x0FFF_0000), 0xEF);
+    }
+
+    #[test]
+    fn misaligned_read32_rotates() {
+        let mut b = bus();
+        b.write32(0x0300_0000, 0x1234_5678);
+        assert_eq!(b.read32(0x0300_0000), 0x1234_5678);
+        assert_eq!(b.read32(0x0300_0001), 0x7812_3456);
+        assert_eq!(b.read32(0x0300_0002), 0x5678_1234);
+        assert_eq!(b.read32(0x0300_0003), 0x3456_7812);
+    }
+
+    #[test]
+    fn read16_odd_address_rotates_in_32_bits() {
+        let mut b = bus();
+        b.write16(0x0300_0000, 0x1234);
+        assert_eq!(b.read16(0x0300_0001), 0x3400_0012);
+    }
+
+    #[test]
+    fn waitcnt_changes_rom_wait_states() {
+        let mut b = Bus::new(vec![0; 0x100]);
+        b.begin_step();
+        b.read16(0x0800_0000); // default WS0: 4 non-sequential
+        assert_eq!(b.cycles(), 4);
+        b.write16(0x0400_0204, 3 << 2); // WS0 N = 8
+        b.begin_step();
+        b.read16(0x0800_0000);
+        assert_eq!(b.cycles(), 8);
+    }
+
+    #[test]
+    fn haltcnt_write_requests_halt() {
+        let mut b = bus();
+        assert!(!b.io.halt_requested);
+        b.write8(0x0400_0301, 0);
+        assert!(b.io.halt_requested);
+    }
+
+    #[test]
+    fn io_byte_reads_see_live_registers() {
+        let mut b = bus();
+        b.write16(0x0400_0200, 0x1234); // IE
+        assert_eq!(b.read8(0x0400_0200), 0x34);
+        assert_eq!(b.read8(0x0400_0201), 0x12);
+        b.write16(0x0400_0100, 0x00FE); // TM0 reload
+        b.write16(0x0400_0102, 0x80);
+        b.timers.step(1);
+        assert_eq!(b.read16(0x0400_0100), 0x00FF, "live counter");
+        assert_eq!(b.read8(0x0400_0100), 0xFF);
     }
 
     #[test]
