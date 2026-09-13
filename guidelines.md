@@ -12,7 +12,8 @@ references this file.
 
 ## 1. Approach
 
-- **Platform-agnostic cores.** Everything in `crates/` (`emu-core`, `gb-core`)
+- **Platform-agnostic cores.** Everything in `crates/` (`emu-core`, `gb-core`,
+  `gba-core`)
   must compile with no GUI, OS, or WebAssembly dependencies. Frontends live only
   under `platforms/` (`desktop`, `cli`, `wasm`).
 - **Everything behind a uniform interface.** Each console implements
@@ -28,8 +29,15 @@ references this file.
   and in WASM.
 - **Respect existing conventions.** Match the style of the code you touch.
   Add no comments unless they genuinely clarify non-obvious logic.
-- **Keep docs current.** `plan.md` and `summary.md` are living documents; update
-  them when the layout, design, or verification status changes.
+- **Keep docs current.** `ROADMAP.md`, `CHANGELOG.md` and the notes under
+  `docs/` are living documents; update them when the layout, design, or
+  verification status changes.
+- **Record hardware research as notes.** When debugging a core against real
+  hardware, consult authoritative references (GBATEK for the GBA, Pan Docs for
+  the Game Boy, mGBA/SameBoy as reference emulators) rather than guessing.
+  Capture the verified facts as Markdown notes under `docs/<console>/` so the
+  knowledge is reused, and delete any downloaded artifacts (reference pages,
+  binaries) after extracting what is needed.
 
 ## 2. Adding a feature
 
@@ -74,7 +82,7 @@ references this file.
   - [ ] Red.gb regression passes (markers in section 6).
   - [ ] WASM bindings verified if `platforms/wasm` changed.
   - [ ] Cross-platform determinism re-checked if timing/PPU changed.
-  - [ ] `plan.md`/`summary.md` reflect the change if relevant.
+  - [ ] `ROADMAP.md`/`CHANGELOG.md` reflect the change if relevant.
 
 ## 5. Testing before each commit
 
