@@ -166,19 +166,82 @@ fn frame_hash(gba: &Gba) -> u32 {
     h
 }
 
-/// Write the framebuffer as a binary PPM (P6).
+/// Write the framebuffer as a PNG (`.png` extension) or binary PPM (P6).
 fn dump_frame(gba: &Gba, path: &str) {
     let frame = gba.frame();
     let Some(rgb) = frame.rgb else {
         eprintln!("no RGB framebuffer to dump");
         return;
     };
-    let mut out = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
-    out.extend_from_slice(&rgb);
+    let out = if path.ends_with(".png") {
+        encode_png(frame.width as u32, frame.height as u32, &rgb)
+    } else {
+        let mut out = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
+        out.extend_from_slice(&rgb);
+        out
+    };
     match std::fs::write(path, &out) {
         Ok(()) => println!("dumped frame to {path}"),
         Err(e) => eprintln!("failed to write {path}: {e}"),
     }
+}
+
+/// Minimal PNG encoder (8-bit RGB, no filtering, stored deflate blocks).
+fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    }
+
+    let stride = width as usize * 3;
+    let mut raw = Vec::with_capacity(height as usize * (stride + 1));
+    for row in rgb.chunks(stride) {
+        raw.push(0); // filter type: none
+        raw.extend_from_slice(row);
+    }
+    // zlib stream: header, stored blocks of at most 65535 bytes, Adler-32.
+    let mut zlib = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        zlib.push((i + 1 == blocks.len()) as u8);
+        let len = block.len() as u16;
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &zlib);
+    chunk(&mut out, b"IEND", &[]);
+    out
 }
 
 /// Write the preserved top of IWRAM (0x03007E00-0x03007FFF) to `path`.
