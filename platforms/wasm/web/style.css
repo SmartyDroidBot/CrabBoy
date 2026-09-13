@@ -2,7 +2,9 @@
   color-scheme: dark;
   --bg: #1b1b1f;
   --panel: #26262c;
+  --line: #3a3a42;
   --fg: #e6e6ea;
+  --dim: #9a9aa5;
   --accent: #8ab4f8;
 }
 
@@ -10,82 +12,250 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
-  min-height: 100vh;
   background: var(--bg);
   color: var(--fg);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .app {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  padding: 24px;
+  gap: 12px;
+  padding: 16px;
+  max-width: 1000px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+.top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
 }
 
 .title {
   margin: 0;
-  font-size: 28px;
+  font-size: 24px;
   letter-spacing: 1px;
 }
 
-.load {
-  background: var(--panel);
-  border: 1px solid #3a3a42;
-  border-radius: 8px;
-  padding: 8px 14px;
-  cursor: pointer;
-  font-size: 14px;
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
 }
 
-.load input[type="file"] {
+.btn {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn input[type="file"] {
   display: none;
 }
 
 .screen-wrap {
+  position: relative;
   background: #000;
-  border: 2px solid #3a3a42;
+  border: 2px solid var(--line);
   border-radius: 8px;
-  padding: 8px;
+  padding: 6px;
   line-height: 0;
+  max-width: 100%;
+}
+
+.screen-wrap.dragover {
+  border-color: var(--accent);
 }
 
 #screen {
-  width: 480px;
-  height: 432px;
+  display: block;
+  max-width: 100%;
+  height: auto;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   background: #000;
 }
 
-.controls {
+.drop-hint {
+  position: absolute;
+  inset: 0;
   display: flex;
-  gap: 8px;
-}
-
-.controls button {
-  background: var(--panel);
-  color: var(--fg);
-  border: 1px solid #3a3a42;
-  border-radius: 8px;
-  padding: 8px 20px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px;
+  line-height: 1.4;
+  color: var(--dim);
   font-size: 14px;
-  cursor: pointer;
+  pointer-events: none;
 }
 
-.controls button:hover {
-  border-color: var(--accent);
+.drop-hint.hidden {
+  display: none;
 }
 
-.hint {
+.status {
   margin: 0;
-  color: #9a9aa5;
+  color: var(--dim);
   font-size: 13px;
   text-align: center;
+  min-height: 1.2em;
+}
+
+/* On-screen pad: hidden on devices with a fine pointer (mouse). */
+.pad {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 420px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media (pointer: coarse) {
+  .pad {
+    display: flex;
+  }
+}
+
+.pad-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pad-row.center {
+  justify-content: center;
+  gap: 16px;
+}
+
+.shoulders {
+  display: flex;
+  justify-content: space-between;
+}
+
+.shoulders.hidden {
+  display: none;
+}
+
+.key {
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  width: 56px;
+  height: 56px;
+  touch-action: none;
+}
+
+.key.pressed {
+  background: var(--accent);
+  color: #000;
+}
+
+.key.wide {
+  width: 96px;
+  height: 40px;
+}
+
+.key.pill {
+  width: 84px;
+  height: 36px;
+  border-radius: 18px;
+  font-size: 13px;
+}
+
+.key.round {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+}
+
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 56px);
+  grid-template-rows: repeat(3, 56px);
+  gap: 2px;
+}
+
+.dpad .up {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.dpad .left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.dpad .right {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.dpad .down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.face {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.help {
+  color: var(--dim);
+  font-size: 13px;
+  max-width: 420px;
+  width: 100%;
+}
+
+.help table {
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+
+.help td {
+  padding: 2px 12px 2px 0;
+}
+
+.help td:first-child {
+  color: var(--fg);
+  white-space: nowrap;
 }

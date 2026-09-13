@@ -2,30 +2,76 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
   <title>CrabBoy</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="app">
-    <h1 class="title">CrabBoy</h1>
+  <main class="app" id="app">
+    <header class="top">
+      <h1 class="title">CrabBoy</h1>
+      <div class="toolbar">
+        <label class="btn">
+          <input id="rom-input" type="file" accept=".gb,.gbc,.gba">
+          Load ROM
+        </label>
+        <button id="pause-btn" class="btn" disabled>Pause</button>
+        <button id="reset-btn" class="btn" disabled>Reset</button>
+        <button id="ff-btn" class="btn" disabled>Fast-forward</button>
+        <button id="save-btn" class="btn" disabled>Quick save</button>
+        <button id="load-btn" class="btn" disabled>Quick load</button>
+        <button id="mute-btn" class="btn" disabled>Mute</button>
+      </div>
+    </header>
 
-    <label class="load">
-      <input id="rom-input" type="file" accept=".gb,.gbc,.rom" />
-      Load ROM (.gb)
-    </label>
-
-    <div class="screen-wrap">
-      <canvas id="screen" width="160" height="144"></canvas>
+    <div class="screen-wrap" id="screen-wrap">
+      <canvas id="screen" width="240" height="160"></canvas>
+      <div class="drop-hint" id="drop-hint">
+        Drop a .gb, .gbc or .gba file here or use <b>Load ROM</b>
+      </div>
     </div>
 
-    <div class="controls">
-      <button id="pause-btn">Pause</button>
-    </div>
+    <p class="status" id="status">No ROM loaded</p>
 
-    <p class="hint">
-      Arrows = D-pad &middot; Z = A &middot; X = B &middot; Enter = Start &middot; Backspace = Select
-    </p>
+    <section class="pad" id="pad" aria-label="On-screen controls">
+      <div class="shoulders" id="shoulders">
+        <button class="key wide" data-btn="L">L</button>
+        <button class="key wide" data-btn="R">R</button>
+      </div>
+      <div class="pad-row">
+        <div class="dpad">
+          <button class="key up" data-btn="Up" aria-label="Up">&#9650;</button>
+          <button class="key left" data-btn="Left" aria-label="Left">&#9664;</button>
+          <button class="key right" data-btn="Right" aria-label="Right">&#9654;</button>
+          <button class="key down" data-btn="Down" aria-label="Down">&#9660;</button>
+        </div>
+        <div class="face">
+          <button class="key round" data-btn="B">B</button>
+          <button class="key round" data-btn="A">A</button>
+        </div>
+      </div>
+      <div class="pad-row center">
+        <button class="key pill" data-btn="Select">Select</button>
+        <button class="key pill" data-btn="Start">Start</button>
+      </div>
+    </section>
+
+    <details class="help">
+      <summary>Keyboard</summary>
+      <table>
+        <tr><td>Arrows</td><td>D-pad</td></tr>
+        <tr><td>Z / X</td><td>A / B</td></tr>
+        <tr><td>Enter / Backspace</td><td>Start / Select</td></tr>
+        <tr><td>A / S</td><td>L / R (GBA)</td></tr>
+        <tr><td>P</td><td>Pause</td></tr>
+        <tr><td>R</td><td>Reset</td></tr>
+        <tr><td>F</td><td>Fast-forward (hold)</td></tr>
+        <tr><td>F5 / F9</td><td>Quick save / load</td></tr>
+      </table>
+      <p>Gamepads use the standard mapping. Battery saves and the quick-save
+      slot are kept in this browser, keyed by the ROM contents.</p>
+    </details>
   </main>
 
   <script type="module" src="./index.js"></script>
