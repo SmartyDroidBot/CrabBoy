@@ -533,6 +533,32 @@ mod tests {
     }
 
     #[test]
+    fn save_state_restores_the_exact_machine() {
+        // Run the IRQ machine a few frames, save, run on, then reload and
+        // check that continuing from the state reproduces the same run.
+        let mut gba = vblank_wait_machine(irq::VBLANK);
+        for _ in 0..3 {
+            gba.run_frame();
+        }
+        gba.bus.write16(0x0400_0100, 0x1234); // a timer mid-count
+        gba.bus.write16(0x0400_0102, 0x82);
+        gba.bus.write16(0x0800_00C8, 1); // GPIO readable
+        let saved = gba.save_state();
+        for _ in 0..4 {
+            gba.run_frame();
+        }
+        let ahead = gba.save_state();
+        let mut copy = vblank_wait_machine(irq::VBLANK);
+        copy.load_state(&saved).unwrap();
+        assert!(!copy.cpu.has_bios, "HLE mode survives a reload");
+        assert!(copy.bus.gpio_readable);
+        for _ in 0..4 {
+            copy.run_frame();
+        }
+        assert_eq!(copy.save_state(), ahead);
+    }
+
+    #[test]
     fn save_state_rejects_bad_input() {
         let mut gba = Gba::new(vec![0; 0x4000]);
         assert!(gba.load_state(b"").is_err());

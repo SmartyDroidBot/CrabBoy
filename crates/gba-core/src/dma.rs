@@ -211,6 +211,37 @@ impl Dma {
     pub fn take_irq(&mut self) -> u16 {
         std::mem::take(&mut self.flags)
     }
+
+    pub(crate) fn save(&self, w: &mut crate::state::Writer) {
+        for ch in &self.chans {
+            w.u32(ch.src);
+            w.u32(ch.dst);
+            w.u32(ch.count);
+            w.u16(ch.control);
+            w.u32(ch.cur_src);
+            w.u32(ch.cur_dst);
+            w.u32(ch.cur_count);
+            w.bool(ch.enabled);
+            w.bool(ch.done);
+        }
+        w.u16(self.flags);
+    }
+
+    pub(crate) fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        for ch in &mut self.chans {
+            ch.src = r.u32()?;
+            ch.dst = r.u32()?;
+            ch.count = r.u32()?;
+            ch.control = r.u16()?;
+            ch.cur_src = r.u32()?;
+            ch.cur_dst = r.u32()?;
+            ch.cur_count = r.u32()?;
+            ch.enabled = r.bool()?;
+            ch.done = r.bool()?;
+        }
+        self.flags = r.u16()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

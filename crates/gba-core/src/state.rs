@@ -13,49 +13,54 @@ use crate::save::SaveType;
 /// Magic header identifying a CrabBoy GBA save state.
 pub const STATE_MAGIC: &[u8; 4] = b"CRGA";
 /// Current save-state format version.
-pub const STATE_VERSION: u32 = 4;
+pub const STATE_VERSION: u32 = 5;
 
-struct Writer {
-    buf: Vec<u8>,
+/// Little-endian serialiser shared by the save-state writers.
+pub(crate) struct Writer {
+    pub(crate) buf: Vec<u8>,
 }
 
 impl Writer {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Writer { buf: Vec::new() }
     }
-    fn u8(&mut self, v: u8) {
+    pub(crate) fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }
-    fn u16(&mut self, v: u16) {
+    pub(crate) fn u16(&mut self, v: u16) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
-    fn bytes(&mut self, b: &[u8]) {
+    pub(crate) fn bytes(&mut self, b: &[u8]) {
         self.u32(b.len() as u32);
         self.buf.extend_from_slice(b);
     }
+    pub(crate) fn bool(&mut self, v: bool) {
+        self.u8(v as u8);
+    }
 }
 
-struct Reader<'a> {
+/// Bounds-checked reader matching [`Writer`].
+pub(crate) struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Reader { data, pos: 0 }
     }
-    fn u8(&mut self) -> Result<u8, String> {
+    pub(crate) fn u8(&mut self) -> Result<u8, String> {
         let v = *self.data.get(self.pos).ok_or("unexpected end of state")?;
         self.pos += 1;
         Ok(v)
     }
-    fn u16(&mut self) -> Result<u16, String> {
+    pub(crate) fn u16(&mut self) -> Result<u16, String> {
         let b = self
             .data
             .get(self.pos..self.pos + 2)
@@ -63,7 +68,7 @@ impl<'a> Reader<'a> {
         self.pos += 2;
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
-    fn u32(&mut self) -> Result<u32, String> {
+    pub(crate) fn u32(&mut self) -> Result<u32, String> {
         let b = self
             .data
             .get(self.pos..self.pos + 4)
@@ -71,7 +76,7 @@ impl<'a> Reader<'a> {
         self.pos += 4;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
-    fn u64(&mut self) -> Result<u64, String> {
+    pub(crate) fn u64(&mut self) -> Result<u64, String> {
         let b = self
             .data
             .get(self.pos..self.pos + 8)
@@ -81,7 +86,21 @@ impl<'a> Reader<'a> {
         arr.copy_from_slice(b);
         Ok(u64::from_le_bytes(arr))
     }
-    fn bytes(&mut self) -> Result<Vec<u8>, String> {
+    pub(crate) fn bool(&mut self) -> Result<bool, String> {
+        Ok(self.u8()? != 0)
+    }
+    /// Read exactly `N` raw bytes (no length prefix).
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], String> {
+        let b = self
+            .data
+            .get(self.pos..self.pos + N)
+            .ok_or("unexpected end of state")?;
+        self.pos += N;
+        let mut out = [0u8; N];
+        out.copy_from_slice(b);
+        Ok(out)
+    }
+    pub(crate) fn bytes(&mut self) -> Result<Vec<u8>, String> {
         let len = self.u32()? as usize;
         let b = self
             .data
@@ -222,6 +241,23 @@ pub fn save_state(gba: &Gba) -> Vec<u8> {
     w.u32(gba.line);
     w.u64(gba.frame_count);
 
+    // Peripherals (format version 5).
+    gba.bus.timers.save(&mut w);
+    gba.bus.dma.save(&mut w);
+    gba.apu.save(&mut w);
+    w.buf
+        .extend_from_slice(&gba.bus.save.eeprom.save_state_sm());
+    w.buf.extend_from_slice(&gba.bus.rtc.save_state());
+    w.u8(gba.bus.gpio_data);
+    w.u8(gba.bus.gpio_dir);
+    w.bool(gba.bus.gpio_readable);
+    w.u32(gba.bus.open_bus);
+    w.u32(gba.ppu.bg2_ref_x as u32);
+    w.u32(gba.ppu.bg2_ref_y as u32);
+    w.u32(gba.ppu.bg3_ref_x as u32);
+    w.u32(gba.ppu.bg3_ref_y as u32);
+    w.u32(gba.last_unknown_swi.map_or(u32::MAX, |n| n));
+
     w.buf
 }
 
@@ -278,6 +314,24 @@ pub fn load_state(gba: &mut Gba, data: &[u8]) -> Result<(), String> {
     gba.line_cycles = r.u32()?;
     gba.line = r.u32()?;
     gba.frame_count = r.u64()?;
+
+    gba.bus.timers.load(&mut r)?;
+    gba.bus.dma.load(&mut r)?;
+    gba.apu.load(&mut r)?;
+    gba.bus.save.eeprom.load_state_sm(&r.array()?);
+    gba.bus.rtc.load_state(&r.array()?);
+    gba.bus.gpio_data = r.u8()? & 0x0F;
+    gba.bus.gpio_dir = r.u8()? & 0x0F;
+    gba.bus.gpio_readable = r.bool()?;
+    gba.bus.open_bus = r.u32()?;
+    gba.ppu.bg2_ref_x = r.u32()? as i32;
+    gba.ppu.bg2_ref_y = r.u32()? as i32;
+    gba.ppu.bg3_ref_x = r.u32()? as i32;
+    gba.ppu.bg3_ref_y = r.u32()? as i32;
+    gba.last_unknown_swi = match r.u32()? {
+        u32::MAX => None,
+        n => Some(n),
+    };
 
     if r.pos != data.len() {
         return Err("trailing bytes in state".to_string());

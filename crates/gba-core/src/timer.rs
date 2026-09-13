@@ -155,6 +155,39 @@ impl Timers {
     pub fn enabled(&self, i: usize) -> bool {
         self.t[i].enabled
     }
+
+    pub(crate) fn save(&self, w: &mut crate::state::Writer) {
+        for t in &self.t {
+            w.u16(t.counter);
+            w.u16(t.reload);
+            w.u8(t.prescaler);
+            w.bool(t.cascade);
+            w.bool(t.irq_enable);
+            w.bool(t.enabled);
+            w.u32(t.ticks);
+        }
+        w.u16(self.flags);
+        for &o in &self.overflowed {
+            w.bool(o);
+        }
+    }
+
+    pub(crate) fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        for t in &mut self.t {
+            t.counter = r.u16()?;
+            t.reload = r.u16()?;
+            t.prescaler = r.u8()? & 3;
+            t.cascade = r.bool()?;
+            t.irq_enable = r.bool()?;
+            t.enabled = r.bool()?;
+            t.ticks = r.u32()?;
+        }
+        self.flags = r.u16()?;
+        for o in &mut self.overflowed {
+            *o = r.bool()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

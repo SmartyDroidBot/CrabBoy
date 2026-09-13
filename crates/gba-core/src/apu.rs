@@ -436,6 +436,46 @@ impl Apu {
         self.dsb.push(v);
     }
 
+    pub(crate) fn save(&self, w: &mut crate::state::Writer) {
+        self.sq1.save(w);
+        self.sq2.save(w);
+        self.wave.save(w);
+        self.noise.save(w);
+        self.dsa.save(w);
+        self.dsb.save(w);
+        w.u8(self.dsa_current as u8);
+        w.u8(self.dsb_current as u8);
+        w.u8(self.dsa_timer);
+        w.u8(self.dsb_timer);
+        w.buf.extend_from_slice(&self.wave_ram);
+        w.u32(self.cycles);
+        w.u8(self.fs);
+        w.u16(self.soundcnt_l);
+        w.u16(self.soundcnt_h);
+        w.u16(self.soundcnt_x);
+    }
+
+    pub(crate) fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.sq1.load(r)?;
+        self.sq2.load(r)?;
+        self.wave.load(r)?;
+        self.noise.load(r)?;
+        self.dsa.load(r)?;
+        self.dsb.load(r)?;
+        self.dsa_current = r.u8()? as i8;
+        self.dsb_current = r.u8()? as i8;
+        self.dsa_timer = r.u8()? & 1;
+        self.dsb_timer = r.u8()? & 1;
+        self.wave_ram = r.array()?;
+        self.cycles = r.u32()?;
+        self.fs = r.u8()?;
+        self.soundcnt_l = r.u16()?;
+        self.soundcnt_h = r.u16()?;
+        self.soundcnt_x = r.u16()?;
+        self.output = AudioBuffer::new();
+        Ok(())
+    }
+
     pub fn take_audio(&mut self) -> AudioBuffer {
         std::mem::take(&mut self.output)
     }
@@ -671,5 +711,120 @@ mod tests {
         apu.step(CYCLES_PER_SAMPLE);
         let audio = apu.take_audio();
         assert_eq!(audio.samples, vec![0.0, 0.0]);
+    }
+}
+
+// Save-state serialisation of the channel state.
+impl Envelope {
+    fn save(&self, w: &mut crate::state::Writer) {
+        w.u8(self.volume);
+        w.bool(self.up);
+        w.u8(self.period);
+        w.u8(self.timer);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.volume = r.u8()?;
+        self.up = r.bool()?;
+        self.period = r.u8()?;
+        self.timer = r.u8()?;
+        Ok(())
+    }
+}
+
+impl Square {
+    fn save(&self, w: &mut crate::state::Writer) {
+        w.u8(self.duty);
+        w.u32(self.freq_timer);
+        w.u16(self.freq);
+        w.u8(self.phase);
+        w.u8(self.length);
+        w.bool(self.length_enable);
+        self.env.save(w);
+        w.u8(self.sweep_period);
+        w.bool(self.sweep_negate);
+        w.u8(self.sweep_shift);
+        w.u8(self.sweep_timer);
+        w.bool(self.sweep_enabled);
+        w.bool(self.on);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.duty = r.u8()?;
+        self.freq_timer = r.u32()?;
+        self.freq = r.u16()?;
+        self.phase = r.u8()?;
+        self.length = r.u8()?;
+        self.length_enable = r.bool()?;
+        self.env.load(r)?;
+        self.sweep_period = r.u8()?;
+        self.sweep_negate = r.bool()?;
+        self.sweep_shift = r.u8()?;
+        self.sweep_timer = r.u8()?;
+        self.sweep_enabled = r.bool()?;
+        self.on = r.bool()?;
+        Ok(())
+    }
+}
+
+impl Wave {
+    fn save(&self, w: &mut crate::state::Writer) {
+        w.u32(self.freq_timer);
+        w.u16(self.freq);
+        w.u8(self.phase);
+        w.u16(self.length);
+        w.bool(self.length_enable);
+        w.u8(self.volume_shift);
+        w.bool(self.dac_on);
+        w.bool(self.on);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.freq_timer = r.u32()?;
+        self.freq = r.u16()?;
+        self.phase = r.u8()?;
+        self.length = r.u16()?;
+        self.length_enable = r.bool()?;
+        self.volume_shift = r.u8()?;
+        self.dac_on = r.bool()?;
+        self.on = r.bool()?;
+        Ok(())
+    }
+}
+
+impl Noise {
+    fn save(&self, w: &mut crate::state::Writer) {
+        w.u32(self.freq_timer);
+        w.u8(self.divisor);
+        w.u8(self.shift);
+        w.bool(self.width);
+        w.u16(self.lfsr);
+        w.u8(self.length);
+        w.bool(self.length_enable);
+        self.env.save(w);
+        w.bool(self.on);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.freq_timer = r.u32()?;
+        self.divisor = r.u8()?;
+        self.shift = r.u8()?;
+        self.width = r.bool()?;
+        self.lfsr = r.u16()?;
+        self.length = r.u8()?;
+        self.length_enable = r.bool()?;
+        self.env.load(r)?;
+        self.on = r.bool()?;
+        Ok(())
+    }
+}
+
+impl DirectSound {
+    fn save(&self, w: &mut crate::state::Writer) {
+        w.buf.extend_from_slice(&self.fifo);
+        w.u8(self.fifo_count as u8);
+        w.u8(self.fifo_read as u8);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        self.fifo = r.array()?;
+        self.fifo_count = (r.u8()? as usize).min(32);
+        self.fifo_read = (r.u8()? as usize) % 32;
+        Ok(())
     }
 }
