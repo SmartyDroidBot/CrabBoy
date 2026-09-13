@@ -5,98 +5,153 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   native:
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: crab-linux
+            target: x86_64-unknown-linux-gnu
+            name: linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            name: linux-arm64
           - os: windows-latest
-            artifact: crab-windows
+            target: x86_64-pc-windows-msvc
+            name: windows-amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            name: windows-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the workspace version
+        shell: bash
+        run: |
+          ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          test "v$ver" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != Cargo.toml version $ver"; exit 1; }
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
+      - name: Install rustup (Windows on Arm image ships without it)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe -OutFile rustup-init.exe
+            .\rustup-init.exe -y --default-toolchain none --profile minimal
+            Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build release binaries
-        run: cargo build --release -p crab-desktop -p crab-cli
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p crab-desktop -p crab-cli --bin CrabBoy --bin crab
 
-      - name: Stage artifacts (Windows)
-        if: runner.os == 'Windows'
+      - name: Package
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/CrabBoy.exe dist/
-          cp target/release/test_runner.exe target/release/probe.exe dist/
-          cp README.md LICENSE dist/
+          ver="${GITHUB_REF_NAME#v}"
+          name="crabboy-${ver}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/CrabBoy.exe target/${{ matrix.target }}/release/crab.exe "dist/$name/"
+          else
+            cp target/${{ matrix.target }}/release/CrabBoy target/${{ matrix.target }}/release/crab "dist/$name/"
+          fi
+          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          mkdir -p uploads
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd dist && 7z a -tzip "../uploads/$name.zip" "$name" > /dev/null)
+          else
+            tar -C dist -czf "uploads/$name.tar.gz" "$name"
+          fi
+          ls -la uploads
 
-      - name: Stage artifacts (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp target/release/CrabBoy dist/
-          cp target/release/test_runner target/release/probe dist/
-          cp README.md LICENSE dist/
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/
+          name: ${{ matrix.name }}
+          path: uploads/*
 
-  wasm:
+  web:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add wasm target
-        run: rustup target add wasm32-unknown-unknown
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build wasm package
-        run: |
-          cargo install wasm-pack --locked
-          wasm-pack build platforms/wasm --target web --out-dir ../../dist/web
-
-      - name: Upload wasm artifact
-        uses: actions/upload-artifact@v4
+      - uses: taiki-e/install-action@v2
         with:
-          name: crab-wasm
-          path: dist/web/
+          tool: wasm-bindgen@0.2.127
+
+      - name: Build wasm module and bindings
+        run: |
+          cargo build -p crab-wasm --release --locked --target wasm32-unknown-unknown
+          wasm-bindgen --target web --out-dir platforms/wasm/web/pkg target/wasm32-unknown-unknown/release/crab_wasm.wasm
+
+      - name: Package
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          name="crabboy-${ver}-web"
+          mkdir -p "dist/$name" uploads
+          cp -r platforms/wasm/web/. "dist/$name/"
+          cp LICENSE "dist/$name/"
+          (cd dist && zip -qr "../uploads/$name.zip" "$name")
+          ls -la uploads
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: uploads/*
 
   release:
-    needs: [native, wasm]
+    needs: [native, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: uploads
+          merge-multiple: true
 
-      - name: Bundle archives
+      - name: Checksums and release notes
         run: |
-          mkdir -p uploads
-          tar -C dist/crab-linux -czf uploads/crab-linux.tar.gz .
-          (cd dist/crab-windows && zip -r ../../uploads/crab-windows.zip .)
-          (cd dist/crab-wasm && zip -r ../../uploads/crab-wasm.zip .)
+          ver="${GITHUB_REF_NAME#v}"
+          (cd uploads && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          awk -v ver="$ver" '
+            index($0, "## [" ver "]") == 1 { on = 1; next }
+            /^## \[/ { on = 0 }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "No CHANGELOG.md section for $ver" > notes.md; fi
+          cat notes.md
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
+          name: CrabBoy ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: uploads/*
-          generate_release_notes: true
