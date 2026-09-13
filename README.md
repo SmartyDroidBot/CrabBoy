@@ -61,4 +61,4 @@ and the EU-style commit message format.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
