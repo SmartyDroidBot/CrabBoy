@@ -363,9 +363,21 @@ fn main() {
     gba.bus.io.log_writes = o.trace_io;
     gba.bus.log_ram_writes = o.trace_ram;
 
-    // Ring buffer to catch the last N instructions before a wild PC.
+    // Ring buffer to catch the last N instructions before a wild PC. Entries
+    // are raw register snapshots; formatting only happens when one is printed.
     const RING_SIZE: usize = 128;
-    let mut ring: Vec<String> = Vec::with_capacity(RING_SIZE);
+    struct RingEntry {
+        step: u64,
+        pc: u32,
+        op: u32,
+        thumb: bool,
+        sp: u32,
+        i_flag: u32,
+        mode: u32,
+        r: [u32; 4],
+        lr: u32,
+    }
+    let mut ring: Vec<RingEntry> = Vec::with_capacity(RING_SIZE);
     let mut ring_idx: usize = 0;
     let mut wild_detected = false;
 
@@ -405,22 +417,21 @@ fn main() {
 
         if !wild_detected {
             let r = gba.regs();
-            let sp = gba.sp();
-            let op_str = if thumb {
-                format!("0x{:04X}", gba.peek16(pc))
-            } else {
-                format!("0x{:08X}", gba.peek32(pc))
+            let entry = RingEntry {
+                step: total_steps,
+                pc,
+                op: if thumb {
+                    gba.peek16(pc)
+                } else {
+                    gba.peek32(pc)
+                },
+                thumb,
+                sp: gba.sp(),
+                i_flag,
+                mode,
+                r: [r[0], r[1], r[2], r[3]],
+                lr: r[14],
             };
-            let entry = format!(
-                "step {total_steps:>8}  pc=0x{pc:08X}  op={op_str}  T={t} sp=0x{sp:08X}  i={i_flag} \
-                 mode=0x{mode:02X}  r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} lr=0x{:08X}",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                r[14],
-                t = thumb as u8
-            );
             if ring.len() < RING_SIZE {
                 ring.push(entry);
             } else {
@@ -439,8 +450,27 @@ fn main() {
                 println!("\n*** WILD PC DETECTED: 0x{new_pc:08X} at step {total_steps} ***");
                 println!("--- last {} instructions ---", ring.len());
                 for i in 0..ring.len() {
-                    let idx = (ring_idx + i) % ring.len();
-                    println!("  {}", ring[idx]);
+                    let e = &ring[(ring_idx + i) % ring.len()];
+                    let op = if e.thumb {
+                        format!("0x{:04X}", e.op)
+                    } else {
+                        format!("0x{:08X}", e.op)
+                    };
+                    println!(
+                        "  step {:>8}  pc=0x{:08X}  op={op}  T={} sp=0x{:08X}  i={} mode=0x{:02X}  \
+                         r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} lr=0x{:08X}",
+                        e.step,
+                        e.pc,
+                        e.thumb as u8,
+                        e.sp,
+                        e.i_flag,
+                        e.mode,
+                        e.r[0],
+                        e.r[1],
+                        e.r[2],
+                        e.r[3],
+                        e.lr
+                    );
                 }
                 println!("--- end ring ---\n");
             }
