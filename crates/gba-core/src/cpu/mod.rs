@@ -675,6 +675,27 @@ mod tests {
     }
 
     #[test]
+    fn arm_multiply_cycles_scale_with_operand() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        cpu.regs[1] = 7;
+        cpu.regs[2] = 0x12;
+        arm(&mut bus, 0, 0xE0000291); // mul r0, r1, r2
+        cpu.pc = 0;
+        let short = cpu.execute(&mut bus);
+        cpu.regs[2] = 0x1234_5678;
+        cpu.pc = 0;
+        let long = cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[0], 7u32.wrapping_mul(0x1234_5678));
+        assert_eq!(
+            long - short,
+            3,
+            "8-bit operand takes 1 cycle, 32-bit takes 4"
+        );
+    }
+
+    #[test]
     fn usr_and_svc_stacks_are_independent() {
         let mut cpu = Cpu::new();
         cpu.set_cpsr(mode::SVC);

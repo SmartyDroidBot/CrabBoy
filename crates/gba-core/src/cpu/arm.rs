@@ -386,6 +386,22 @@ fn data_processing(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     cpu.add_cycles(1);
 }
 
+/// Internal cycles of the ARM7TDMI multiplier: it consumes 8 bits of the
+/// Rs operand per cycle and stops early once the remaining bits are all
+/// zeros or all ones.
+#[inline]
+fn mul_cycles(rs: u32) -> u32 {
+    if rs <= 0xFF || rs >= 0xFFFF_FF00 {
+        1
+    } else if rs <= 0xFFFF || rs >= 0xFFFF_0000 {
+        2
+    } else if rs <= 0x00FF_FFFF || rs >= 0xFF00_0000 {
+        3
+    } else {
+        4
+    }
+}
+
 fn multiply(cpu: &mut Cpu, inst: u32) {
     let s = inst & (1 << 20) != 0;
     let rd = (inst >> 16) & 0xF;
@@ -393,7 +409,8 @@ fn multiply(cpu: &mut Cpu, inst: u32) {
     let rs = (inst >> 8) & 0xF;
     let rm = inst & 0xF;
     let accumulate = inst & (1 << 21) != 0;
-    let mut result = cpu.reg(rm).wrapping_mul(cpu.reg(rs));
+    let op_rs = cpu.reg(rs);
+    let mut result = cpu.reg(rm).wrapping_mul(op_rs);
     if accumulate {
         result = result.wrapping_add(cpu.reg(rn));
     }
@@ -410,7 +427,7 @@ fn multiply(cpu: &mut Cpu, inst: u32) {
     } else {
         cpu.set_reg(rd, result);
     }
-    cpu.add_cycles(1);
+    cpu.add_cycles(mul_cycles(op_rs) + accumulate as u32);
 }
 
 fn long_multiply(cpu: &mut Cpu, inst: u32) {
@@ -451,7 +468,8 @@ fn long_multiply(cpu: &mut Cpu, inst: u32) {
     }
     cpu.set_reg(rdlo, lo as u32);
     cpu.set_reg(rdhi, hi as u32);
-    cpu.add_cycles(1);
+    let accumulate = inst & (1 << 21) != 0;
+    cpu.add_cycles(mul_cycles(op2) + 1 + accumulate as u32);
 }
 
 fn swap(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
@@ -533,7 +551,8 @@ fn halfword_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             cpu.set_reg(rn, v);
         }
     }
-    cpu.add_cycles(1);
+    // A load adds one internal cycle on top of its memory access.
+    cpu.add_cycles(if l { 2 } else { 1 });
 }
 
 fn single_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
@@ -593,7 +612,8 @@ fn single_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             cpu.set_reg(rn, v);
         }
     }
-    cpu.add_cycles(1);
+    // A load adds one internal cycle on top of its memory access.
+    cpu.add_cycles(if l { 2 } else { 1 });
 }
 
 fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
@@ -683,7 +703,8 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     if w && rn != 15 && !(l && list & (1 << rn) != 0) {
         cpu.set_reg(rn, wb_val);
     }
-    cpu.add_cycles(1);
+    // One cycle per transferred word, plus an internal cycle for loads.
+    cpu.add_cycles(if l { count + 1 } else { count.max(1) });
 }
 
 fn branch(cpu: &mut Cpu, inst: u32) {
