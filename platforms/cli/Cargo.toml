@@ -5,6 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "crab"
+path = "src/bin/crab.rs"
+
 [[bin]]
 name = "test_runner"
 path = "src/bin/test_runner.rs"
@@ -31,5 +38,6 @@ path = "src/bin/gba_disasm.rs"
 
 [dependencies]
 emu-core = { workspace = true }
+crab-systems = { workspace = true }
 gb-core = { workspace = true }
 gba-core = { workspace = true, features = ["trace"] }

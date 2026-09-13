@@ -982,6 +982,7 @@ dependencies = [
 name = "crab-cli"
 version = "0.1.0"
 dependencies = [
+ "crab-systems",
  "emu-core",
  "gb-core",
  "gba-core",
