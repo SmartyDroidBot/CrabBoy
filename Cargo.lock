@@ -1000,6 +1000,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-systems"
+version = "0.1.0"
+dependencies = [
+ "emu-core",
+ "gb-core",
+ "gba-core",
+]
+
+[[package]]
 name = "crab-wasm"
 version = "0.1.0"
 dependencies = [

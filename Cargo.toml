@@ -4,6 +4,7 @@ members = [
     "crates/emu-core",
     "crates/gb-core",
     "crates/gba-core",
+    "crates/crab-systems",
     "platforms/desktop",
     "platforms/cli",
     "platforms/wasm",
@@ -18,6 +19,7 @@ license = "AGPL-3.0-or-later"
 emu-core = { path = "crates/emu-core" }
 gb-core = { path = "crates/gb-core" }
 gba-core = { path = "crates/gba-core" }
+crab-systems = { path = "crates/crab-systems" }
 
 [profile.dev]
 opt-level = 1

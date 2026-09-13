@@ -1,0 +1,11 @@
+[package]
+name = "crab-systems"
+description = "Console detection and construction for every CrabBoy core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+emu-core = { workspace = true }
+gb-core = { workspace = true }
+gba-core = { workspace = true }
