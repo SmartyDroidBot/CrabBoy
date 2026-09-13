@@ -14,6 +14,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/SmartyDroidBot/CrabBoy"
+rust-version = "1.88"
 
 [workspace.dependencies]
 emu-core = { path = "crates/emu-core" }
@@ -24,5 +26,12 @@ crab-systems = { path = "crates/crab-systems" }
 [profile.dev]
 opt-level = 1
 
+# Shipped binaries: whole-program optimisation, one codegen unit and no
+# symbols. panic = "abort" keeps the wasm module small; the cores never
+# rely on unwinding.
 [profile.release]
 opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
