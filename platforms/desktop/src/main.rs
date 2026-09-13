@@ -370,7 +370,7 @@ impl CrabBoyApp {
             }
             ctx.request_repaint();
         } else {
-            let period = 1.0 / 60.0;
+            let period = 1.0 / self.system.as_ref().map_or(60.0, |s| s.frame_rate());
             self.accum += dt;
             while self.accum >= period {
                 self.accum -= period;
