@@ -8,7 +8,6 @@
 
 use crate::apu::Apu;
 use crate::bus::Bus;
-use crate::cpu::flag;
 use crate::cpu::mode;
 use crate::cpu::Cpu;
 use crate::io::irq;
@@ -40,25 +39,25 @@ pub struct Gba {
 impl Gba {
     pub fn new(rom: Vec<u8>) -> Gba {
         let mut cpu = Cpu::new();
-        // Power-on state. The real GBA starts in SVC mode at the BIOS reset
-        // vector, which copies the cart header to IWRAM and branches to the
-        // cartridge entry point. Without a BIOS dump we skip straight to the
-        // cartridge at 0x08000000 (the ROM's first word is its entry branch)
-        // and give it the stack pointer the BIOS would have set up. The real
-        // BIOS enables IRQs before handing control to the game, so clear the
-        // CPSR I-flag (the hardware reset sets it).
-        cpu.set_cpsr(cpu.cpsr() & !flag::I);
+        // Skip-BIOS boot: leave the machine as the BIOS does when it hands
+        // control to the cartridge (GBATEK; mGBA `GBASkipBIOS`): the three
+        // stacks set up, SYS mode with IRQs enabled, POSTFLG marking a warm
+        // boot and the LCD partway through its first frame (VCOUNT = 0x7E).
+        cpu.set_mode_sp(mode::SVC, 0x0300_7FE0);
+        cpu.set_mode_sp(mode::IRQ, 0x0300_7FA0);
+        cpu.set_mode_sp(mode::USR, 0x0300_7F00);
+        cpu.set_cpsr(0x1F);
         cpu.set_pc(0x0800_0000);
-        cpu.set_reg(13, 0x0300_7F00); // SP_svc (current mode is SVC)
-        cpu.set_mode_sp(mode::IRQ, 0x0300_7FA0); // SP_irq (BIOS default)
-        let bus = Bus::new(rom);
+        let mut bus = Bus::new(rom);
+        bus.io.regs[0x300] = 1;
+        bus.io.set_vcount(0x7E);
         Gba {
             cpu,
             bus,
             ppu: Ppu::new(),
             apu: Apu::new(),
             line_cycles: 0,
-            line: 0,
+            line: 0x7E,
             frame_count: 0,
             last_unknown_swi: None,
         }
@@ -77,14 +76,15 @@ impl Gba {
     /// when false it sets POSTFLG for a warm boot that skips the intro.
     pub fn with_bios(rom: Vec<u8>, bios: Vec<u8>, cold: bool) -> Gba {
         let mut gba = Gba::new(rom);
+        // The real GBA powers on in SVC mode with IRQs masked at the reset
+        // vector; the BIOS sets up everything else itself.
+        gba.cpu = Cpu::new();
         gba.cpu.set_has_bios(true);
         gba.bus.set_bios(bios);
-        if !cold {
-            // POSTFLG=1 requests a warm boot, skipping the ~2s "Nintendo" logo.
-            gba.bus.io.regs[0x300] = 1;
-        }
-        // The real GBA powers on in SVC mode at the BIOS reset vector.
-        gba.cpu.set_pc(0x0000_0000);
+        // POSTFLG=1 requests a warm boot, skipping the ~2s "Nintendo" logo.
+        gba.bus.io.regs[0x300] = u8::from(!cold);
+        gba.bus.io.set_vcount(0);
+        gba.line = 0;
         gba
     }
 
@@ -539,6 +539,21 @@ mod tests {
         gba.step();
         // The branch at 0x08000000 loops back to itself (B .).
         assert_eq!(gba.cpu.pc(), 0x0800_0000);
+    }
+
+    #[test]
+    fn skip_bios_boot_state() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        assert_eq!(gba.cpu.cpsr() & 0x1F, 0x1F, "SYS mode");
+        assert_eq!(gba.cpu.cpsr() & (1 << 7), 0, "IRQs enabled");
+        assert_eq!(gba.cpu.sp_raw(), 0x0300_7F00);
+        gba.cpu.set_cpsr(mode::IRQ);
+        assert_eq!(gba.cpu.sp_raw(), 0x0300_7FA0);
+        gba.cpu.set_cpsr(mode::SVC);
+        assert_eq!(gba.cpu.sp_raw(), 0x0300_7FE0);
+        assert_eq!(gba.bus.io.regs[0x300], 1, "POSTFLG");
+        assert_eq!(gba.bus.io.vcount(), 0x7E);
+        assert!(!gba.cpu.has_bios);
     }
 
     #[test]
