@@ -21,10 +21,6 @@ name = "probe"
 path = "src/bin/probe.rs"
 
 [[bin]]
-name = "wav"
-path = "src/bin/wav.rs"
-
-[[bin]]
 name = "run_accuracy"
 path = "src/bin/run_accuracy.rs"
 
