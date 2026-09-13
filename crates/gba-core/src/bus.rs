@@ -57,27 +57,25 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 /// Large regions (VRAM, EWRAM, save cartridges) must not be embedded inline in
 /// the emulator structs: in debug builds Rust materialises a returned value as
 /// a temporary on the caller's stack, and a ~670 KB `Gba` overflows the 1 MB
-/// default thread stack the moment a ROM is constructed. `Box::new_zeroed`
-/// allocates the `[T; N]` directly on the heap, so the region never touches the
-/// stack while keeping the exact size baked into the type via const generics.
+/// default thread stack the moment a ROM is constructed. Building the region
+/// as a `Vec` and converting the boxed slice allocates the `[T; N]` directly
+/// on the heap, so it never touches the stack while keeping the exact size
+/// baked into the type via const generics.
 pub struct Mem<T, const N: usize>(Box<[T; N]>);
 
-impl<T, const N: usize> Mem<T, N> {
+impl<T: Copy + Default, const N: usize> Mem<T, N> {
     /// Allocate a zero-initialised region directly on the heap.
     pub fn zeroed() -> Self {
-        // SAFETY: zero bytes are a valid value for any `T` we instantiate this
-        // with (u8/u16), and `assume_init` hands us a fully-owned `[T; N]`.
-        Mem(unsafe { Box::<[T; N]>::new_zeroed().assume_init() })
+        Self::filled(T::default())
     }
 
-    /// Allocate a region filled with a repeated byte.
-    pub fn filled(v: T) -> Self
-    where
-        T: Copy,
-    {
-        let mut m = Self::zeroed();
-        m.0.iter_mut().for_each(|b| *b = v);
-        m
+    /// Allocate a region filled with a repeated value.
+    pub fn filled(v: T) -> Self {
+        let boxed: Box<[T]> = vec![v; N].into_boxed_slice();
+        let Ok(array) = boxed.try_into() else {
+            unreachable!("boxed slice has exactly N elements")
+        };
+        Mem(array)
     }
 }
 
