@@ -146,50 +146,43 @@ impl Gba {
         }
     }
 
+    /// Timer `timer_idx` overflowed: a sound FIFO clocked by it that has run
+    /// down to 16 bytes is refilled by its DMA channel (DMA1 for FIFO A at
+    /// 0x040000A0, DMA2 for FIFO B at 0x040000A4) with four words.
     fn check_dma_fifo(&mut self, timer_idx: usize) {
         let cnt_h = self.bus.io.read16(0x82);
         let dsa_timer = ((cnt_h >> 10) & 1) as usize;
         let dsb_timer = ((cnt_h >> 14) & 1) as usize;
-
-        // DMA1 feeds FIFO A if dsa_timer matches and FIFO A has <= 16 bytes
         if dsa_timer == timer_idx && self.apu.fifo_a_count() <= 16 {
-            let mut ch = self.bus.dma.chans[1];
-            if ch.enabled && ch.timing() == Timing::Special {
-                let s = ch.cur_src;
-                for _ in 0..4 {
-                    let w = self.bus.read32(s);
-                    self.apu.push_fifo_a(w as u8);
-                    self.apu.push_fifo_a((w >> 8) as u8);
-                    self.apu.push_fifo_a((w >> 16) as u8);
-                    self.apu.push_fifo_a((w >> 24) as u8);
-                }
-                ch.cur_src = crate::dma::adjust(s, 16, ch.src_adjust());
-                if ch.irq_enable() {
-                    self.bus.dma.flags |= 1 << (8 + 1);
-                }
-                self.bus.dma.chans[1] = ch;
-            }
+            self.refill_fifo(1, 0x0400_00A0);
         }
-
-        // DMA2 feeds FIFO B if dsb_timer matches and FIFO B has <= 16 bytes
         if dsb_timer == timer_idx && self.apu.fifo_b_count() <= 16 {
-            let mut ch = self.bus.dma.chans[2];
-            if ch.enabled && ch.timing() == Timing::Special {
-                let s = ch.cur_src;
-                for _ in 0..4 {
-                    let w = self.bus.read32(s);
-                    self.apu.push_fifo_b(w as u8);
-                    self.apu.push_fifo_b((w >> 8) as u8);
-                    self.apu.push_fifo_b((w >> 16) as u8);
-                    self.apu.push_fifo_b((w >> 24) as u8);
-                }
-                ch.cur_src = crate::dma::adjust(s, 16, ch.src_adjust());
-                if ch.irq_enable() {
-                    self.bus.dma.flags |= 1 << (8 + 2);
-                }
-                self.bus.dma.chans[2] = ch;
-            }
+            self.refill_fifo(2, 0x0400_00A4);
         }
+    }
+
+    fn refill_fifo(&mut self, channel: usize, fifo_addr: u32) {
+        let mut ch = self.bus.dma.chans[channel];
+        if !ch.enabled || ch.timing() != Timing::Special || ch.cur_dst != fifo_addr {
+            return;
+        }
+        let mut src = ch.cur_src & !3;
+        for _ in 0..4 {
+            let w = self.bus.read32(src);
+            for byte in w.to_le_bytes() {
+                if channel == 1 {
+                    self.apu.push_fifo_a(byte);
+                } else {
+                    self.apu.push_fifo_b(byte);
+                }
+            }
+            src = crate::dma::adjust(src, 4, ch.src_adjust());
+        }
+        ch.cur_src = src;
+        if ch.irq_enable() {
+            self.bus.dma.flags |= 1 << (8 + channel);
+        }
+        self.bus.dma.chans[channel] = ch;
     }
 
     /// Advance one scanline: update VCOUNT/DISPSTAT, render, raise IRQs and
@@ -658,6 +651,37 @@ mod tests {
         assert_eq!(gba.cpu.bios_wait_mask(), Some(irq::VBLANK));
         assert_eq!(gba.cpu.pc(), 0x0800_0004, "never reached the handler");
         assert!(gba.cpu.halted);
+    }
+
+    #[test]
+    fn fifo_dma_refills_only_a_channel_aimed_at_the_fifo() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        for i in 0..8u32 {
+            gba.bus.write32(0x0300_0000 + i * 4, 0x0101_0101 * (i + 1));
+        }
+        // SOUNDCNT_H: FIFO A on timer 0, FIFO B on timer 1.
+        gba.bus.write16(0x0400_0082, 1 << 14);
+        let special = 0x8000 | (3 << 12) | (1 << 10) | (2 << 5); // 32-bit, dst fixed
+                                                                 // DMA1 -> FIFO A, DMA2 -> somewhere else.
+        gba.bus.write32(0x0400_00BC, 0x0300_0000);
+        gba.bus.write32(0x0400_00C0, 0x0400_00A0);
+        gba.bus.write16(0x0400_00C4, 4);
+        gba.bus.write16(0x0400_00C6, special);
+        gba.bus.write32(0x0400_00C8, 0x0300_0000);
+        gba.bus.write32(0x0400_00CC, 0x0600_0000);
+        gba.bus.write16(0x0400_00D0, 4);
+        gba.bus.write16(0x0400_00D2, special);
+        gba.check_dma_fifo(0);
+        assert_eq!(gba.apu.fifo_a_count(), 16, "four words queued");
+        assert_eq!(gba.bus.dma.chans[1].cur_src, 0x0300_0010);
+        gba.check_dma_fifo(1);
+        assert_eq!(gba.apu.fifo_b_count(), 0, "DMA2 does not target FIFO B");
+        assert_eq!(gba.bus.dma.chans[2].cur_src, 0x0300_0000);
+        // The FIFO is only topped up once it has drained to 16 bytes.
+        gba.check_dma_fifo(0);
+        assert_eq!(gba.apu.fifo_a_count(), 32);
+        gba.check_dma_fifo(0);
+        assert_eq!(gba.apu.fifo_a_count(), 32);
     }
 
     #[test]
