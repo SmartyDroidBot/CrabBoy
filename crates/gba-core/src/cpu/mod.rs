@@ -85,8 +85,7 @@ pub struct Cpu {
     base_r8_12: [u32; 5],
     /// Banked r8-r12 for FIQ mode.
     fiq_r8_12: [u32; 5],
-    /// Banked SP/LR, indexed by mode: [FIQ, SVC, ABT, UND, IRQ]. USR shares the
-    /// SVC slot.
+    /// Banked SP/LR, indexed by mode: [FIQ, SVC, ABT, UND, IRQ, USR/SYS].
     sp: [u32; 6],
     lr: [u32; 6],
     /// SPSR per exception mode, same indexing as `sp`.
@@ -672,6 +671,25 @@ mod tests {
         assert_eq!(cpu.regs[14], 4);
         // SPSR_SVC saved USR mode + no T.
         assert_eq!(cpu.spsr[1] & 0x1F, mode::USR);
+    }
+
+    #[test]
+    fn ldrsh_at_odd_address_sign_extends_the_byte() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::USR);
+        let mut bus = TestBus::new();
+        bus.write16(0x200, 0x7F80); // bytes: 0x80 @0x200, 0x7F @0x201
+        cpu.regs[0] = 0x201;
+        arm(&mut bus, 0, 0xE1D010F0); // ldrsh r1, [r0]
+        cpu.pc = 0;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[1], 0x0000_007F);
+        cpu.set_cpsr(mode::USR | flag::T);
+        cpu.regs[2] = 0;
+        thumb(&mut bus, 0x10, 0x5E83); // ldrsh r3, [r0, r2]
+        cpu.pc = 0x10;
+        cpu.execute(&mut bus);
+        assert_eq!(cpu.regs[3], 0x0000_007F);
     }
 
     #[test]

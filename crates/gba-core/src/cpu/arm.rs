@@ -533,6 +533,8 @@ fn halfword_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         let value = match sh {
             0b01 => bus.read16(addr),
             0b10 => (bus.read8(addr) as i8 as i32) as u32,
+            // LDRSH at an odd address sign-extends the addressed byte.
+            0b11 if addr & 1 != 0 => (bus.read8(addr) as i8 as i32) as u32,
             0b11 => (bus.read16(addr) as i16 as i32) as u32,
             _ => 0,
         };

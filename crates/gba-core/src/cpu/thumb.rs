@@ -270,6 +270,8 @@ fn ldrh_signed_reg(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         0 => bus.write16(addr, rn(cpu, rd)),
         1 => cpu.set_reg(rd, (bus.read8(addr) as i8) as u32),
         2 => cpu.set_reg(rd, bus.read16(addr)),
+        // LDSH at an odd address sign-extends the addressed byte.
+        _ if addr & 1 != 0 => cpu.set_reg(rd, (bus.read8(addr) as i8) as u32),
         _ => cpu.set_reg(rd, (bus.read16(addr) as i16) as u32),
     }
     cpu.add_cycles(1);
