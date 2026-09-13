@@ -5,8 +5,12 @@ use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-const GB_W: usize = 160;
-const GB_H: usize = 144;
+// Default window size at 3x the GBA display (240x160); GB games (160x144)
+// scale to fit inside it.
+const WIN_W: f32 = 240.0 * 3.0;
+const WIN_H: f32 = 160.0 * 3.0;
+const MIN_W: f32 = 240.0 * 2.0;
+const MIN_H: f32 = 144.0 * 2.0;
 
 fn sav_path_for(rom: &str) -> Option<String> {
     let p = std::path::Path::new(rom);
@@ -679,8 +683,8 @@ fn main() -> eframe::Result<()> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([GB_W as f32 * 4.0, GB_H as f32 * 4.0 + 60.0])
-            .with_min_inner_size([GB_W as f32 * 2.0, GB_H as f32 * 2.0 + 40.0])
+            .with_inner_size([WIN_W, WIN_H + 60.0])
+            .with_min_inner_size([MIN_W, MIN_H + 40.0])
             .with_title("CrabBoy Emulator"),
         ..Default::default()
     };
