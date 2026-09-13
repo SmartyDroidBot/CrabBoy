@@ -122,7 +122,7 @@ impl Ppu {
     }
     #[inline]
     fn vram_index(addr: usize) -> usize {
-        addr & (crate::bus::VRAM_SIZE - 1)
+        crate::bus::vram_index(addr)
     }
     #[inline]
     fn vram16(bus: &Bus, addr: usize) -> u16 {

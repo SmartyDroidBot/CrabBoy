@@ -35,6 +35,21 @@ pub const SRAM_SIZE: usize = 0x10000;
 /// Default 32 MB cartridge ROM mask.
 const ROM_MASK: usize = 0x1FF_FFFF;
 
+/// Map a VRAM address (or offset) onto the 96 KB array. VRAM is mirrored
+/// every 128 KB, and within a mirror the upper 32 KB (0x18000-0x1FFFF)
+/// repeats the OBJ half (0x10000-0x17FFF). The size is not a power of two,
+/// so a plain size mask would drop address bit 15 and alias the upper
+/// character and screen blocks onto the first 32 KB.
+#[inline]
+pub fn vram_index(addr: usize) -> usize {
+    let a = addr & 0x1_FFFF;
+    if a >= VRAM_SIZE {
+        a - 0x8000
+    } else {
+        a
+    }
+}
+
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 /// A fixed-size memory region, heap-allocated with no stack temporary.
@@ -328,7 +343,7 @@ impl Bus {
                 (v >> ((off & 1) * 8)) as u8
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)],
-            Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)],
+            Region::Vram => self.vram[vram_index(addr as usize)],
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)],
             Region::Rom => self.rom_byte(addr as usize & ROM_MASK),
             Region::Eeprom => match self.save.eeprom_read_bit() {
@@ -401,7 +416,7 @@ impl Bus {
                 (self.palram[i] as u32) | (self.palram[i + 1] as u32) << 8
             }
             Region::Vram => {
-                let i = base & (VRAM_SIZE - 1);
+                let i = vram_index(base);
                 (self.vram[i] as u32) | (self.vram[i + 1] as u32) << 8
             }
             Region::Oam => {
@@ -466,7 +481,7 @@ impl Bus {
                 }
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
-            Region::Vram => self.vram[Self::index_in(addr, VRAM_SIZE - 1)] = value as u8,
+            Region::Vram => self.vram[vram_index(addr as usize)] = value as u8,
             Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
             Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
@@ -510,7 +525,7 @@ impl Bus {
                 self.palram[i + 1] = (value >> 8) as u8;
             }
             Region::Vram => {
-                let i = base & (VRAM_SIZE - 1);
+                let i = vram_index(base);
                 self.vram[i] = value as u8;
                 self.vram[i + 1] = (value >> 8) as u8;
             }
@@ -915,6 +930,24 @@ mod tests {
         b.read32(0x0300_0000);
         assert_eq!(b.read32(0x0FFF_0000), 0xDEAD_BEEF);
         assert_eq!(b.read8(0x0FFF_0000), 0xEF);
+    }
+
+    #[test]
+    fn vram_keeps_bit_15_and_mirrors_every_128k() {
+        let mut b = bus();
+        b.write16(0x0600_8020, 0x3000); // screen block 16
+        b.write16(0x0600_0020, 0x4444); // char block 0
+        assert_eq!(b.read16(0x0600_8020), 0x3000, "bit 15 must survive");
+        assert_eq!(b.read16(0x0600_0020), 0x4444);
+        assert_eq!(b.read16(0x0602_0020), 0x4444, "128 KB mirror");
+        b.write16(0x0601_0000, 0xBEEF); // OBJ VRAM
+        assert_eq!(
+            b.read16(0x0601_8000),
+            0xBEEF,
+            "upper 32 KB mirrors OBJ VRAM"
+        );
+        assert_eq!(super::vram_index(0x1_7FFF), 0x1_7FFF);
+        assert_eq!(super::vram_index(0x1_8000), 0x1_0000);
     }
 
     #[test]
