@@ -1,24 +1,26 @@
 # CrabBoy
 
-A multi-system emulator framework in Rust. It hosts a **Game Boy / Game Boy
-Color** core (a CGB machine that runs both DMG and CGB cartridges) and a
-**Game Boy Advance** core, behind one platform-agnostic interface, with
-desktop, command-line and WebAssembly frontends. The goal is hardware-accurate
-emulation of all three systems in pure Rust.
+A multi-system emulator in Rust. It hosts a **Game Boy / Game Boy Color**
+core and a **Game Boy Advance** core behind one platform-agnostic interface,
+with desktop, command-line and WebAssembly frontends. The goal is
+hardware-accurate emulation of all three systems in pure Rust.
 
 ```
 crates/
-  emu-core/        Platform-agnostic traits & types (System, Device, Bus, Host,
-                   Frame, Audio, Button)
-  gb-core/         Game Boy / Game Boy Color emulator core, no GUI/OS/wasm deps
-  gba-core/        Game Boy Advance emulator core, no GUI/OS/wasm deps
+  emu-core/        Platform-agnostic traits & types (System, Frame, Audio, Button)
+  gb-core/         Game Boy / Game Boy Color core, no GUI/OS/wasm deps
+  gba-core/        Game Boy Advance core, no GUI/OS/wasm deps
+  crab-systems/    Detects the console from a ROM header and builds the core;
+                   the only crate frontends depend on
 platforms/
-  desktop/         egui desktop app ("CrabBoy") — load a .gb/.gbc/.gba and play
-  cli/             Headless tools: test_runner, probe, gba-diag, gba-disasm
-  wasm/            wasm-bindgen bindings and a minimal browser demo
+  desktop/         egui desktop app ("CrabBoy")
+  cli/             `crab` headless runner plus developer tools
+                   (fetch_test_roms, gba-diag, gba-disasm, test_runner, ...)
+  wasm/            wasm-bindgen bindings and the browser demo (web/)
 docs/
   gba/             Verified hardware notes (boot, BIOS, DMA, I/O, RTC) and the
                    pinned verification runs
+  releasing.md     How a release is cut
 ```
 
 See [`ROADMAP.md`](ROADMAP.md) for the milestones and [`CHANGELOG.md`](CHANGELOG.md)
@@ -26,52 +28,109 @@ for what each release contains.
 
 ## Status
 
-| | Game Boy / Color | Game Boy Advance |
-|---|---|---|
-| Boots commercial games | yes | yes (skip-BIOS, or with a user-supplied BIOS image) |
-| Playable | yes (Pokémon Red/Crystal) | intro and title screen; menus have rendering bugs |
-| Save types | MBC1/2/3/5 battery RAM, MBC3 RTC | SRAM, Flash 64K/128K, EEPROM 512 B/8 KB, cartridge RTC |
-| Save states | yes | yes |
-| Audio | four channels | four channels + DirectSound FIFOs |
+| | Game Boy | Game Boy Color | Game Boy Advance |
+|---|---|---|---|
+| Desktop | yes | yes | yes |
+| `crab` CLI | yes | yes | yes |
+| Browser (wasm) | yes | yes | yes |
+| Boots commercial games | yes | yes | yes (HLE BIOS, or a user-supplied `gba_bios.bin`) |
+| Playable | yes (Pokémon Red) | yes (Pokémon Crystal) | intro and title screen; menus have rendering bugs |
+| Save types | MBC1/2/3/5 battery RAM, MBC3 RTC | same | SRAM, Flash 64K/128K, EEPROM 512 B/8 KB, cartridge RTC |
+| Save states | yes | yes | yes |
+| Audio | four channels | four channels | four channels + DirectSound FIFOs |
 
 The GBA core reaches the Pokémon Emerald and Ruby title screens
 (`docs/gba/verification.md` lists the pinned frames). Known gaps: the title
 screens' background layers and sprites, garbled menu text, per-scanline affine
 register effects, cartridge prefetch and precise wait states.
 
+Emulation is integer-only and deterministic: CI checks that x86_64, aarch64
+and wasm builds produce bit-identical frames.
+
+## Download
+
+Each release on the [Releases page](https://github.com/SmartyDroidBot/CrabBoy/releases)
+ships:
+
+| Platform | Archive |
+|---|---|
+| Linux x86_64 | `crabboy-<version>-linux-amd64.tar.gz` |
+| Linux arm64 | `crabboy-<version>-linux-arm64.tar.gz` |
+| Windows x86_64 | `crabboy-<version>-windows-amd64.zip` |
+| Windows arm64 | `crabboy-<version>-windows-arm64.zip` |
+| Browser | `crabboy-<version>-web.zip` (serve the folder over HTTP) |
+
+Archives contain the `CrabBoy` desktop app and the `crab` command-line
+runner. The browser demo of the latest release is also deployed to GitHub
+Pages. No ROMs or BIOS images are included or ever will be.
+
 ## Building
 
-Native desktop (Windows / Linux / macOS):
+Rust 1.88 or newer. On Linux the desktop app needs the ALSA headers and
+`pkg-config` (`sudo apt install libasound2-dev pkg-config`).
 
 ```sh
-cargo build -p crab-desktop --release
-cargo run -p crab-desktop --release -- <path-to-rom>
-```
+# Desktop
+cargo run --release -p crab-desktop -- path/to/game.gba
+cargo run --release -p crab-desktop -- --bios gba_bios.bin path/to/game.gba
 
-On Linux the desktop build needs the ALSA headers (`libasound2-dev`) and
-`pkg-config`; everything else is pure Rust.
+# Headless
+cargo run --release -p crab-cli --bin crab -- info path/to/game.gb
+cargo run --release -p crab-cli --bin crab -- run path/to/game.gb \
+    --frames 600 --input START@400 --dump frame.png --wav out.wav --hash
 
-Run all unit tests:
+# Browser: see platforms/wasm/web/README.md
+cargo build -p crab-wasm --release --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir platforms/wasm/web/pkg \
+    target/wasm32-unknown-unknown/release/crab_wasm.wasm
 
-```sh
+# Everything CI runs
+cargo build --workspace --all-targets
 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-Headless GBA diagnostics (frame sampling, wild-PC detection, PNG frame dumps,
-VRAM dumps, scripted input):
+The console is detected from the ROM header, not the file extension. A GBA
+ROM boots through high-level BIOS emulation unless a 16 KB `gba_bios.bin`
+is passed with `--bios` or found next to the ROM or the executable.
 
-```sh
-cargo run --release -p crab-cli --bin gba-diag -- "<rom.gba>" 600 60 --frame-hash
-cargo run --release -p crab-cli --bin gba-disasm -- "<rom.gba>" 0x08000000 32
-```
+`cargo run --release -p crab-cli --bin fetch_test_roms` downloads the
+open-source accuracy suites (c-sp game-boy-test-roms, jsmolka gba-tests)
+into `roms/test-suites/`, which is gitignored.
+
+## Controls
+
+| Key | Action |
+|---|---|
+| Arrows | D-pad |
+| Z / X | A / B |
+| Enter / Backspace | Start / Select |
+| A / S | L / R (GBA) |
+| P / R / F | Pause / Reset / Fast-forward |
+| F1–F4, Shift+F1–F4 | Save / load state slots |
+| F5 / F9 | Quick save / quick load |
+
+The browser demo adds on-screen touch controls and gamepad support.
+
+## Pure Rust
+
+The emulator cores, `crab-systems`, the CLI runner and the wasm bindings are
+pure Rust with no C code. The remaining exceptions are host bindings:
+
+- Desktop audio on Linux links `alsa-sys` (the ALSA C library); on Windows
+  it uses WASAPI through the `windows` crate. Graphics go through OpenGL
+  loaded at runtime.
+- `fetch_test_roms` (a developer tool, not shipped) uses `ureq` with
+  `rustls`, whose `ring` backend contains C and assembly.
 
 ## Contributing
 
 All contributors (humans and AI agents) must follow
-[`guidelines.md`](guidelines.md) — including the pre-commit testing checklist
-and the EU-style commit message format. Parts of this project were written
-with the help of Claude (Anthropic), which is credited here rather than in
-individual commits.
+[`guidelines.md`](guidelines.md), including the pre-commit checklist and the
+EU-style commit message format. Parts of this project were written with the
+help of Claude (Anthropic), which is credited here rather than in individual
+commits.
 
 ## Known Issues
 
@@ -90,11 +149,14 @@ individual commits.
 
 - `emu_core::System` is the uniform interface every console core implements, so
   frontends can host any console behind one `Box<dyn System>`.
+- `crab_systems::detect` identifies a ROM from its header bytes and
+  `crab_systems::load_with` builds the matching system, so no frontend knows
+  about individual cores.
 - `emu_core::Device` is the uniform interface for pluggable peripherals
   (PPU, timer, APU, joypad). Devices tick with an abstract `Bus` and downcast
-  via `as_any_mut()` to the concrete bus — the CPU timing model stays unchanged.
+  via `as_any_mut()` to the concrete bus.
 - `emu_core::Button` is a shared logical input set that each core maps to its
-  own bitmask.
+  own bitmask; cores ignore buttons they do not have.
 - The emulation path is integer-only and deterministic: the same number of
   master cycles produces the same state on every platform and in WebAssembly.
 
