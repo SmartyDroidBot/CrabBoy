@@ -207,7 +207,7 @@ impl Gba {
         // setting.
         let irq_en = (self.bus.io.regs[0x04] >> 3) & 0x07;
         let vcount_setting = self.bus.io.regs[0x05] as u32;
-        let in_vblank = y >= ppu::VISIBLE_LINES;
+        let in_vblank = (ppu::VISIBLE_LINES..ppu::LINES_PER_FRAME - 1).contains(&y);
         let vblank_flag = if in_vblank { 1 } else { 0 };
 
         // Render the visible line.
@@ -227,8 +227,11 @@ impl Gba {
         if y == vcount_setting && irq_en & 0x04 != 0 {
             self.bus.io.raise_irq(irq::VCOUNT);
         }
-        // HBlank DMA + IRQ each line.
-        self.bus.run_dma(Timing::HBlank);
+        // HBlank DMA runs on visible lines only; the HBlank IRQ fires on every
+        // line, including those of VBlank.
+        if y < ppu::VISIBLE_LINES {
+            self.bus.run_dma(Timing::HBlank);
+        }
         if irq_en & 0x02 != 0 {
             self.bus.io.raise_irq(irq::HBLANK);
         }
