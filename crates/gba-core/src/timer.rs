@@ -35,17 +35,24 @@ pub struct Timers {
     t: [Timer; 4],
     /// Pending overflow IRQ flags (bits 0-3).
     flags: u16,
+    /// Which timers overflowed during the most recent `step`.
+    overflowed: [bool; 4],
 }
 
 impl Default for Timers {
     fn default() -> Self {
-        Timers { t: [Timer::new(); 4], flags: 0 }
+        Timers { t: [Timer::new(); 4], flags: 0, overflowed: [false; 4] }
     }
 }
 
 impl Timers {
     pub fn new() -> Timers {
         Timers::default()
+    }
+
+    /// Whether timer `i` overflowed during the most recent `step`.
+    pub fn just_overflowed(&self, i: usize) -> bool {
+        self.overflowed[i]
     }
 
     /// Write to the low 16-bit reload register of timer `idx`.
@@ -86,6 +93,7 @@ impl Timers {
 
     /// Advance the timers by `cycles` CPU cycles.
     pub fn step(&mut self, cycles: u32) {
+        self.overflowed = [false; 4];
         for i in 0..4 {
             let t = &mut self.t[i];
             if !t.enabled {
@@ -110,6 +118,7 @@ impl Timers {
         let t = &mut self.t[i];
         if t.counter == 0xFFFF {
             t.counter = t.reload;
+            self.overflowed[i] = true;
             if t.irq_enable {
                 self.flags |= IRQ[i];
             }
@@ -121,6 +130,7 @@ impl Timers {
                     let reload = self.t[i + 1].reload;
                     let c = self.t[i + 1].counter;
                     self.t[i + 1].counter = if c == 0xFFFF {
+                        self.overflowed[i + 1] = true;
                         if irq_enable {
                             self.flags |= IRQ[i + 1];
                         }

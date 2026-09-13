@@ -212,6 +212,12 @@ impl Bus {
         self.bios = bios;
     }
 
+    /// Whether a full 16 KB BIOS image is loaded (as opposed to the small
+    /// IRQ-return stub the skip-BIOS boot installs).
+    pub fn has_real_bios(&self) -> bool {
+        self.bios.len() >= 0x4000
+    }
+
     /// Wait-state cycles accumulated during the current instruction.
     pub fn cycles(&self) -> u32 {
         self.cycles

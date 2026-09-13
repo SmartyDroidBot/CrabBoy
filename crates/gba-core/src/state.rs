@@ -13,7 +13,7 @@ use crate::save::SaveType;
 /// Magic header identifying a CrabBoy GBA save state.
 pub const STATE_MAGIC: &[u8; 4] = b"CRGA";
 /// Current save-state format version.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 struct Writer {
     buf: Vec<u8>,
@@ -123,6 +123,7 @@ fn save_cpu(w: &mut Writer, gba: &Gba) {
     }
     w.u32(s.cycles);
     w.u8(s.halted as u8);
+    w.u16(s.bios_wait.unwrap_or(0));
 }
 
 fn load_cpu(r: &mut Reader, gba: &mut Gba) -> Result<(), String> {
@@ -137,6 +138,7 @@ fn load_cpu(r: &mut Reader, gba: &mut Gba) -> Result<(), String> {
         spsr: [0; 5],
         cycles: 0,
         halted: false,
+        bios_wait: None,
     };
     for x in s.regs.iter_mut() {
         *x = r.u32()?;
@@ -160,7 +162,13 @@ fn load_cpu(r: &mut Reader, gba: &mut Gba) -> Result<(), String> {
     }
     s.cycles = r.u32()?;
     s.halted = r.u8()? != 0;
+    s.bios_wait = match r.u16()? {
+        0 => None,
+        mask => Some(mask),
+    };
     gba.cpu.restore(s);
+    // BIOS presence is a static property of the bus, not of the saved CPU.
+    gba.cpu.set_has_bios(gba.bus.has_real_bios());
     Ok(())
 }
 

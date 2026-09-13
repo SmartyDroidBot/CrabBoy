@@ -71,13 +71,20 @@ fn halt(cpu: &mut Cpu) -> bool {
     true
 }
 
-/// 0x05 VBlankIntrWait: clear the VBlank flag and halt until the next one.
+/// BIOS internal IF mirror at the top of IWRAM. The game's IRQ handler ORs the
+/// serviced flags into it and IntrWait/VBlankIntrWait poll it (GBATEK, "BIOS
+/// Interrupt Functions").
+pub(crate) const BIOS_IF_ADDR: u32 = 0x0300_7FF8;
+
+/// 0x05 VBlankIntrWait: clear the VBlank flag and wait until the next one.
 fn vblank_intr_wait(cpu: &mut Cpu, bus: &mut Bus) -> bool {
     const VBLANK: u16 = 1 << 0;
+    let cur = bus.read32(BIOS_IF_ADDR);
+    bus.write32(BIOS_IF_ADDR, cur & !(VBLANK as u32));
     if bus.io.iflags() & VBLANK != 0 {
         bus.io.acknowledge(VBLANK);
     } else {
-        cpu.halted = true;
+        cpu.begin_bios_wait(VBLANK);
     }
     true
 }

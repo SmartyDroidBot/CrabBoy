@@ -67,6 +67,9 @@ pub struct Io {
     ime: bool,
     /// Latched VCOUNT (driven by the PPU in later phases).
     vcount: u16,
+    /// Set by a write to HALTCNT (0x04000301); the system root reads and
+    /// clears it to halt the CPU.
+    pub halt_requested: bool,
 }
 
 impl Default for Io {
@@ -79,6 +82,7 @@ impl Default for Io {
             iflags: 0,
             ime: false,
             vcount: 0,
+            halt_requested: false,
         };
         io.regs[0x2] = 1; // DISPSTAT: V-Blank flag must start set so games don't hang.
         io
@@ -197,6 +201,16 @@ impl Io {
     /// Raw IF value.
     pub fn iflags(&self) -> u16 {
         self.iflags
+    }
+
+    /// IE register value.
+    pub fn ie(&self) -> u16 {
+        self.ie
+    }
+
+    /// Whether the master interrupt enable is set.
+    pub fn ime(&self) -> bool {
+        self.ime
     }
 }
 

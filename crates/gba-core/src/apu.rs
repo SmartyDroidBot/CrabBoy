@@ -303,14 +303,15 @@ impl DirectSound {
             self.fifo_count += 1;
         }
     }
-    fn sample(&mut self) -> f32 {
+    /// Pop the next signed 8-bit sample; an empty FIFO repeats silence.
+    fn sample(&mut self) -> i8 {
         if self.fifo_count == 0 {
-            return 0.0;
+            return 0;
         }
         let v = self.fifo[self.fifo_read];
         self.fifo_read = (self.fifo_read + 1) % 32;
         self.fifo_count -= 1;
-        (v as f32 - 128.0) / 128.0
+        v as i8
     }
 }
 
@@ -322,6 +323,13 @@ pub struct Apu {
     noise: Noise,
     dsa: DirectSound,
     dsb: DirectSound,
+    /// Sample currently held by each DirectSound DAC; replaced on overflow of
+    /// the timer selected in SOUNDCNT_H.
+    dsa_current: i8,
+    dsb_current: i8,
+    /// Timer (0 or 1) that clocks each DirectSound channel.
+    dsa_timer: u8,
+    dsb_timer: u8,
     wave_ram: [u8; 16],
     cycles: u32,
     fs: u8,
@@ -340,6 +348,10 @@ impl Default for Apu {
             noise: Noise::new(),
             dsa: DirectSound::default(),
             dsb: DirectSound::default(),
+            dsa_current: 0,
+            dsb_current: 0,
+            dsa_timer: 0,
+            dsb_timer: 0,
             wave_ram: [0; 16],
             cycles: 0,
             fs: 0,
@@ -354,6 +366,37 @@ impl Default for Apu {
 impl Apu {
     pub fn new() -> Apu {
         Apu::default()
+    }
+
+    /// Timer overflow notification: each DirectSound channel clocked by this
+    /// timer pops its next FIFO sample into its DAC.
+    pub fn timer_overflow(&mut self, timer_idx: u8) {
+        if self.dsa_timer == timer_idx {
+            self.dsa_current = self.dsa.sample();
+        }
+        if self.dsb_timer == timer_idx {
+            self.dsb_current = self.dsb.sample();
+        }
+    }
+
+    /// Bytes currently queued in FIFO A.
+    pub fn fifo_a_count(&self) -> usize {
+        self.dsa.fifo_count
+    }
+
+    /// Bytes currently queued in FIFO B.
+    pub fn fifo_b_count(&self) -> usize {
+        self.dsb.fifo_count
+    }
+
+    /// Queue a sample byte in FIFO A (DMA refill path).
+    pub fn push_fifo_a(&mut self, v: u8) {
+        self.dsa.push(v);
+    }
+
+    /// Queue a sample byte in FIFO B (DMA refill path).
+    pub fn push_fifo_b(&mut self, v: u8) {
+        self.dsb.push(v);
     }
 
     pub fn take_audio(&mut self) -> AudioBuffer {
@@ -408,7 +451,19 @@ impl Apu {
                 }
             }
             0x80 => self.soundcnt_l = value,
-            0x82 => self.soundcnt_h = value,
+            0x82 => {
+                self.soundcnt_h = value;
+                self.dsa_timer = ((value >> 10) & 1) as u8;
+                self.dsb_timer = ((value >> 14) & 1) as u8;
+                if value & (1 << 11) != 0 {
+                    self.dsa = DirectSound::default();
+                    self.dsa_current = 0;
+                }
+                if value & (1 << 15) != 0 {
+                    self.dsb = DirectSound::default();
+                    self.dsb_current = 0;
+                }
+            }
             0x84 => self.soundcnt_x = value,
             0x90..=0x9C => {
                 let idx = offset - 0x90;
@@ -485,8 +540,8 @@ impl Apu {
         let s2 = self.sq2.sample();
         let s3 = self.wave.sample(&self.wave_ram);
         let s4 = self.noise.sample();
-        let dsa = self.dsa.sample();
-        let dsb = self.dsb.sample();
+        let dsa = self.dsa_current as f32 / 128.0;
+        let dsb = self.dsb_current as f32 / 128.0;
 
         let cnt_l = self.soundcnt_l;
         let cnt_h = self.soundcnt_h;
@@ -551,10 +606,25 @@ mod tests {
         let mut apu = Apu::new();
         apu.write16(0x82, (1 << 6) | (1 << 7));
         apu.write16(0xA0, 0x80 | 0x20);
+        // Nothing reaches the DAC until the selected timer (0) overflows.
+        apu.step(CYCLES_PER_SAMPLE);
+        assert_eq!(apu.take_audio().samples, vec![0.0, 0.0]);
+        apu.timer_overflow(0);
         apu.step(CYCLES_PER_SAMPLE);
         let audio = apu.take_audio();
         assert_eq!(audio.samples.len(), 2);
         assert!(audio.samples[0] != 0.0 || audio.samples[1] != 0.0);
+    }
+
+    #[test]
+    fn fifo_samples_are_signed() {
+        let mut apu = Apu::new();
+        apu.write16(0x82, 1 << 6);
+        apu.write16(0xA0, 0x80);
+        apu.timer_overflow(0);
+        apu.step(CYCLES_PER_SAMPLE);
+        let audio = apu.take_audio();
+        assert_eq!(audio.samples[0], -1.0);
     }
 
     #[test]

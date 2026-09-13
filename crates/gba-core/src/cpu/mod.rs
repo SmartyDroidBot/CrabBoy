@@ -95,13 +95,16 @@ pub struct Cpu {
     cycles: u32,
     /// True while the CPU is halted (SWI 0x02 `Halt`).
     pub halted: bool,
+    /// HLE BIOS wait mask used by IntrWait and VBlankIntrWait: the IRQ flags
+    /// the routine is waiting for. `None` when no wait is in progress.
+    bios_wait: Option<u16>,
     /// A BIOS SWI recorded by the decoders, dispatched by the system once the
     /// instruction has finished executing. `None` when no SWI was executed.
     bios_call: Option<u32>,
-    /// Link value (return address) saved alongside `bios_call`, used if the
-    /// call is not a recognised BIOS routine and we fall back to the SVC
-    /// exception.
-    bios_lr: u32,
+    /// True when a real BIOS dump is loaded. In that mode SWIs take the real
+    /// SVC exception (vector 0x08) so the BIOS dispatcher runs, instead of the
+    /// HLE intercept.
+    pub has_bios: bool,
 }
 
 /// Index of a banked register file within `sp`/`lr`/`spsr`.
@@ -132,9 +135,15 @@ impl Cpu {
             spsr: [0; 5],
             cycles: 0,
             halted: false,
+            bios_wait: None,
             bios_call: None,
-            bios_lr: 0,
+            has_bios: false,
         }
+    }
+
+    /// Enable / disable real-BIOS SWI/exception handling.
+    pub fn set_has_bios(&mut self, on: bool) {
+        self.has_bios = on;
     }
 
     #[inline]
@@ -295,6 +304,22 @@ impl Cpu {
         r
     }
 
+    /// Stack pointer of the current mode (diagnostics).
+    pub fn sp_raw(&self) -> u32 {
+        self.regs[13]
+    }
+
+    /// Set the banked SP of a non-user mode. Used by the skip-BIOS boot path
+    /// to give the exception modes the stacks the BIOS would have set up
+    /// (GBATEK: SP_irq=03007FA0h, SP_svc=03007FE0h, SP_usr=03007F00h).
+    pub fn set_mode_sp(&mut self, mode: u32, value: u32) {
+        if mode == self.cpsr & 0x1F {
+            self.regs[13] = value;
+        } else {
+            self.sp[bank_index(mode)] = value;
+        }
+    }
+
     /// Enter an exception. Sets LR, SPSR, mode and PC, disabling the
     /// appropriate interrupts. `lr_value` is the link address to store.
     pub fn take_exception(&mut self, vector: u32, mode: u32, lr_value: u32, disable_fiq: bool) {
@@ -316,11 +341,10 @@ impl Cpu {
     }
 
     /// Record a BIOS SWI to be dispatched by the system after the instruction
-    /// finishes. `lr_value` is the return address to fall back to if the call
-    /// is not a recognised BIOS routine.
-    pub(crate) fn swi_bios(&mut self, lr_value: u32, num: u32) {
+    /// finishes. The PC is already past the SWI, so a handled call returns
+    /// directly to the next instruction.
+    pub(crate) fn swi_bios(&mut self, num: u32) {
         self.bios_call = Some(num);
-        self.bios_lr = lr_value;
     }
 
     /// Take the recorded BIOS SWI number, clearing the pending flag.
@@ -328,9 +352,20 @@ impl Cpu {
         self.bios_call.take()
     }
 
-    /// The saved return address for the current BIOS SWI.
-    pub(crate) fn bios_lr(&self) -> u32 {
-        self.bios_lr
+    /// Start an HLE IntrWait: the CPU idles until one of the `mask` IRQ flags
+    /// is raised.
+    pub(crate) fn begin_bios_wait(&mut self, mask: u16) {
+        self.bios_wait = Some(mask);
+    }
+
+    /// The IRQ mask an HLE IntrWait is currently waiting for, if any.
+    pub fn bios_wait_mask(&self) -> Option<u16> {
+        self.bios_wait
+    }
+
+    /// Finish the HLE IntrWait in progress.
+    pub(crate) fn complete_bios_wait(&mut self) {
+        self.bios_wait = None;
     }
 
     /// IRQ exception.
@@ -406,6 +441,7 @@ pub(crate) struct CpuSave {
     pub spsr: [u32; 5],
     pub cycles: u32,
     pub halted: bool,
+    pub bios_wait: Option<u16>,
 }
 
 impl Cpu {
@@ -421,6 +457,7 @@ impl Cpu {
             spsr: self.spsr,
             cycles: self.cycles,
             halted: self.halted,
+            bios_wait: self.bios_wait,
         }
     }
 
@@ -435,8 +472,8 @@ impl Cpu {
         self.spsr = s.spsr;
         self.cycles = s.cycles;
         self.halted = s.halted;
+        self.bios_wait = s.bios_wait;
         self.bios_call = None;
-        self.bios_lr = 0;
     }
 }
 

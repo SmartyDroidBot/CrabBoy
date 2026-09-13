@@ -217,7 +217,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     if inst & 0x0F00_0000 == 0x0F00_0000 {
         let num = inst & 0x00FF_FFFF;
         if crate::bios::is_known(num) {
-            cpu.swi_bios(cpu.pc, num);
+            cpu.swi_bios(num);
         } else {
             cpu.swi(cpu.pc);
         }
