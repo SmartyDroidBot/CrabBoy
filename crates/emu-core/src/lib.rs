@@ -28,7 +28,7 @@ pub use device::Device;
 pub use host::Host;
 pub use input::Button;
 pub use system::System;
-pub use video::Frame;
+pub use video::{Frame, DMG_PALETTE};
 
 /// Common error type for core operations.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,17 +1,29 @@
 //! The frontend-facing system abstraction.
 
-use crate::{audio::AudioBuffer, input::Button, video::Frame};
+use crate::{audio::AudioBuffer, input::Button, video::Frame, Screen};
 
 /// A complete console as seen by a frontend.
 ///
 /// Frontends should hold a `Box<dyn System>` and nothing else from the core
 /// crate, so adding a new console (GBA) requires no frontend changes.
 pub trait System {
-    /// Stable console identifier, e.g. `"gb"`, `"gba"`.
+    /// Stable console identifier, e.g. `"gb"`, `"gbc"`, `"gba"`.
     fn name(&self) -> &'static str;
 
     /// Human-readable description of the loaded cartridge.
     fn info(&self) -> String;
+
+    /// The cartridge title from its header, trimmed (may be empty).
+    fn title(&self) -> String;
+
+    /// Native display resolution, without allocating a frame.
+    fn screen(&self) -> Screen;
+
+    /// Nominal video frame rate in Hz, for host pacing only (both the Game
+    /// Boy and the GBA refresh at 59.7275 Hz).
+    fn frame_rate(&self) -> f64 {
+        59.7275
+    }
 
     /// Reset the system to power-on state (keeps loaded cartridge).
     fn reset(&mut self);
@@ -35,12 +47,14 @@ pub trait System {
         }
     }
 
-    /// Current framebuffer as 2-bit shades (`0..=3`) per pixel.
+    /// Current framebuffer. Colour consoles fill [`Frame::rgb`]; monochrome
+    /// ones only the 2-bit shades. Frontends should render through
+    /// [`Frame::write_rgba`], which handles both.
     fn frame(&self) -> Frame;
 
-    /// Zero-copy view of the current framebuffer (`0..=3` per pixel). Avoids the
-    /// allocation in [`System::frame`] on the hot path. Returns `&[]` when the
-    /// system exposes no framebuffer here.
+    /// Zero-copy view of the current framebuffer as 2-bit shades (`0..=3` per
+    /// pixel), a fast path for the Game Boy family. Colour-only consoles
+    /// return `&[]`; use [`System::frame`] for them.
     fn framebuffer(&self) -> &[u8] {
         &[]
     }

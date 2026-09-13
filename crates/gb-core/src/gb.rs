@@ -186,6 +186,14 @@ impl emu_core::System for Gb {
         )
     }
 
+    fn title(&self) -> String {
+        self.bus.cart.title.trim().to_string()
+    }
+
+    fn screen(&self) -> emu_core::Screen {
+        emu_core::Screen::new(SCREEN_W, SCREEN_H)
+    }
+
     fn reset(&mut self) {
         let cart = self.bus.cart.clone();
         *self = Gb::new(cart);
@@ -286,6 +294,17 @@ impl emu_core::System for Gb {
 mod tests {
     use super::*;
     use crate::devices::joypad::*;
+
+    #[test]
+    fn title_and_screen_come_from_the_header() {
+        use emu_core::System;
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x134..0x134 + 7].copy_from_slice(b"POKEMON");
+        let emu = Gb::new(Cartridge::load(&rom).unwrap());
+        assert_eq!(emu.title(), "POKEMON");
+        assert_eq!(emu.screen(), emu_core::Screen::new(160, 144));
+        assert_eq!(emu.frame_rate(), 59.7275);
+    }
 
     #[test]
     fn p1_read_reflects_pressed_buttons() {

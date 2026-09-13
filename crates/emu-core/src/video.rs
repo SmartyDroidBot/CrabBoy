@@ -1,5 +1,14 @@
 //! Framebuffer representation.
 
+/// The classic green-tinted DMG palette (`[r, g, b, a]` per shade, lightest
+/// first), the default frontends use for monochrome frames.
+pub const DMG_PALETTE: [[u8; 4]; 4] = [
+    [0xE0, 0xF8, 0xD0, 0xFF],
+    [0x88, 0xC0, 0x70, 0xFF],
+    [0x34, 0x68, 0x56, 0xFF],
+    [0x08, 0x18, 0x20, 0xFF],
+];
+
 /// A console framebuffer of 2-bit shades (`0..=3`) per pixel, with an optional
 /// full-colour buffer.
 ///
@@ -46,6 +55,34 @@ impl Frame {
         out
     }
 
+    /// Write the frame as RGBA8888 into `out`, which must hold exactly
+    /// `width * height * 4` bytes. Uses the colour buffer when present,
+    /// otherwise maps the shades through `palette`.
+    pub fn write_rgba(&self, palette: &[[u8; 4]; 4], out: &mut [u8]) {
+        let pixels = self.width as usize * self.height as usize;
+        assert_eq!(out.len(), pixels * 4, "rgba buffer size");
+        match &self.rgb {
+            Some(rgb) => {
+                for (dst, src) in out.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+                    dst[..3].copy_from_slice(src);
+                    dst[3] = 0xFF;
+                }
+            }
+            None => {
+                for (dst, &s) in out.chunks_exact_mut(4).zip(&self.shades) {
+                    dst.copy_from_slice(&palette[s as usize & 3]);
+                }
+            }
+        }
+    }
+
+    /// The frame as a new RGBA8888 buffer (see [`Frame::write_rgba`]).
+    pub fn to_rgba(&self, palette: &[[u8; 4]; 4]) -> Vec<u8> {
+        let mut out = vec![0u8; self.width as usize * self.height as usize * 4];
+        self.write_rgba(palette, &mut out);
+        out
+    }
+
     /// Fill every pixel with a shade.
     pub fn fill(&mut self, shade: u8) {
         self.shades.fill(shade & 3);
@@ -57,5 +94,35 @@ impl Frame {
         let start = y as usize * w;
         let end = start + row.len().min(w);
         self.shades[start..end].copy_from_slice(&row[..(end - start)]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_rgba_maps_shades_through_the_palette() {
+        let mut f = Frame::new(2, 1);
+        f.shades = vec![0, 3];
+        let out = f.to_rgba(&DMG_PALETTE);
+        assert_eq!(&out[..4], &DMG_PALETTE[0]);
+        assert_eq!(&out[4..], &DMG_PALETTE[3]);
+    }
+
+    #[test]
+    fn write_rgba_prefers_the_colour_buffer() {
+        let mut f = Frame::new(1, 2);
+        f.rgb = Some(vec![1, 2, 3, 4, 5, 6]);
+        let out = f.to_rgba(&DMG_PALETTE);
+        assert_eq!(out, [1, 2, 3, 0xFF, 4, 5, 6, 0xFF]);
+    }
+
+    #[test]
+    #[should_panic(expected = "rgba buffer size")]
+    fn write_rgba_rejects_a_wrong_sized_buffer() {
+        let f = Frame::new(2, 2);
+        let mut out = [0u8; 8];
+        f.write_rgba(&DMG_PALETTE, &mut out);
     }
 }

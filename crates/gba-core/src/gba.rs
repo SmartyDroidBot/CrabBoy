@@ -391,21 +391,28 @@ impl emu_core::System for Gba {
     }
 
     fn info(&self) -> String {
-        let title = self
-            .bus
+        let title = self.title();
+        format!(
+            "{} (GBA)",
+            if title.is_empty() { "unknown" } else { &title }
+        )
+    }
+
+    fn title(&self) -> String {
+        self.bus
             .rom
-            .get(0xA0..0xB0)
+            .get(0xA0..0xAC)
             .map(|s| {
                 String::from_utf8_lossy(s)
                     .trim_end_matches('\0')
                     .trim()
                     .to_string()
             })
-            .unwrap_or_default();
-        format!(
-            "{} (GBA)",
-            if title.is_empty() { "unknown" } else { &title }
-        )
+            .unwrap_or_default()
+    }
+
+    fn screen(&self) -> emu_core::Screen {
+        emu_core::Screen::new(SCREEN_W, SCREEN_H)
     }
 
     fn reset(&mut self) {
@@ -511,6 +518,17 @@ mod tests {
         assert_eq!(f.width, 240);
         assert_eq!(f.height, 160);
         assert_eq!(f.rgb.as_ref().unwrap().len(), 240 * 160 * 3);
+    }
+
+    #[test]
+    fn title_and_screen_come_from_the_header() {
+        let mut rom = vec![0u8; 0x4000];
+        rom[0xA0..0xAC].copy_from_slice(b"POKEMON EMER");
+        let gba = Gba::new(rom);
+        assert_eq!(gba.title(), "POKEMON EMER");
+        assert_eq!(gba.info(), "POKEMON EMER (GBA)");
+        assert_eq!(gba.screen(), emu_core::Screen::new(240, 160));
+        assert_eq!(Gba::new(vec![0; 0x4000]).info(), "unknown (GBA)");
     }
 
     #[test]
