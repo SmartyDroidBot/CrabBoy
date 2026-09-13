@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-14
+
+First release: GB, GBC and GBA on desktop, command line and in the
+browser, built for Linux and Windows on amd64 and arm64.
+
 ### Added
 - `crab-systems` crate: detects the console from the ROM header (never the
   file extension) and builds any core behind `Box<dyn System>`, with an
