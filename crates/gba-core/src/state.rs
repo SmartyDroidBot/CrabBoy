@@ -13,7 +13,7 @@ use crate::save::SaveType;
 /// Magic header identifying a CrabBoy GBA save state.
 pub const STATE_MAGIC: &[u8; 4] = b"CRGA";
 /// Current save-state format version.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 struct Writer {
     buf: Vec<u8>,
@@ -145,9 +145,9 @@ fn load_cpu(r: &mut Reader, gba: &mut Gba) -> Result<(), String> {
         cpsr: 0,
         base_r8_12: [0; 5],
         fiq_r8_12: [0; 5],
-        sp: [0; 5],
-        lr: [0; 5],
-        spsr: [0; 5],
+        sp: [0; 6],
+        lr: [0; 6],
+        spsr: [0; 6],
         cycles: 0,
         halted: false,
         bios_wait: None,

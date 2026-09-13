@@ -87,10 +87,10 @@ pub struct Cpu {
     fiq_r8_12: [u32; 5],
     /// Banked SP/LR, indexed by mode: [FIQ, SVC, ABT, UND, IRQ]. USR shares the
     /// SVC slot.
-    sp: [u32; 5],
-    lr: [u32; 5],
+    sp: [u32; 6],
+    lr: [u32; 6],
     /// SPSR per exception mode, same indexing as `sp`.
-    spsr: [u32; 5],
+    spsr: [u32; 6],
     /// Cycle counter for the current instruction (reset each [`Cpu::execute`]).
     cycles: u32,
     /// True while the CPU is halted (SWI 0x02 `Halt`).
@@ -111,6 +111,8 @@ pub struct Cpu {
 #[derive(Clone, Copy)]
 pub struct Bank(pub usize);
 
+/// USR and SYS share one register bank (slot 5); each exception mode has
+/// its own.
 fn bank_index(mode: u32) -> usize {
     match mode {
         mode::FIQ => 0,
@@ -118,7 +120,7 @@ fn bank_index(mode: u32) -> usize {
         mode::ABT => 2,
         mode::UND => 3,
         mode::IRQ => 4,
-        _ => 0, // USR/SYS share the SVC... handled by caller never asking
+        _ => 5,
     }
 }
 
@@ -130,9 +132,9 @@ impl Cpu {
             cpsr: mode::SVC | flag::F | flag::I,
             base_r8_12: [0; 5],
             fiq_r8_12: [0; 5],
-            sp: [0; 5],
-            lr: [0; 5],
-            spsr: [0; 5],
+            sp: [0; 6],
+            lr: [0; 6],
+            spsr: [0; 6],
             cycles: 0,
             halted: false,
             bios_wait: None,
@@ -398,9 +400,9 @@ impl Cpu {
         } else if n < 13 {
             self.base_r8_12[(n - 8) as usize]
         } else if n == 13 {
-            self.sp[1]
+            self.sp[bank_index(mode::USR)]
         } else {
-            self.lr[1]
+            self.lr[bank_index(mode::USR)]
         }
     }
 
@@ -411,9 +413,9 @@ impl Cpu {
         } else if n < 13 {
             self.base_r8_12[(n - 8) as usize] = v;
         } else if n == 13 {
-            self.sp[1] = v;
+            self.sp[bank_index(mode::USR)] = v;
         } else {
-            self.lr[1] = v;
+            self.lr[bank_index(mode::USR)] = v;
         }
     }
 
@@ -440,9 +442,9 @@ pub(crate) struct CpuSave {
     pub cpsr: u32,
     pub base_r8_12: [u32; 5],
     pub fiq_r8_12: [u32; 5],
-    pub sp: [u32; 5],
-    pub lr: [u32; 5],
-    pub spsr: [u32; 5],
+    pub sp: [u32; 6],
+    pub lr: [u32; 6],
+    pub spsr: [u32; 6],
     pub cycles: u32,
     pub halted: bool,
     pub bios_wait: Option<u16>,
@@ -670,6 +672,37 @@ mod tests {
         assert_eq!(cpu.regs[14], 4);
         // SPSR_SVC saved USR mode + no T.
         assert_eq!(cpu.spsr[1] & 0x1F, mode::USR);
+    }
+
+    #[test]
+    fn usr_and_svc_stacks_are_independent() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::SVC);
+        cpu.regs[13] = 0x0300_7FE0;
+        cpu.set_cpsr(0x1F); // SYS shares the user bank
+        cpu.regs[13] = 0x0300_7F00;
+        cpu.set_cpsr(mode::FIQ);
+        cpu.regs[13] = 0x0300_7A00;
+        cpu.set_cpsr(mode::USR);
+        assert_eq!(cpu.regs[13], 0x0300_7F00);
+        cpu.set_cpsr(mode::SVC);
+        assert_eq!(cpu.regs[13], 0x0300_7FE0);
+        cpu.set_cpsr(mode::FIQ);
+        assert_eq!(cpu.regs[13], 0x0300_7A00);
+    }
+
+    #[test]
+    fn set_mode_sp_for_usr_survives_mode_switch() {
+        let mut cpu = Cpu::new();
+        cpu.set_cpsr(mode::SVC);
+        cpu.set_mode_sp(mode::USR, 0x0300_7F00);
+        cpu.set_mode_sp(mode::IRQ, 0x0300_7FA0);
+        cpu.set_mode_sp(mode::SVC, 0x0300_7FE0);
+        assert_eq!(cpu.regs[13], 0x0300_7FE0, "current mode updates r13");
+        cpu.set_cpsr(mode::IRQ);
+        assert_eq!(cpu.regs[13], 0x0300_7FA0);
+        cpu.set_cpsr(0x1F);
+        assert_eq!(cpu.regs[13], 0x0300_7F00);
     }
 
     #[test]
