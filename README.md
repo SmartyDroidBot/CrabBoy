@@ -48,6 +48,11 @@ suites and reaches the Pokémon Emerald and Ruby title screens and menus
 (`docs/gba/verification.md` lists the pinned frames). Known gaps: cartridge
 prefetch and precise wait states, the OBJ cycle budget, mosaic corner cases.
 
+The Game Boy CPU is stepped per M-cycle: blargg's cpu_instrs, instr_timing,
+mem_timing, mem_timing-2 and halt_bug pass, as does every mooneye acceptance
+test outside `ppu/` (OAM DMA, timer, serial and interrupt timing included).
+`docs/accuracy.md` records the full suite results.
+
 Emulation is integer-only and deterministic: CI checks that x86_64, aarch64
 and wasm builds produce bit-identical frames.
 
@@ -140,6 +145,8 @@ commits.
 
 - **GBA timing** is approximate: no cartridge prefetch buffer, no
   sequential/non-sequential distinction, DMA does not stall the CPU.
+- **Game Boy PPU** renders per scanline (no pixel FIFO yet): dmg-acid2,
+  cgb-acid2, the mealybug tests and mooneye's `ppu/` timing tests fail.
 - **Audio accuracy**: the Game Boy APU still mixes in floating point and
   the GBA PSG lacks the finer edge cases (sweep and length quirks); both
   are milestones on the roadmap.

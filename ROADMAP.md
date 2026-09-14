@@ -12,7 +12,7 @@ a minimal browser demo. Accuracy-suite results per release live in
 | v0.1.1 | Done. Branding, desktop audio ring buffer, GBA audio wired |
 | v0.1.2 | Done. jsmolka arm/thumb/memory/bios/save suites pass; Emerald and Ruby render correctly |
 | v0.2.0 | Done. Accuracy harness (blargg, mooneye, dmg-acid2, cgb-acid2, mealybug, SameSuite, jsmolka) with a CI-enforced baseline; see `docs/accuracy.md` |
-| v0.3.0 | GB M-cycle CPU: blargg cpu_instrs, instr_timing, mem_timing(-2), halt_bug pass; mooneye acceptance ≥ 90% excluding ppu/ |
+| v0.3.0 | Done. GB M-cycle CPU: blargg cpu_instrs, instr_timing, mem_timing(-2), halt_bug pass; mooneye acceptance 100% excluding ppu/ (111/313 overall) |
 | v0.4.0 | GB pixel-FIFO PPU: dmg-acid2 and cgb-acid2 pixel-exact, mealybug ≥ 50% |
 | v0.5.0 | GB APU: blargg dmg_sound and cgb_sound 12/12, integer audio path |
 | v0.6.0 | GB cartridges and CGB details: mooneye mbc*, rtc3test, bully |
