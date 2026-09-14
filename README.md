@@ -142,11 +142,12 @@ commits.
   reference registers are only latched at VBlank.
 - **GBA timing** is approximate: no cartridge prefetch buffer, no
   sequential/non-sequential distinction, DMA does not stall the CPU.
-- **Audio playback is usable but not perfect.** The desktop audio sink can
-  introduce gaps at buffer boundaries; a ring-buffered sink is planned.
+- **Audio accuracy**: the Game Boy APU still mixes in floating point and
+  the GBA PSG lacks the finer edge cases (sweep and length quirks); both
+  are milestones on the roadmap.
 - **CGB double-speed audio** is emitted at 16384 Hz (the native CGB APU rate
-  when the CPU switches to double speed). The desktop app recreates its audio
-  sink when the rate changes; other frontends must honour `System::audio_rate()`.
+  when the CPU switches to double speed). Frontends resample to a fixed
+  output rate and must honour `System::audio_rate()`.
 
 ## Design
 

@@ -40,6 +40,17 @@ frame. A run must never report `WILD PC` or an `unknown_swi`.
 | 3600 | 0x1441 | 0xF53B26AE | Title: logo drop |
 | 4200 | 0x1741 | 0x3D6DC2D5 | Title screen (background layers wrong) |
 
+## Audio (v0.1.1)
+
+`crab run <rom> --frames 900 --wav out.wav` at 32768 Hz. FNV-1a-32 of the
+WAV data bytes (everything after the 44-byte header); the jsmolka video
+hashes above are unaffected by the APU.
+
+| ROM | Stereo frames | Data bytes | FNV-1a-32 | Notes |
+|---|---|---|---|---|
+| Emerald | 493766 | 1975064 | 5dbd36c9 | silent until the Game Freak jingle at ~frame 203, peaks clip at the 10-bit limit |
+| Ruby | 493765 | 1975060 | 2a1b5415 | RMS ≈ 13774 |
+
 ## Known rendering gaps at these points
 
 - The title screens' background layers show wrong colours and the Rayquaza /

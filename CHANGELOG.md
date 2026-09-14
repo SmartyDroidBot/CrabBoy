@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Project logo (`assets/`), used in the README, as the desktop window icon
+  and Windows executable icon, and as the browser demo's favicon, home-screen
+  icon and web manifest; `render_logo` dev tool regenerates every icon from
+  the SVG in pure Rust.
+- Desktop: the status bar shows how much audio is queued.
+- GBA: DirectSound integration test through DMA, timers and `run_frame`.
+
+### Fixed
+- Desktop audio: playback goes through one fixed-rate ring buffer instead
+  of a new rodio source per frame, so there are no gaps at frame boundaries,
+  the queue is bounded to 120 ms, and loading a ROM, reset, pause,
+  fast-forward and state loads clear it instead of letting the previous
+  ROM's music play on. The output device is no longer reopened when the
+  sample rate changes.
+- Desktop pacing: a stall (file dialog, window drag, slow ROM read) no longer
+  replays as a burst of frames; at most four frames catch up per update.
+- Desktop: the screen texture is converted and uploaded only when a new
+  frame was emulated.
+- Both cores return every audio sample a frame produced instead of dropping
+  the fractional sample every few frames (0.1-0.3 % deficit, audible as
+  periodic clicks).
+- GBA audio was silent: the bus never routed sound-register writes to the
+  APU. The APU now lives on the bus; PSG registers are decoded per GBATEK
+  (frequency, duty, length, envelope, noise divider and shift, wave RAM
+  banks and 64-sample mode, SOUNDCNT_L/H routing and volumes, SOUNDCNT_X
+  master enable, SOUNDBIAS), channels and the frame sequencer are clocked
+  in CPU cycles, and mixing is integer-only in the hardware's 10-bit units.
+  Save-state format is now version 6.
+
 ## [0.1.0] - 2026-09-14
 
 First release: GB, GBC and GBA on desktop, command line and in the
