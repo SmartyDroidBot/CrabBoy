@@ -65,6 +65,10 @@ jobs:
       - name: Fetch test suites
         run: cargo run --release --locked -p crab-cli --bin fetch_test_roms
 
+      - name: Accuracy suites match the recorded baseline
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --release --locked -p crab-cli --bin accuracy -- --ci
+
       - name: Smoke-run test ROMs and record frame hashes
         shell: bash
         run: |
