@@ -547,6 +547,7 @@ impl Bus {
                     // CPU until an enabled interrupt arrives.
                     0x301 => self.io.halt_requested = true,
                     0xA0..=0xA7 => self.apu.push_fifo_byte(off, value as u8),
+                    0x60..=0x81 if !self.apu.master_enabled() => {}
                     0x60..=0x9F => {
                         // Merge the byte into the register shadow and hand the
                         // whole halfword to the APU.
@@ -598,8 +599,19 @@ impl Bus {
             }
             Region::Io => {
                 let off = base & 0x3FF;
+                if (0x60..=0x81).contains(&off) && !self.apu.master_enabled() {
+                    return;
+                }
                 self.io.write16(off, value as u16);
                 match off {
+                    0x84 => {
+                        self.apu.write16(off, value as u16);
+                        if !self.apu.master_enabled() {
+                            // The PSG registers read back as zero after a
+                            // power-off.
+                            self.io.regs[0x60..0x82].fill(0);
+                        }
+                    }
                     0x60..=0xA7 => self.apu.write16(off, value as u16),
                     0xB0..=0xDF => self.dma.write16(off, value as u16),
                     0x100..=0x110 => self.write_timer(off, value as u16),
