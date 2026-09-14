@@ -17,7 +17,7 @@ crates/
 platforms/
   desktop/         egui desktop app ("CrabBoy")
   cli/             `crab` headless runner plus developer tools
-                   (fetch_test_roms, gba-diag, gba-disasm, test_runner, ...)
+                   (accuracy, fetch_test_roms, gba-diag, gba-disasm, ...)
   wasm/            wasm-bindgen bindings and the browser demo (web/)
 docs/
   gba/             Verified hardware notes (boot, BIOS, DMA, I/O, RTC) and the

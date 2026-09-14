@@ -15,21 +15,13 @@ name = "crab"
 path = "src/bin/crab.rs"
 
 [[bin]]
-name = "test_runner"
-path = "src/bin/test_runner.rs"
-
-[[bin]]
-name = "probe"
-path = "src/bin/probe.rs"
-
-[[bin]]
-name = "run_accuracy"
-path = "src/bin/run_accuracy.rs"
-
-[[bin]]
 name = "render_logo"
 path = "src/bin/render_logo.rs"
 required-features = ["logo-tools"]
+
+[[bin]]
+name = "accuracy"
+path = "src/bin/accuracy.rs"
 
 [[bin]]
 name = "fetch_test_roms"

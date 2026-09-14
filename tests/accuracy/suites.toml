@@ -1,0 +1,118 @@
+# Test suites the `accuracy` runner executes. Paths are relative to the
+# suites root (`roms/test-suites/gb`, filled by `fetch_test_roms`).
+#
+# kind:
+#   blargg-serial   pass when "Passed" is printed on the serial port
+#   blargg-memory   pass when the status byte at $A000 becomes 0 after the
+#                   DE B0 61 signature appears at $A001
+#   ldbb            pass when `ld b,b` runs with B,C,D,E,H,L = 3,5,8,13,21,34
+#   screenshot      run until `ld b,b` (or the frame budget), then compare
+#                   the frame with the reference PNG (`reference` is a
+#                   template with {dir} and {stem})
+# model: dmg | cgb | auto (header); ldbb suites also honour mooneye's
+# filename hints (-GS, -C, -S, dmg0, mgb, -A).
+
+[[suite]]
+name = "blargg-cpu"
+kind = "blargg-serial"
+model = "dmg"
+frames = 2400
+roms = [
+    "blargg/cpu_instrs/cpu_instrs.gb",
+    "blargg/instr_timing/instr_timing.gb",
+    "blargg/mem_timing/mem_timing.gb",
+    "blargg/mem_timing-2/mem_timing.gb",
+]
+
+[[suite]]
+name = "blargg-cpu-individual"
+kind = "blargg-serial"
+model = "dmg"
+frames = 1800
+glob = "blargg/cpu_instrs/individual/*.gb"
+
+[[suite]]
+name = "blargg-sound"
+kind = "blargg-memory"
+model = "auto"
+frames = 2700
+roms = [
+    "blargg/dmg_sound/dmg_sound.gb",
+    "blargg/cgb_sound/cgb_sound.gb",
+    "blargg/oam_bug/oam_bug.gb",
+]
+
+[[suite]]
+name = "blargg-sound-singles"
+kind = "blargg-memory"
+model = "auto"
+frames = 900
+glob = "blargg/{dmg_sound,cgb_sound,oam_bug}/rom_singles/*.gb"
+
+[[suite]]
+name = "blargg-screens"
+kind = "screenshot"
+model = "dmg"
+frames = 300
+roms = ["blargg/halt_bug.gb", "blargg/interrupt_time/interrupt_time.gb"]
+reference = "{dir}/{stem}-dmg.png"
+reference_alt = "{dir}/{stem}-dmg-cgb.png"
+
+[[suite]]
+name = "mooneye-acceptance"
+kind = "ldbb"
+model = "dmg"
+frames = 7200
+glob = "mooneye-test-suite/acceptance/**/*.gb"
+
+[[suite]]
+name = "mooneye-emulator-only"
+kind = "ldbb"
+model = "dmg"
+frames = 7200
+glob = "mooneye-test-suite/emulator-only/**/*.gb"
+
+[[suite]]
+name = "mooneye-misc"
+kind = "ldbb"
+model = "cgb"
+frames = 7200
+glob = "mooneye-test-suite/misc/**/*.gb"
+
+[[suite]]
+name = "same-suite"
+kind = "ldbb"
+model = "cgb"
+frames = 7200
+glob = "same-suite/{apu,dma,interrupt,ppu}/**/*.gb"
+
+[[suite]]
+name = "acid2"
+kind = "screenshot"
+model = "auto"
+frames = 600
+roms = ["dmg-acid2/dmg-acid2.gb", "cgb-acid2/cgb-acid2.gbc"]
+reference = "{dir}/{stem}-dmg.png"
+reference_alt = "{dir}/{stem}.png"
+
+[[suite]]
+name = "mealybug-ppu-dmg"
+kind = "screenshot"
+model = "dmg"
+frames = 600
+glob = "mealybug-tearoom-tests/ppu/*.gb"
+reference = "{dir}/{stem}_dmg_blob.png"
+
+[[suite]]
+name = "mealybug-ppu-cgb"
+kind = "screenshot"
+model = "cgb"
+frames = 600
+glob = "mealybug-tearoom-tests/ppu/*.gb"
+reference = "{dir}/{stem}_cgb_c.png"
+
+[[suite]]
+name = "jsmolka-gba"
+kind = "gba-jsmolka"
+frames = 2000
+glob = "../gba/jsmolka/{arm,thumb,memory,bios,save}/*.gba"
