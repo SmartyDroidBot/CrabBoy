@@ -73,6 +73,10 @@ pub struct Io {
     /// Set by a write to HALTCNT (0x04000301); the system root reads and
     /// clears it to halt the CPU.
     pub halt_requested: bool,
+    /// Set when a BG2X/BG2Y/BG3X/BG3Y register is written; the PPU copies
+    /// the new reference point into its internal counters before the next
+    /// scanline (the hardware latches on write, not only at VBlank).
+    pub affine_dirty: bool,
     /// When true, every write is recorded in `write_log` (diagnostics).
     #[cfg(feature = "trace")]
     pub log_writes: bool,
@@ -92,6 +96,7 @@ impl Default for Io {
             ime: false,
             vcount: 0,
             halt_requested: false,
+            affine_dirty: false,
             #[cfg(feature = "trace")]
             log_writes: false,
             #[cfg(feature = "trace")]
@@ -180,6 +185,9 @@ impl Io {
     /// Write a 16-bit I/O register.
     pub fn write16(&mut self, offset: usize, value: u16) {
         self.trace_write(offset, 2, value);
+        if matches!(offset, 0x28..=0x2F | 0x38..=0x3F) {
+            self.affine_dirty = true;
+        }
         match offset {
             KEYINPUT | 0x06 => {}
             DISPSTAT => {

@@ -224,8 +224,13 @@ impl Gba {
         let in_vblank = (ppu::VISIBLE_LINES..ppu::LINES_PER_FRAME - 1).contains(&y);
         let vblank_flag = if in_vblank { 1 } else { 0 };
 
-        // Render the visible line.
+        // Render the visible line. A reference point written since the last
+        // line takes effect now.
         if y < ppu::VISIBLE_LINES {
+            if self.bus.io.affine_dirty {
+                self.bus.io.affine_dirty = false;
+                self.ppu.reload_affine_refs(&self.bus);
+            }
             self.ppu.render_scanline(&self.bus, y);
         }
 
