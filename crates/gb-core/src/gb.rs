@@ -118,9 +118,7 @@ impl Gb {
 
         let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
         if self.cpu.ime && pending != 0 {
-            let cycles = self.cpu.take_interrupt(&mut self.bus);
-            self.bus.step(cycles);
-            return cycles;
+            return self.cpu.take_interrupt(&mut self.bus);
         }
 
         // EI enables interrupts only *after* the instruction following EI runs,
@@ -129,16 +127,9 @@ impl Gb {
         // the pending flag), the following instruction has now completed and IME
         // may be enabled. This is also why `EI; DI` leaves IME disabled.
         let was_ei = self.cpu.ei_pending;
-        let cycles = self.cpu.execute(&mut self.bus);
-        self.bus.step(cycles);
-
-        // DMA holds the CPU for 160 M-cycles; drain any transfer that started
-        // during this instruction (or is still in flight) before continuing.
-        let mut total = cycles;
-        while self.bus.dma_active() {
-            self.bus.step(4);
-            total += 4;
-        }
+        // The CPU advances the bus itself, one M-cycle per memory access or
+        // internal cycle, so devices see every access at its true time.
+        let total = self.cpu.execute(&mut self.bus);
 
         if was_ei && self.cpu.ei_pending {
             self.cpu.ime = true;

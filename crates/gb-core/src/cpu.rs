@@ -18,6 +18,8 @@ pub struct Cpu {
     pub ei_pending: bool,
     /// Set when `ld b,b` executes; test ROMs use the opcode as a breakpoint.
     pub breakpoint: bool,
+    /// T-cycles the bus was advanced during the current instruction.
+    pub(crate) ticked: u32,
     pub halted: bool,
     pub stopped: bool,
     pub(crate) halt_bug: bool,
@@ -43,6 +45,7 @@ impl Cpu {
             stopped: false,
             halt_bug: false,
             breakpoint: false,
+            ticked: 0,
             timer_interrupts: 0,
         }
     }
@@ -118,9 +121,30 @@ impl Cpu {
         self.f = (v & 0xF0) as u8;
     }
 
+    /// Advance the machine by one M-cycle (4 T-cycles) without a bus access.
+    #[inline]
+    fn internal(&mut self, bus: &mut Bus) {
+        bus.step(4);
+        self.ticked += 4;
+    }
+
+    /// One M-cycle that reads `addr` at its end.
+    #[inline]
+    fn read8(&mut self, bus: &mut Bus, addr: u16) -> u8 {
+        self.internal(bus);
+        bus.read(addr)
+    }
+
+    /// One M-cycle that writes `addr` at its end.
+    #[inline]
+    fn write8(&mut self, bus: &mut Bus, addr: u16, v: u8) {
+        self.internal(bus);
+        bus.write(addr, v);
+    }
+
     #[inline]
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
-        let v = bus.read(self.pc);
+        let v = self.read8(bus, self.pc);
         self.pc = self.pc.wrapping_add(1);
         v
     }
@@ -132,19 +156,21 @@ impl Cpu {
         (hi as u16) << 8 | lo as u16
     }
 
+    /// PUSH: the internal cycle precedes the two writes.
     #[inline]
     fn push16(&mut self, bus: &mut Bus, v: u16) {
+        self.internal(bus);
         self.sp = self.sp.wrapping_sub(1);
-        bus.write(self.sp, (v >> 8) as u8);
+        self.write8(bus, self.sp, (v >> 8) as u8);
         self.sp = self.sp.wrapping_sub(1);
-        bus.write(self.sp, v as u8);
+        self.write8(bus, self.sp, v as u8);
     }
 
     #[inline]
     fn pop16(&mut self, bus: &mut Bus) -> u16 {
-        let lo = bus.read(self.sp);
+        let lo = self.read8(bus, self.sp);
         self.sp = self.sp.wrapping_add(1);
-        let hi = bus.read(self.sp);
+        let hi = self.read8(bus, self.sp);
         self.sp = self.sp.wrapping_add(1);
         (hi as u16) << 8 | lo as u16
     }
@@ -156,6 +182,7 @@ impl Cpu {
         let was_bugged = self.halt_bug;
         self.halt_bug = false;
         let pc = self.pc;
+        self.ticked = 0;
         let op = self.fetch8(bus);
         if op == 0x40 {
             self.breakpoint = true;
@@ -189,13 +216,18 @@ impl Cpu {
                 );
             }
         }
-        let cycles = self.exec_opcode(op, bus);
+        let expected = self.exec_opcode(op, bus);
+        debug_assert_eq!(
+            self.ticked, expected,
+            "opcode {op:02X} at {pc:04X} ticked {} cycles, expected {expected}",
+            self.ticked
+        );
         // HALT bug: the instruction following a bugged HALT runs twice, so PC is
         // rewound after it (the flag was captured at the top of this call).
         if was_bugged {
             self.pc = self.pc.wrapping_sub(1);
         }
-        cycles
+        self.ticked
     }
 
     #[allow(unused_assignments)]
@@ -210,11 +242,12 @@ impl Cpu {
             0x02 => {
                 let v = self.a;
                 let a = self.bc();
-                bus.write(a, v);
+                self.write8(bus, a, v);
                 8
             }
             0x03 => {
                 self.set_bc(self.bc().wrapping_add(1));
+                self.internal(bus);
                 8
             }
             0x04 => self.inc_b(),
@@ -229,17 +262,21 @@ impl Cpu {
             }
             0x08 => {
                 let addr = self.fetch16(bus);
-                bus.write(addr, self.sp as u8);
-                bus.write(addr.wrapping_add(1), (self.sp >> 8) as u8);
+                self.write8(bus, addr, self.sp as u8);
+                self.write8(bus, addr.wrapping_add(1), (self.sp >> 8) as u8);
                 20
             }
-            0x09 => self.add_hl_bc(),
+            0x09 => {
+                self.internal(bus);
+                self.add_hl_bc()
+            }
             0x0A => {
-                self.a = bus.read(self.bc());
+                self.a = self.read8(bus, self.bc());
                 8
             }
             0x0B => {
                 self.set_bc(self.bc().wrapping_sub(1));
+                self.internal(bus);
                 8
             }
             0x0C => self.inc_c(),
@@ -256,7 +293,7 @@ impl Cpu {
                 // STOP: consume the padding byte, then stop until a button press.
                 self.fetch8(bus);
                 self.stopped = true;
-                4
+                8
             }
             0x11 => {
                 let v = self.fetch16(bus);
@@ -266,11 +303,12 @@ impl Cpu {
             0x12 => {
                 let v = self.a;
                 let a = self.de();
-                bus.write(a, v);
+                self.write8(bus, a, v);
                 8
             }
             0x13 => {
                 self.set_de(self.de().wrapping_add(1));
+                self.internal(bus);
                 8
             }
             0x14 => self.inc_d(),
@@ -285,16 +323,21 @@ impl Cpu {
             }
             0x18 => {
                 let n = self.fetch8(bus) as i8;
+                self.internal(bus);
                 self.pc = self.pc.wrapping_add_signed(n as i16);
                 12
             }
-            0x19 => self.add_hl_de(),
+            0x19 => {
+                self.internal(bus);
+                self.add_hl_de()
+            }
             0x1A => {
-                self.a = bus.read(self.de());
+                self.a = self.read8(bus, self.de());
                 8
             }
             0x1B => {
                 self.set_de(self.de().wrapping_sub(1));
+                self.internal(bus);
                 8
             }
             0x1C => self.inc_e(),
@@ -311,6 +354,7 @@ impl Cpu {
                 let n = self.fetch8(bus) as i8;
                 if !self.z() {
                     self.pc = self.pc.wrapping_add_signed(n as i16);
+                    self.internal(bus);
                     12
                 } else {
                     8
@@ -324,12 +368,13 @@ impl Cpu {
             0x22 => {
                 let v = self.a;
                 let a = self.hl();
-                bus.write(a, v);
+                self.write8(bus, a, v);
                 self.set_hl(a.wrapping_add(1));
                 8
             }
             0x23 => {
                 self.set_hl(self.hl().wrapping_add(1));
+                self.internal(bus);
                 8
             }
             0x24 => self.inc_h(),
@@ -343,20 +388,25 @@ impl Cpu {
                 let n = self.fetch8(bus) as i8;
                 if self.z() {
                     self.pc = self.pc.wrapping_add_signed(n as i16);
+                    self.internal(bus);
                     12
                 } else {
                     8
                 }
             }
-            0x29 => self.add_hl_hl(),
+            0x29 => {
+                self.internal(bus);
+                self.add_hl_hl()
+            }
             0x2A => {
                 let a = self.hl();
-                self.a = bus.read(a);
+                self.a = self.read8(bus, a);
                 self.set_hl(a.wrapping_add(1));
                 8
             }
             0x2B => {
                 self.set_hl(self.hl().wrapping_sub(1));
+                self.internal(bus);
                 8
             }
             0x2C => self.inc_l(),
@@ -375,6 +425,7 @@ impl Cpu {
                 let n = self.fetch8(bus) as i8;
                 if !self.c() {
                     self.pc = self.pc.wrapping_add_signed(n as i16);
+                    self.internal(bus);
                     12
                 } else {
                     8
@@ -387,12 +438,13 @@ impl Cpu {
             0x32 => {
                 let v = self.a;
                 let a = self.hl();
-                bus.write(a, v);
+                self.write8(bus, a, v);
                 self.set_hl(a.wrapping_sub(1));
                 8
             }
             0x33 => {
                 self.sp = self.sp.wrapping_add(1);
+                self.internal(bus);
                 8
             }
             0x34 => self.inc_hl(bus),
@@ -400,7 +452,7 @@ impl Cpu {
             0x36 => {
                 let v = self.fetch8(bus);
                 let a = self.hl();
-                bus.write(a, v);
+                self.write8(bus, a, v);
                 12
             }
             0x37 => {
@@ -413,20 +465,25 @@ impl Cpu {
                 let n = self.fetch8(bus) as i8;
                 if self.c() {
                     self.pc = self.pc.wrapping_add_signed(n as i16);
+                    self.internal(bus);
                     12
                 } else {
                     8
                 }
             }
-            0x39 => self.add_hl_sp(),
+            0x39 => {
+                self.internal(bus);
+                self.add_hl_sp()
+            }
             0x3A => {
                 let a = self.hl();
-                self.a = bus.read(a);
+                self.a = self.read8(bus, a);
                 self.set_hl(a.wrapping_sub(1));
                 8
             }
             0x3B => {
                 self.sp = self.sp.wrapping_sub(1);
+                self.internal(bus);
                 8
             }
             0x3C => self.inc_a(),
@@ -464,7 +521,7 @@ impl Cpu {
                 4
             }
             0x46 => {
-                self.b = bus.read(self.hl());
+                self.b = self.read8(bus, self.hl());
                 8
             }
             0x47 => {
@@ -493,7 +550,7 @@ impl Cpu {
                 4
             }
             0x4E => {
-                self.c = bus.read(self.hl());
+                self.c = self.read8(bus, self.hl());
                 8
             }
             0x4F => {
@@ -522,7 +579,7 @@ impl Cpu {
                 4
             }
             0x56 => {
-                self.d = bus.read(self.hl());
+                self.d = self.read8(bus, self.hl());
                 8
             }
             0x57 => {
@@ -551,7 +608,7 @@ impl Cpu {
                 4
             }
             0x5E => {
-                self.e = bus.read(self.hl());
+                self.e = self.read8(bus, self.hl());
                 8
             }
             0x5F => {
@@ -580,7 +637,7 @@ impl Cpu {
                 4
             }
             0x66 => {
-                self.h = bus.read(self.hl());
+                self.h = self.read8(bus, self.hl());
                 8
             }
             0x67 => {
@@ -609,7 +666,7 @@ impl Cpu {
             }
             0x6D => 4,
             0x6E => {
-                self.l = bus.read(self.hl());
+                self.l = self.read8(bus, self.hl());
                 8
             }
             0x6F => {
@@ -618,32 +675,32 @@ impl Cpu {
             }
             0x70 => {
                 let v = self.b;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x71 => {
                 let v = self.c;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x72 => {
                 let v = self.d;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x73 => {
                 let v = self.e;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x74 => {
                 let v = self.h;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x75 => {
                 let v = self.l;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x76 => {
@@ -662,7 +719,7 @@ impl Cpu {
             }
             0x77 => {
                 let v = self.a;
-                bus.write(self.hl(), v);
+                self.write8(bus, self.hl(), v);
                 8
             }
             0x78 => {
@@ -690,7 +747,7 @@ impl Cpu {
                 4
             }
             0x7E => {
-                self.a = bus.read(self.hl());
+                self.a = self.read8(bus, self.hl());
                 8
             }
             0x7F => 4,
@@ -701,7 +758,7 @@ impl Cpu {
             0x84 => self.add_a(self.h),
             0x85 => self.add_a(self.l),
             0x86 => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.add_a(v);
                 8
             }
@@ -713,7 +770,7 @@ impl Cpu {
             0x8C => self.adc_a(self.h),
             0x8D => self.adc_a(self.l),
             0x8E => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.adc_a(v);
                 8
             }
@@ -725,7 +782,7 @@ impl Cpu {
             0x94 => self.sub_a(self.h),
             0x95 => self.sub_a(self.l),
             0x96 => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.sub_a(v);
                 8
             }
@@ -737,7 +794,7 @@ impl Cpu {
             0x9C => self.sbc_a(self.h),
             0x9D => self.sbc_a(self.l),
             0x9E => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.sbc_a(v);
                 8
             }
@@ -749,7 +806,7 @@ impl Cpu {
             0xA4 => self.and_a(self.h),
             0xA5 => self.and_a(self.l),
             0xA6 => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.and_a(v);
                 8
             }
@@ -761,7 +818,7 @@ impl Cpu {
             0xAC => self.xor_a(self.h),
             0xAD => self.xor_a(self.l),
             0xAE => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.xor_a(v);
                 8
             }
@@ -773,7 +830,7 @@ impl Cpu {
             0xB4 => self.or_a(self.h),
             0xB5 => self.or_a(self.l),
             0xB6 => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.or_a(v);
                 8
             }
@@ -785,14 +842,16 @@ impl Cpu {
             0xBC => self.cp_a(self.h),
             0xBD => self.cp_a(self.l),
             0xBE => {
-                let v = bus.read(self.hl());
+                let v = self.read8(bus, self.hl());
                 self.cp_a(v);
                 8
             }
             0xBF => self.cp_a(self.a),
             0xC0 => {
+                self.internal(bus);
                 if !self.z() {
                     self.pc = self.pop16(bus);
+                    self.internal(bus);
                     20
                 } else {
                     8
@@ -807,6 +866,7 @@ impl Cpu {
                 let n = self.fetch16(bus);
                 if !self.z() {
                     self.pc = n;
+                    self.internal(bus);
                     16
                 } else {
                     12
@@ -814,6 +874,7 @@ impl Cpu {
             }
             0xC3 => {
                 self.pc = self.fetch16(bus);
+                self.internal(bus);
                 16
             }
             0xC4 => {
@@ -841,8 +902,10 @@ impl Cpu {
                 16
             }
             0xC8 => {
+                self.internal(bus);
                 if self.z() {
                     self.pc = self.pop16(bus);
+                    self.internal(bus);
                     20
                 } else {
                     8
@@ -850,12 +913,14 @@ impl Cpu {
             }
             0xC9 => {
                 self.pc = self.pop16(bus);
+                self.internal(bus);
                 16
             }
             0xCA => {
                 let n = self.fetch16(bus);
                 if self.z() {
                     self.pc = n;
+                    self.internal(bus);
                     16
                 } else {
                     12
@@ -887,8 +952,10 @@ impl Cpu {
                 16
             }
             0xD0 => {
+                self.internal(bus);
                 if !self.c() {
                     self.pc = self.pop16(bus);
+                    self.internal(bus);
                     20
                 } else {
                     8
@@ -903,6 +970,7 @@ impl Cpu {
                 let n = self.fetch16(bus);
                 if !self.c() {
                     self.pc = n;
+                    self.internal(bus);
                     16
                 } else {
                     12
@@ -933,8 +1001,10 @@ impl Cpu {
                 16
             }
             0xD8 => {
+                self.internal(bus);
                 if self.c() {
                     self.pc = self.pop16(bus);
+                    self.internal(bus);
                     20
                 } else {
                     8
@@ -942,6 +1012,7 @@ impl Cpu {
             }
             0xD9 => {
                 self.pc = self.pop16(bus);
+                self.internal(bus);
                 self.ime = true;
                 16
             }
@@ -949,6 +1020,7 @@ impl Cpu {
                 let n = self.fetch16(bus);
                 if self.c() {
                     self.pc = n;
+                    self.internal(bus);
                     16
                 } else {
                     12
@@ -975,7 +1047,7 @@ impl Cpu {
             }
             0xE0 => {
                 let a = 0xFF00 | self.fetch8(bus) as u16;
-                bus.write(a, self.a);
+                self.write8(bus, a, self.a);
                 12
             }
             0xE1 => {
@@ -985,7 +1057,7 @@ impl Cpu {
             }
             0xE2 => {
                 let a = 0xFF00 | self.c as u16;
-                bus.write(a, self.a);
+                self.write8(bus, a, self.a);
                 8
             }
             0xE5 => {
@@ -1004,6 +1076,8 @@ impl Cpu {
             }
             0xE8 => {
                 let n = self.fetch8(bus) as i8;
+                self.internal(bus);
+                self.internal(bus);
                 let sp = self.sp;
                 let r = (sp as i32).wrapping_add(n as i32) as u16;
                 let a = (sp & 0xFF) as u8;
@@ -1021,7 +1095,7 @@ impl Cpu {
             }
             0xEA => {
                 let a = self.fetch16(bus);
-                bus.write(a, self.a);
+                self.write8(bus, a, self.a);
                 16
             }
             0xEE => {
@@ -1035,7 +1109,7 @@ impl Cpu {
             }
             0xF0 => {
                 let a = 0xFF00 | self.fetch8(bus) as u16;
-                self.a = bus.read(a);
+                self.a = self.read8(bus, a);
                 12
             }
             0xF1 => {
@@ -1045,7 +1119,7 @@ impl Cpu {
             }
             0xF2 => {
                 let a = 0xFF00 | self.c as u16;
-                self.a = bus.read(a);
+                self.a = self.read8(bus, a);
                 8
             }
             0xF3 => {
@@ -1069,6 +1143,7 @@ impl Cpu {
             }
             0xF8 => {
                 let n = self.fetch8(bus) as i8;
+                self.internal(bus);
                 let sp = self.sp;
                 let r = (sp as i32).wrapping_add(n as i32) as u16;
                 let a = (sp & 0xFF) as u8;
@@ -1082,11 +1157,12 @@ impl Cpu {
             }
             0xF9 => {
                 self.sp = self.hl();
+                self.internal(bus);
                 8
             }
             0xFA => {
                 let a = self.fetch16(bus);
-                self.a = bus.read(a);
+                self.a = self.read8(bus, a);
                 16
             }
             0xFB => {
@@ -1107,10 +1183,10 @@ impl Cpu {
                 self.exec_cb(sub, bus)
             }
             // Undefined opcodes act as 2-byte NOPs on real DMG hardware: they
-            // consume the following byte and do nothing else (4 cycles).
+            // consume the following byte and do nothing else.
             _ => {
                 self.fetch8(bus);
-                4
+                8
             }
         }
     }
@@ -1249,8 +1325,8 @@ impl Cpu {
     #[inline]
     fn inc_hl(&mut self, bus: &mut Bus) -> u32 {
         let a = self.hl();
-        let v = bus.read(a).wrapping_add(1);
-        bus.write(a, v);
+        let v = self.read8(bus, a).wrapping_add(1);
+        self.write8(bus, a, v);
         self.set_z(v == 0);
         self.set_n(false);
         self.set_h(v & 0x0F == 0x00);
@@ -1259,8 +1335,8 @@ impl Cpu {
     #[inline]
     fn dec_hl(&mut self, bus: &mut Bus) -> u32 {
         let a = self.hl();
-        let v = bus.read(a).wrapping_sub(1);
-        bus.write(a, v);
+        let v = self.read8(bus, a).wrapping_sub(1);
+        self.write8(bus, a, v);
         self.set_z(v == 0);
         self.set_n(true);
         self.set_h(v & 0x0F == 0x0F);
@@ -1438,7 +1514,7 @@ impl Cpu {
         }
     }
 
-    fn read_reg_or_hl(&self, bus: &mut Bus, idx: u8) -> u8 {
+    fn read_reg_or_hl(&mut self, bus: &mut Bus, idx: u8) -> u8 {
         match idx {
             0 => self.b,
             1 => self.c,
@@ -1446,7 +1522,7 @@ impl Cpu {
             3 => self.e,
             4 => self.h,
             5 => self.l,
-            6 => bus.read(self.hl()),
+            6 => self.read8(bus, self.hl()),
             7 => self.a,
             _ => unreachable!(),
         }
@@ -1460,7 +1536,7 @@ impl Cpu {
             3 => self.e = v,
             4 => self.h = v,
             5 => self.l = v,
-            6 => bus.write(self.hl(), v),
+            6 => self.write8(bus, self.hl(), v),
             7 => self.a = v,
             _ => unreachable!(),
         }
@@ -1612,16 +1688,31 @@ impl Cpu {
         if pending == 0 {
             return 0;
         }
-        let bit = pending.trailing_zeros() as usize;
-        if bit == 2 {
-            self.timer_interrupts += 1;
-        }
+        self.ticked = 0;
         self.ime = false;
         self.halted = false;
-        bus.io[0x0F] &= !(1 << bit);
-        self.push16(bus, self.pc);
-        self.pc = VECTORS[bit];
-        20
+        // Two internal cycles, then PC is pushed. The push of the high byte
+        // can overwrite IE (SP = $0000), so the vector is chosen from the
+        // flags as they stand after it; nothing left selects vector $0000.
+        self.internal(bus);
+        self.internal(bus);
+        self.sp = self.sp.wrapping_sub(1);
+        self.write8(bus, self.sp, (self.pc >> 8) as u8);
+        let pending = bus.io[0x0F] & bus.ie & 0x1F;
+        self.sp = self.sp.wrapping_sub(1);
+        self.write8(bus, self.sp, self.pc as u8);
+        self.internal(bus);
+        if pending == 0 {
+            self.pc = 0;
+        } else {
+            let bit = pending.trailing_zeros() as usize;
+            if bit == 2 {
+                self.timer_interrupts += 1;
+            }
+            bus.io[0x0F] &= !(1 << bit);
+            self.pc = VECTORS[bit];
+        }
+        self.ticked
     }
 }
 
@@ -1732,7 +1823,7 @@ mod tests {
         bus.cart.rom[0x0100] = 0xD3; // undefined
         bus.cart.rom[0x0101] = 0xAA; // consumed padding
         bus.cart.rom[0x0102] = 0x00; // nop
-        assert_eq!(cpu.execute(&mut bus), 4);
+        assert_eq!(cpu.execute(&mut bus), 8);
         assert_eq!(cpu.pc, 0x0102, "undefined opcode consumes the padding byte");
         assert_eq!(cpu.execute(&mut bus), 4);
         assert_eq!(cpu.pc, 0x0103);

@@ -184,6 +184,7 @@ fn load_cpu(r: &mut Reader) -> Result<Cpu, String> {
         stopped: r.bool()?,
         halt_bug: r.bool()?,
         breakpoint: false,
+        ticked: 0,
         timer_interrupts: r.u64()?,
     })
 }
