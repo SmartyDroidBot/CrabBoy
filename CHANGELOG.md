@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-14
+
+GBA conformance release: the jsmolka CPU, memory, BIOS and save suites
+pass, Pokémon Emerald and Ruby render and sound correctly.
+
 ### Fixed
 - GBA CPU: the jsmolka arm and thumb suites pass. SBC/RSC/ADC carry and
   overflow, ASR of negative values, register-specified shifts by zero,
