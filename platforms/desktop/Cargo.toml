@@ -17,3 +17,6 @@ rfd = "0.15"
 rodio = "0.19"
 emu-core = { workspace = true }
 crab-systems = { workspace = true }
+
+[build-dependencies]
+winresource = "0.1"

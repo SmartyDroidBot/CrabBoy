@@ -76,6 +76,9 @@ jobs:
             cp target/${{ matrix.target }}/release/CrabBoy target/${{ matrix.target }}/release/crab "dist/$name/"
           fi
           cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            cp assets/icon-256.png "dist/$name/crabboy.png"
+          fi
           mkdir -p uploads
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd dist && 7z a -tzip "../uploads/$name.zip" "$name" > /dev/null)

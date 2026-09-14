@@ -11,6 +11,9 @@ const WIN_H: f32 = 160.0 * 3.0;
 const MIN_W: f32 = 240.0 * 2.0;
 const MIN_H: f32 = 144.0 * 2.0;
 
+/// The window icon (the crab-and-console crop of the project logo).
+const APP_ICON: &[u8] = include_bytes!("../../../assets/icon-256.png");
+
 fn sav_path_for(rom: &str) -> Option<String> {
     let p = std::path::Path::new(rom);
     p.extension()?;
@@ -666,11 +669,16 @@ fn main() -> eframe::Result<()> {
         }
         (rom, bios)
     };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([WIN_W, WIN_H + 60.0])
+        .with_min_inner_size([MIN_W, MIN_H + 40.0])
+        .with_title("CrabBoy Emulator");
+    match eframe::icon_data::from_png_bytes(APP_ICON) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => eprintln!("warning: could not decode the embedded app icon: {e}"),
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WIN_W, WIN_H + 60.0])
-            .with_min_inner_size([MIN_W, MIN_H + 40.0])
-            .with_title("CrabBoy Emulator"),
+        viewport,
         ..Default::default()
     };
     let audio = OutputStream::try_default()
