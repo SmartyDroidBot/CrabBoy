@@ -580,13 +580,15 @@ fn main() {
         }
     }
     if let Some(p) = &o.dump_vram {
-        // Palette RAM (1 KB), VRAM (96 KB) and OAM (1 KB), back to back.
-        let mut out = Vec::with_capacity(0x18800);
+        // Palette RAM (1 KB), VRAM (96 KB), OAM (1 KB) and the I/O registers
+        // (1 KB), back to back.
+        let mut out = Vec::with_capacity(0x18C00);
         out.extend_from_slice(gba.bus.palram.as_ref());
         out.extend_from_slice(gba.bus.vram.as_ref());
         out.extend_from_slice(gba.bus.oam.as_ref());
+        out.extend_from_slice(&gba.bus.io.regs);
         match std::fs::write(p, &out) {
-            Ok(()) => println!("dumped palette, vram and oam to {p}"),
+            Ok(()) => println!("dumped palette, vram, oam and io to {p}"),
             Err(e) => eprintln!("failed to write {p}: {e}"),
         }
     }
