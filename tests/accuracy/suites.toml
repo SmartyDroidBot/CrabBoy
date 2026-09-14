@@ -16,13 +16,21 @@
 name = "blargg-cpu"
 kind = "blargg-serial"
 model = "dmg"
-frames = 2400
+# cpu_instrs needs about 55 seconds of emulated time.
+frames = 3600
 roms = [
     "blargg/cpu_instrs/cpu_instrs.gb",
     "blargg/instr_timing/instr_timing.gb",
     "blargg/mem_timing/mem_timing.gb",
-    "blargg/mem_timing-2/mem_timing.gb",
 ]
+
+# mem_timing-2 reports through memory ($A000) rather than the serial port.
+[[suite]]
+name = "blargg-cpu-memory"
+kind = "blargg-memory"
+model = "dmg"
+frames = 1800
+roms = ["blargg/mem_timing-2/mem_timing.gb"]
 
 [[suite]]
 name = "blargg-cpu-individual"
