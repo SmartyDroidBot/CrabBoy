@@ -175,19 +175,14 @@ impl Ppu {
             if !enabled {
                 continue;
             }
+            // Mode 0: four text layers; mode 1: BG0/BG1 text + BG2 affine;
+            // mode 2: BG2/BG3 affine; modes 3-5: BG2 bitmap.
             match mode {
                 0 => self.render_text(bus, bg, y),
-                1 => {
-                    if bg <= 1 {
-                        self.render_text(bus, bg, y);
-                    } else {
-                        self.render_affine(bus, bg);
-                    }
-                }
-                2 => self.render_affine(bus, bg),
-                3..=5 if bg == 2 => {
-                    self.render_bitmap(bus, mode, y);
-                }
+                1 if bg <= 1 => self.render_text(bus, bg, y),
+                1 if bg == 2 => self.render_affine(bus, bg),
+                2 if bg >= 2 => self.render_affine(bus, bg),
+                3..=5 if bg == 2 => self.render_bitmap(bus, mode, y),
                 _ => {}
             }
         }
@@ -266,10 +261,12 @@ impl Ppu {
             let entry_addr = map + screen_idx * 0x800 + (local_ty * 32 + local_tx) * 2;
             let entry = Self::vram16(bus, entry_addr);
 
+            // Screen entry: tile 0-9, horizontal flip 10, vertical flip 11,
+            // palette bank 12-15.
             let tile = (entry & 0x3FF) as usize;
-            let pal_bank = ((entry >> 10) & 0xF) as usize;
-            let hflip = entry & (1 << 12) != 0;
-            let vflip = entry & (1 << 13) != 0;
+            let hflip = entry & (1 << 10) != 0;
+            let vflip = entry & (1 << 11) != 0;
+            let pal_bank = ((entry >> 12) & 0xF) as usize;
 
             let mut px = (sx % 8) as usize;
             let mut py = (sy % 8) as usize;
@@ -405,7 +402,12 @@ impl Ppu {
 
     /// Render sprites (OBJ) into the OBJ layer buffer.
     fn render_obj(&mut self, bus: &Bus, y: u32, disp: u16) {
-        const SIZES: [[usize; 4]; 3] = [[8, 16, 32, 64], [16, 32, 32, 64], [8, 8, 16, 32]];
+        // (width, height) per shape (square, horizontal, vertical) and size.
+        const SIZES: [[(usize, usize); 4]; 3] = [
+            [(8, 8), (16, 16), (32, 32), (64, 64)],
+            [(16, 8), (32, 8), (32, 16), (64, 32)],
+            [(8, 16), (8, 32), (16, 32), (32, 64)],
+        ];
         let obj_1d = disp & (1 << 6) != 0;
         let mosaic_reg = Self::reg16(bus, 0x4C);
         let obj_mh = ((mosaic_reg >> 8) & 0x0F) as u32 + 1;
@@ -432,20 +434,14 @@ impl Ppu {
             let priority = ((a2 >> 10) & 3) as u8;
             let pal_bank = ((a2 >> 12) & 0xF) as usize;
 
-            if shape >= 3 {
+            // Attribute 0 bit 9 without bit 8 hides the sprite; shape 3 is
+            // prohibited.
+            if affine_mode == 2 || shape >= 3 {
                 continue;
             }
-            let (w, h) = {
-                let w = SIZES[shape][size];
-                let h = if shape == 0 {
-                    w
-                } else if shape == 1 {
-                    w / 2
-                } else {
-                    w * 2
-                };
-                (w, h)
-            };
+            // In the bitmap modes the first 512 tiles are display memory.
+            let bitmap_mode = (disp & 7) >= 3;
+            let (w, h) = SIZES[shape][size];
             let affine = affine_mode == 1 || affine_mode == 3;
             let double_size = affine_mode == 3;
             let (draw_w, draw_h) = if double_size { (w * 2, h * 2) } else { (w, h) };
@@ -534,15 +530,22 @@ impl Ppu {
                     let tile_in_row = tpx / 8;
                     let tile_y = tpy / 8;
                     let tiles_per_row = w / 8;
+                    // Tile numbers count 32-byte units; a 256-colour tile
+                    // occupies two of them. 2D mapping keeps 32 units per row.
+                    let unit_w = if palette256 { 2 } else { 1 };
                     let tile_index = if obj_1d {
-                        tile_base + tile_y * tiles_per_row + tile_in_row
+                        tile_base + (tile_y * tiles_per_row + tile_in_row) * unit_w
                     } else {
-                        tile_base + (tile_y * 32) + tile_in_row
+                        tile_base + tile_y * 32 + tile_in_row * unit_w
                     };
+                    let tile_index = tile_index & 0x3FF;
+                    if bitmap_mode && tile_index < 512 {
+                        continue;
+                    }
                     let px = tpx % 8;
                     let py = tpy % 8;
                     let (color_idx, opaque) = if palette256 {
-                        let tile_off = tile_index * 64 + py * 8 + px;
+                        let tile_off = tile_index * 32 + py * 8 + px;
                         let byte = bus.vram[Self::vram_index(0x10000 + tile_off)];
                         (byte as usize, byte != 0)
                     } else {
@@ -914,5 +917,106 @@ mod tests {
         let mut ppu = Ppu::new();
         ppu.render_scanline(&bus, 0);
         assert_eq!(ppu.framebuffer[8], yellow);
+    }
+
+    #[test]
+    fn text_bg_palette_bank_comes_from_entry_bits_12_to_15() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x0100); // mode 0, BG0
+        set16(&mut bus, 0x08, 0);
+        // Entry (0,0): tile 1, both flips set (bits 10-11), palette bank 3.
+        let entry: u16 = 1 | (3 << 10) | (3 << 12);
+        bus.vram[0] = entry as u8;
+        bus.vram[1] = (entry >> 8) as u8;
+        // Tile 1: only pixel (7,7) is colour 2; the flips move it to (0,0).
+        bus.vram[32 + 7 * 4 + 3] = 2 << 4;
+        let colour = rgb(0, 31, 31);
+        set_palette(&mut bus, 3 * 16 + 2, colour);
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], colour);
+    }
+
+    fn obj(bus: &mut Bus, i: usize, a0: u16, a1: u16, a2: u16) {
+        for (k, v) in [a0, a1, a2].into_iter().enumerate() {
+            bus.oam[i * 8 + k * 2] = v as u8;
+            bus.oam[i * 8 + k * 2 + 1] = (v >> 8) as u8;
+        }
+    }
+
+    #[test]
+    fn horizontal_sprite_of_size_1_is_32_by_8() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x1400);
+        // Shape 1 (horizontal), size 1, tile 0, 16 colours: 32x8.
+        obj(&mut bus, 0, 1 << 14, 1 << 14, 0);
+        for t in 0..8 {
+            bus.vram[0x10000 + t * 32..0x10000 + t * 32 + 32].fill(0x11);
+        }
+        let c = rgb(31, 0, 0);
+        bus.palram[0x200 + 2] = c as u8;
+        bus.palram[0x200 + 3] = (c >> 8) as u8;
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 7);
+        assert_eq!(ppu.framebuffer[7 * SCREEN_W + 31], c);
+        assert_eq!(ppu.framebuffer[7 * SCREEN_W + 32], 0);
+        ppu.render_scanline(&bus, 8);
+        assert_eq!(
+            ppu.framebuffer[8 * SCREEN_W],
+            0,
+            "row 8 is outside a 32x8 sprite"
+        );
+    }
+
+    #[test]
+    fn sprite_with_the_disable_flag_is_hidden() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x1400);
+        // Tile 5 so the other (all-zero) OAM entries, which use tile 0, stay
+        // transparent.
+        obj(&mut bus, 0, 1 << 9, 0, 5);
+        bus.vram[0x10000 + 5 * 32..0x10000 + 6 * 32].fill(0x11);
+        let c = rgb(31, 0, 0);
+        bus.palram[0x200 + 2] = c as u8;
+        bus.palram[0x200 + 3] = (c >> 8) as u8;
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], 0);
+    }
+
+    #[test]
+    fn sprite_256_colour_tiles_use_32_byte_units() {
+        let mut bus = test_bus();
+        set16(&mut bus, 0, 0x1400 | (1 << 6)); // OBJ on, 1D mapping
+                                               // 8x8, 256 colours, tile number 4.
+        obj(&mut bus, 0, 1 << 13, 0, 4);
+        // Tile 4 in 32-byte units starts at 0x10000 + 4 * 32.
+        bus.vram[0x10000 + 4 * 32] = 7;
+        let c = rgb(0, 31, 0);
+        bus.palram[0x200 + 7 * 2] = c as u8;
+        bus.palram[0x200 + 7 * 2 + 1] = (c >> 8) as u8;
+        let mut ppu = Ppu::new();
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], c);
+    }
+
+    #[test]
+    fn mode_1_has_no_bg3_and_mode_2_no_text_layers() {
+        let mut bus = test_bus();
+        // BG0 as a text layer with a visible tile.
+        text_bg(&mut bus, 0, 0, 1);
+        text_bg(&mut bus, 3, 0, 1);
+        let c = rgb(31, 0, 0);
+        set_palette(&mut bus, 1, c);
+        let mut ppu = Ppu::new();
+        set16(&mut bus, 0, 0x0801 | 0x0100); // mode 1, BG0 + BG3 enabled
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], c, "BG0 draws in mode 1");
+        set16(&mut bus, 0, 0x0801 & !0x0100 | 1); // mode 1, only BG3
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], 0, "BG3 does not exist in mode 1");
+        set16(&mut bus, 0, 0x0102); // mode 2, BG0 only
+        ppu.render_scanline(&bus, 0);
+        assert_eq!(ppu.framebuffer[0], 0, "BG0 does not exist in mode 2");
     }
 }
