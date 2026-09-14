@@ -27,6 +27,11 @@ name = "run_accuracy"
 path = "src/bin/run_accuracy.rs"
 
 [[bin]]
+name = "render_logo"
+path = "src/bin/render_logo.rs"
+required-features = ["logo-tools"]
+
+[[bin]]
 name = "fetch_test_roms"
 path = "src/bin/fetch_test_roms.rs"
 
@@ -46,3 +51,9 @@ gba-core = { workspace = true, features = ["trace"] }
 ureq = "3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"
+ico = { version = "0.5", optional = true }
+resvg = { version = "0.48", optional = true, default-features = false }
+
+[features]
+# Dev tool that rasterises assets/logo.svg into the icon files (pure Rust).
+logo-tools = ["dep:resvg", "dep:ico"]
