@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- GBA CPU: the jsmolka arm and thumb suites pass. SBC/RSC/ADC carry and
+  overflow, ASR of negative values, register-specified shifts by zero,
+  rotated-immediate carry, r15 as a register-shifted operand and in STR/STM
+  (+12), the "P" forms of TST/TEQ/CMP/CMN, empty LDM/STM register lists,
+  STM with the base in the list, and unaligned block transfers. Pokémon's
+  software audio mixer produced white noise because of these.
+- GBA memory: the jsmolka memory, bios and save suites pass. Byte stores to
+  palette RAM / VRAM / OAM follow the hardware rules, word stores align, the
+  save region is an 8-bit bus mirrored at 0x0F000000, BIOS reads from
+  outside the BIOS return the last prefetched opcode, SRAM powers up as
+  0xFF and flash erases by sector.
+- GBA PPU: text-background palette banks came from the flip bits, sprite
+  shapes had the wrong heights (rows of text drawn twice), disabled sprites
+  were drawn, 256-colour sprites read their tiles from the wrong place
+  (Rayquaza and Groudon were missing), mode 1 drew a BG3 and mode 2 drew
+  BG0/BG1, and affine reference points only latched at VBlank. Emerald and
+  Ruby now render their intros, title screens and menus correctly.
+- Desktop: the FPS display counts emulated frames, not repaints.
+
+### Added
+- `gba-diag --dump-vram` also writes the I/O registers, so a dump can be
+  rendered layer by layer offline.
+
 ## [0.1.1] - 2026-09-14
 
 Polish release: project branding, a rewritten desktop audio path and

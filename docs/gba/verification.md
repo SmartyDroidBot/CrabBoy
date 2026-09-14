@@ -24,9 +24,13 @@ frame. A run must never report `WILD PC` or an `unknown_swi`.
 | 2400 | 0x3641 | 0xD8CA4C3D | Intro cutscene |
 | 3000 | 0x3540 | 0xD70783EE | Intro, Rayquaza scene (affine layer still wrong) |
 | 3600 | 0x1441 | 0xF53B26AE | Title: logo drop |
-| 4200 | 0x1741 | 0x771885DD | Title screen (background colours wrong, Rayquaza sprite missing) |
-| 4800 | 0x3140 | 0xAE7E9FC0 | After START: main menu / clock message (text garbled) |
-| 5400 | 0x3140 | 0x01FDE534 | Main menu / clock message |
+| 4200 | 0x1741 | 0x07E2CDE1 | Title screen (Rayquaza silhouette, logo, "EMERALD VERSION" sprites, press start) |
+| 5000 | 0x3140 | 0x92812A89 | After START at 4700: main menu (NEW GAME / OPTION) |
+
+`crab run` hashes (FNV-1a-32 of the RGBA frame): frame 1800 intro cutscene
+`2367a19b`, frame 4200 title `07e2cde1`, frame 5000 with `--input START@4700`
+`92812a89`. These replaced the v0.1.1 values when the jsmolka CPU suites and
+the PPU screen-entry, sprite-size and 256-colour-sprite fixes landed.
 
 ## Pokémon Ruby (U) v1.1, skip-BIOS, START pressed at frame 3600
 
@@ -38,7 +42,10 @@ frame. A run must never report `WILD PC` or an `unknown_swi`.
 | 2400 | 0x3940 | 0x362CB7C5 | Intro |
 | 3000 | 0x3D40 | 0x93616EB5 | Intro |
 | 3600 | 0x1441 | 0xF53B26AE | Title: logo drop |
-| 4200 | 0x1741 | 0x3D6DC2D5 | Title screen (background layers wrong) |
+| 4200 | 0x1741 | 0xBA3D678E | Title screen (Groudon, logo, "RUBY VERSION") |
+
+`crab run` hashes: frame 4200 title `ba3d678e`, frame 4400 with
+`--input START@3600` `6d1b63f2`.
 
 ## Audio (v0.1.1)
 
@@ -51,11 +58,22 @@ hashes above are unaffected by the APU.
 | Emerald | 493766 | 1975064 | 5dbd36c9 | silent until the Game Freak jingle at ~frame 203, peaks clip at the 10-bit limit |
 | Ruby | 493765 | 1975060 | 2a1b5415 | RMS ≈ 13774 |
 
-## Known rendering gaps at these points
+## jsmolka gba-tests
 
-- The title screens' background layers show wrong colours and the Rayquaza /
-  Groudon sprite is missing; the logo (an affine 256-colour layer) is right.
-- Text in menus is garbled.
+`roms/test-suites/gba/jsmolka/<suite>/<suite>.gba`, `crab run ... --frames 300
+--hash` (2000 frames for the flash tests, which erase the chip). The frame hash
+`a313c705` is the "All tests passed" screen.
+
+| Suite | Result |
+|---|---|
+| arm, thumb, memory, bios | all tests passed |
+| save/none, save/sram, save/flash64, save/flash128 | all tests passed |
+| ppu/hello, ppu/shades, ppu/stripes | render (`2a1d35dc`, `f723a9c5`, `31ce03c5`) |
+
+## Known rendering gaps
+
 - Frames 300-700 of Emerald's Game Freak intro are mostly black.
+- Affine sprite and background edge cases (mosaic, wrapping) and the OBJ
+  cycle budget are not modelled yet.
 
 These are tracked in `ROADMAP.md` under the GBA accuracy milestone.

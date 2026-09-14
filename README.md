@@ -37,15 +37,15 @@ for what each release contains.
 | `crab` CLI | yes | yes | yes |
 | Browser (wasm) | yes | yes | yes |
 | Boots commercial games | yes | yes | yes (HLE BIOS, or a user-supplied `gba_bios.bin`) |
-| Playable | yes (Pokémon Red) | yes (Pokémon Crystal) | intro and title screen; menus have rendering bugs |
+| Playable | yes (Pokémon Red) | yes (Pokémon Crystal) | Pokémon Emerald/Ruby intro, title and menus render and play with sound |
 | Save types | MBC1/2/3/5 battery RAM, MBC3 RTC | same | SRAM, Flash 64K/128K, EEPROM 512 B/8 KB, cartridge RTC |
 | Save states | yes | yes | yes |
 | Audio | four channels | four channels | four channels + DirectSound FIFOs |
 
-The GBA core reaches the Pokémon Emerald and Ruby title screens
-(`docs/gba/verification.md` lists the pinned frames). Known gaps: the title
-screens' background layers and sprites, garbled menu text, per-scanline affine
-register effects, cartridge prefetch and precise wait states.
+The GBA core passes the jsmolka arm, thumb, memory, bios and save test
+suites and reaches the Pokémon Emerald and Ruby title screens and menus
+(`docs/gba/verification.md` lists the pinned frames). Known gaps: cartridge
+prefetch and precise wait states, the OBJ cycle budget, mosaic corner cases.
 
 Emulation is integer-only and deterministic: CI checks that x86_64, aarch64
 and wasm builds produce bit-identical frames.
@@ -137,9 +137,6 @@ commits.
 
 ## Known Issues
 
-- **GBA rendering**: title-screen background layers show wrong colours, the
-  Rayquaza/Groudon sprite is missing, and menu text is garbled. Affine
-  reference registers are only latched at VBlank.
 - **GBA timing** is approximate: no cartridge prefetch buffer, no
   sequential/non-sequential distinction, DMA does not stall the CPU.
 - **Audio accuracy**: the Game Boy APU still mixes in floating point and
