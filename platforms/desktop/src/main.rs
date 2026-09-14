@@ -13,6 +13,11 @@ const WIN_H: f32 = 160.0 * 3.0;
 const MIN_W: f32 = 240.0 * 2.0;
 const MIN_H: f32 = 144.0 * 2.0;
 
+/// Longest wall-clock gap between updates that is emulated rather than
+/// dropped, and the most frames one update may run to catch up.
+const MAX_FRAME_DELTA: f64 = 0.1;
+const MAX_CATCH_UP_FRAMES: u32 = 4;
+
 /// The window icon (the crab-and-console crop of the project logo).
 const APP_ICON: &[u8] = include_bytes!("../../../assets/icon-256.png");
 
@@ -377,18 +382,30 @@ impl CrabBoyApp {
         if self.paused || self.system.is_none() {
             return;
         }
+        // A stall (file dialog, window drag) must not be replayed as a burst.
+        let dt = dt.min(MAX_FRAME_DELTA);
         if self.fast_forward {
             let n = (dt * 240.0).floor() as u32;
             let n = n.clamp(1, 16);
             for _ in 0..n {
                 self.run_frame();
             }
+            self.accum = 0.0;
             ctx.request_repaint();
         } else {
             let period = 1.0 / self.system.as_ref().map_or(60.0, |s| s.frame_rate());
             self.accum += dt;
-            while self.accum >= period {
+            let mut frames = 0;
+            while self.accum >= period && frames < MAX_CATCH_UP_FRAMES {
                 self.accum -= period;
+                frames += 1;
+            }
+            if self.accum >= period {
+                // Still behind after the cap: drop the backlog rather than
+                // chase it.
+                self.accum = 0.0;
+            }
+            for _ in 0..frames {
                 self.run_frame();
             }
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(
