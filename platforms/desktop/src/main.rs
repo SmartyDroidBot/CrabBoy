@@ -139,6 +139,10 @@ struct CrabBoyApp {
     palette: Palette,
     palette_name: String,
     screen_texture: Option<egui::TextureHandle>,
+    /// RGBA scratch buffer and the frame it holds, so the framebuffer is
+    /// converted and uploaded only when a new frame was emulated.
+    rgba: Vec<u8>,
+    uploaded_frame: u64,
     fps: f64,
     frame_count: u64,
     accum: f64,
@@ -177,6 +181,8 @@ impl CrabBoyApp {
             palette: PALETTES[0].1,
             palette_name: PALETTES[0].0.to_string(),
             screen_texture: None,
+            rgba: Vec::new(),
+            uploaded_frame: u64::MAX,
             fps: 0.0,
             frame_count: 0,
             accum: 0.0,
@@ -272,6 +278,7 @@ impl CrabBoyApp {
     fn restart_timing(&mut self) {
         self.accum = 0.0;
         self.last_frame = Instant::now();
+        self.uploaded_frame = u64::MAX;
         self.clear_audio();
     }
 
@@ -485,40 +492,35 @@ impl CrabBoyApp {
         self.prev_keys = keys;
     }
 
-    fn shade_image(&self, shades: &[u8], w: usize, h: usize) -> egui::ColorImage {
-        let mut img = egui::ColorImage::new([w, h], egui::Color32::BLACK);
-        for (i, &shade) in shades.iter().enumerate() {
-            let c = self.palette.colors[(shade & 3) as usize];
-            img.pixels[i] = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-        }
-        img
-    }
-
-    fn rgb_image(&self, rgb: &[u8], w: usize, h: usize) -> egui::ColorImage {
-        let mut img = egui::ColorImage::new([w, h], egui::Color32::BLACK);
-        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
-            img.pixels[i] = egui::Color32::from_rgb(px[0], px[1], px[2]);
-        }
-        img
-    }
-
     fn draw_screen(&mut self, ui: &mut egui::Ui) {
         let Some(system) = &self.system else {
             ui.label("No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file.");
             return;
         };
-        let frame = system.frame();
-        let w = frame.width as usize;
-        let h = frame.height as usize;
-        let img = match &frame.rgb {
-            Some(rgb) => self.rgb_image(rgb, w, h),
-            None => self.shade_image(&frame.shades, w, h),
-        };
-        let tex = self.screen_texture.get_or_insert_with(|| {
-            ui.ctx()
-                .load_texture("gb-screen", img.clone(), egui::TextureOptions::NEAREST)
-        });
-        tex.set(img, egui::TextureOptions::NEAREST);
+        let screen = system.screen();
+        let w = screen.width as usize;
+        let h = screen.height as usize;
+        if self.uploaded_frame != self.frame_count || self.screen_texture.is_none() {
+            let frame = system.frame();
+            self.rgba.resize(w * h * 4, 0);
+            frame.write_rgba(&self.palette.colors, &mut self.rgba);
+            let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &self.rgba);
+            match &mut self.screen_texture {
+                Some(tex) => tex.set(img, egui::TextureOptions::NEAREST),
+                None => {
+                    self.screen_texture = Some(ui.ctx().load_texture(
+                        "screen",
+                        img,
+                        egui::TextureOptions::NEAREST,
+                    ))
+                }
+            }
+            self.uploaded_frame = self.frame_count;
+        }
+        let tex = self
+            .screen_texture
+            .as_ref()
+            .expect("texture uploaded above");
         let avail = ui.available_size();
         let scale = (avail.x / w as f32).min(avail.y / h as f32);
         let size = egui::vec2(w as f32 * scale, h as f32 * scale);
@@ -533,6 +535,7 @@ impl CrabBoyApp {
             {
                 self.palette = pal;
                 self.palette_name = name.to_string();
+                self.uploaded_frame = u64::MAX;
             }
         }
     }
