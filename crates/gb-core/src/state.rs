@@ -323,6 +323,7 @@ fn load_timer(r: &mut Reader) -> Result<Timer, String> {
         reload_deadline: r.u64()?,
         reload_value: r.u8()?,
         reload_pending: r.bool()?,
+        reloaded_at: u64::MAX,
     })
 }
 

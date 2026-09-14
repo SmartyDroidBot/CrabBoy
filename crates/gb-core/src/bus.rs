@@ -214,18 +214,9 @@ impl Bus {
                 self.io[0x04] = 0;
                 self.timer.on_div_write(&mut self.io);
             }
-            0xFF05 => {
-                self.io[0x05] = value;
-                self.timer.on_tima_write();
-            }
-            0xFF06 => {
-                self.io[0x06] = value;
-                self.timer.on_tma_write(value);
-            }
-            0xFF07 => {
-                self.io[0x07] = value;
-                self.timer.on_tac_write();
-            }
+            0xFF05 => self.timer.write_tima(&mut self.io, value),
+            0xFF06 => self.timer.write_tma(&mut self.io, value),
+            0xFF07 => self.timer.write_tac(&mut self.io, value),
             0xFF0F => self.io[0x0F] = value | 0xE0,
             0xFF10..=0xFF3F => {
                 let io = &mut self.io;
