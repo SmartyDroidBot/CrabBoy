@@ -325,6 +325,8 @@ fn load_timer(r: &mut Reader) -> Result<Timer, String> {
         reload_value: r.u8()?,
         reload_pending: r.bool()?,
         reloaded_at: r.u64()?,
+        serial_edges: 0,
+        serial_edges_fast: 0,
     })
 }
 
@@ -476,7 +478,7 @@ fn save_bus(w: &mut Writer, b: &Bus) {
     w.u8(b.dma_next);
     w.bool(b.dma_restarting);
     w.u32(b.dma_phase);
-    w.u32(b.serial_remaining);
+    w.u8(b.serial_bits);
     w.bool(b.hdma_active);
     w.bool(b.hdma_hblank);
     w.u16(b.hdma_len);
@@ -506,7 +508,7 @@ fn load_bus(r: &mut Reader) -> Result<Bus, String> {
         dma_next: r.u8()?,
         dma_restarting: r.bool()?,
         dma_phase: r.u32()?,
-        serial_remaining: r.u32()?,
+        serial_bits: r.u8()?,
         serial_out: 0,
         hdma_active: r.bool()?,
         hdma_hblank: r.bool()?,

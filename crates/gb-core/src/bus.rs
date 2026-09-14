@@ -61,7 +61,8 @@ pub struct Bus {
     pub(crate) dma_restarting: bool,
     /// T-cycles accumulated toward the next DMA M-cycle.
     pub(crate) dma_phase: u32,
-    pub(crate) serial_remaining: u32,
+    /// Bits shifted so far in the current serial transfer (0 when idle).
+    pub(crate) serial_bits: u8,
     /// The byte in SB when the transfer started; it is what the other end
     /// (and `serial_buf`) receives.
     pub(crate) serial_out: u8,
@@ -122,7 +123,7 @@ impl Bus {
             dma_next: DMA_IDLE,
             dma_restarting: false,
             dma_phase: 0,
-            serial_remaining: 0,
+            serial_bits: 0,
             serial_out: 0,
             hdma_active: false,
             hdma_hblank: false,
@@ -292,12 +293,17 @@ impl Bus {
             0xFF00 => self.io[0x00] = value | 0xC0,
             0xFF01 => self.io[0x01] = value,
             0xFF02 => {
-                self.io[0x02] = value;
+                // Bit 7 starts a transfer; bit 0 selects the internal clock,
+                // which is DIV's 8192 Hz edge (bit 1 picks the CGB's 262144
+                // Hz clock). With no link partner an external clock never
+                // arrives and the transfer waits forever.
+                self.io[0x02] = value | if self.is_cgb { 0x7C } else { 0x7E };
                 if value & 0x80 != 0 {
-                    // Start a serial transfer: 8 bits at 8192 Hz (normal) or
-                    // 16384 Hz (fast), i.e. 4096 or 2048 T-cycles per byte.
-                    self.serial_remaining = if value & 0x01 != 0 { 2048 } else { 4096 };
+                    self.serial_bits = 0;
                     self.serial_out = self.io[0x01];
+                    // Edges that already happened (a DIV reset in this very
+                    // cycle, say) do not shift the new transfer.
+                    self.timer.take_serial_edges(false);
                 }
             }
             0xFF04 => {
@@ -455,19 +461,6 @@ impl Bus {
             }
         }
 
-        // Serial: transfer completes when its cycle budget is exhausted.
-        if self.serial_remaining > 0 {
-            self.serial_remaining = self.serial_remaining.saturating_sub(cycles);
-            if self.serial_remaining == 0 {
-                // No link partner: the transmitted byte leaves through
-                // `serial_buf` and $FF shifts in.
-                self.serial_buf.push(self.serial_out);
-                self.io[0x01] = 0xFF;
-                self.io[0x02] &= !0x80; // transfer complete
-                self.io[0x0F] |= 0x08; // serial interrupt
-            }
-        }
-
         // The LCD, timer, and RTC are clocked at fixed absolute rates, so in
         // double-speed mode they receive half the raw cycles (with carry). The
         // APU keeps the raw clock so its sample rate doubles (8192 -> 16384).
@@ -490,6 +483,23 @@ impl Bus {
         let mut wave_ram = [0u8; 16];
         wave_ram.copy_from_slice(&io[0x30..0x40]);
         timer.step(dev, io);
+        // Serial: one bit per internal-clock edge while a transfer with the
+        // internal clock runs; with no link partner ones shift in.
+        let fast = self.is_cgb && io[0x02] & 0x02 != 0;
+        let edges = timer.take_serial_edges(fast);
+        if io[0x02] & 0x81 == 0x81 {
+            for _ in 0..edges {
+                io[0x01] = (io[0x01] << 1) | 1;
+                self.serial_bits += 1;
+                if self.serial_bits == 8 {
+                    self.serial_bits = 0;
+                    self.serial_buf.push(self.serial_out);
+                    io[0x02] &= !0x80; // transfer complete
+                    io[0x0F] |= 0x08; // serial interrupt
+                    break;
+                }
+            }
+        }
         self.cart.rtc_tick(dev);
         ppu.step(dev, io, vram, oam);
         apu.step(cycles, io, &wave_ram);
@@ -565,11 +575,13 @@ mod tests {
     #[test]
     fn serial_transfer_completes_and_interrupts() {
         let mut bus = bus_with_rom();
-        bus.io[0x01] = 0xAB;
+        bus.io[0x01] = 0x2A;
         bus.io[0x0F] = 0;
-        bus.write(0xFF02, 0x80); // start transfer (normal speed)
+        bus.write(0xFF04, 0); // align DIV: the clock is its bit 8 falling
+        bus.write(0xFF02, 0x81); // start transfer, internal clock
         bus.step(4095);
         assert_eq!(bus.io[0x0F] & 0x08, 0, "not done yet before 4096 cycles");
+        assert_eq!(bus.io[0x01], 0x7F, "seven bits shifted so far");
         bus.step(1);
         assert_ne!(
             bus.io[0x0F] & 0x08,
@@ -578,5 +590,17 @@ mod tests {
         );
         assert_eq!(bus.io[0x02] & 0x80, 0, "transfer-complete bit cleared");
         assert_eq!(bus.io[0x01], 0xFF, "SB reflects received byte");
+        assert_eq!(bus.serial_buf, vec![0x2A]);
+    }
+
+    #[test]
+    fn serial_transfer_with_an_external_clock_waits_forever() {
+        let mut bus = bus_with_rom();
+        bus.io[0x01] = 0xAB;
+        bus.write(0xFF02, 0x80); // external clock: nobody is connected
+        bus.step(70224 * 2);
+        assert_eq!(bus.io[0x02] & 0x80, 0x80, "still in progress");
+        assert_eq!(bus.io[0x01], 0xAB);
+        assert!(bus.serial_buf.is_empty());
     }
 }

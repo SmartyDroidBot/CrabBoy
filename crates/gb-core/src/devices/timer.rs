@@ -25,6 +25,11 @@ pub struct Timer {
     pub(crate) reload_pending: bool,
     /// Absolute cycle at which the last reload was applied.
     pub(crate) reloaded_at: u64,
+    /// Falling edges of DIV counter bit 8 (the 8192 Hz serial clock) since
+    /// the bus last drained them.
+    pub(crate) serial_edges: u32,
+    /// Falling edges of bit 3 (the CGB's 262144 Hz serial clock).
+    pub(crate) serial_edges_fast: u32,
 }
 
 impl Timer {
@@ -36,6 +41,8 @@ impl Timer {
             reload_value: 0,
             reload_pending: false,
             reloaded_at: u64::MAX,
+            serial_edges: 0,
+            serial_edges_fast: 0,
         }
     }
 
@@ -66,8 +73,33 @@ impl Timer {
         if self.signal(io[0x07]) {
             self.inc_tima(io, self.abs_cycles);
         }
+        self.note_serial_edges(self.div_counter, 0);
         self.div_counter = 0;
         io[0x04] = 0;
+    }
+
+    /// Count the serial clock edges in a counter transition.
+    #[inline]
+    fn note_serial_edges(&mut self, prev: u16, next: u16) {
+        let fell = prev & !next;
+        if fell & (1 << 8) != 0 {
+            self.serial_edges += 1;
+        }
+        if fell & (1 << 3) != 0 {
+            self.serial_edges_fast += 1;
+        }
+    }
+
+    /// Take the serial clock edges seen since the last call.
+    pub fn take_serial_edges(&mut self, fast: bool) -> u32 {
+        let edges = if fast {
+            self.serial_edges_fast
+        } else {
+            self.serial_edges
+        };
+        self.serial_edges = 0;
+        self.serial_edges_fast = 0;
+        edges
     }
 
     /// Write TIMA (0xFF05): cancels a pending reload, is ignored in the cycle
@@ -138,6 +170,7 @@ impl Timer {
             if enabled && ((prev >> bit) & 1) == 1 && ((self.div_counter >> bit) & 1) == 0 {
                 self.inc_tima(io, t);
             }
+            self.note_serial_edges(prev, self.div_counter);
             t += 1;
         }
         if self.reload_pending && t >= self.reload_deadline {
