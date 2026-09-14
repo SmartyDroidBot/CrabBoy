@@ -114,10 +114,14 @@ impl Ppu {
         let lo = ram[i];
         let hi = ram[i + 1];
         let c15 = (hi as u16 & 0x7F) << 8 | lo as u16;
-        let r = ((c15 & 0x1F) * 255 / 31) as u8;
-        let g = (((c15 >> 5) & 0x1F) * 255 / 31) as u8;
-        let b = (((c15 >> 10) & 0x1F) * 255 / 31) as u8;
-        [r, g, b]
+        // Expand each 5-bit channel as (x << 3) | (x >> 2), the reference
+        // conversion the test suites' screenshots use.
+        let expand = |x: u16| ((x << 3) | (x >> 2)) as u8;
+        [
+            expand(c15 & 0x1F),
+            expand((c15 >> 5) & 0x1F),
+            expand((c15 >> 10) & 0x1F),
+        ]
     }
 
     pub fn step(
