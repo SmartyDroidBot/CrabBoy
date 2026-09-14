@@ -416,6 +416,51 @@ impl Apu {
         }
     }
 
+    /// Timer (0 or 1) selected in SOUNDCNT_H to clock DirectSound A.
+    pub fn dsa_timer(&self) -> u8 {
+        self.dsa_timer
+    }
+
+    /// Timer (0 or 1) selected in SOUNDCNT_H to clock DirectSound B.
+    pub fn dsb_timer(&self) -> u8 {
+        self.dsb_timer
+    }
+
+    /// SOUNDCNT_X bit 7.
+    pub fn master_enabled(&self) -> bool {
+        self.soundcnt_x & 0x80 != 0
+    }
+
+    /// SOUNDCNT_X as the CPU reads it: the master enable plus the live
+    /// channel-active bits 0-3.
+    pub fn read_soundcnt_x(&self) -> u16 {
+        (self.soundcnt_x & 0x80)
+            | u16::from(self.sq1.on)
+            | u16::from(self.sq2.on) << 1
+            | u16::from(self.wave.on) << 2
+            | u16::from(self.noise.on) << 3
+    }
+
+    /// SOUNDBIAS as the CPU reads it.
+    pub fn soundbias(&self) -> u16 {
+        0x200
+    }
+
+    /// Halfword of wave RAM at `idx` (0..16, even).
+    pub fn read_wave_ram16(&self, idx: usize) -> u16 {
+        let idx = idx & 0xE;
+        u16::from(self.wave_ram[idx]) | u16::from(self.wave_ram[idx + 1]) << 8
+    }
+
+    /// A byte store to the FIFO ports 0xA0-0xA7.
+    pub fn push_fifo_byte(&mut self, offset: usize, v: u8) {
+        if offset & 4 == 0 {
+            self.dsa.push(v);
+        } else {
+            self.dsb.push(v);
+        }
+    }
+
     /// Bytes currently queued in FIFO A.
     pub fn fifo_a_count(&self) -> usize {
         self.dsa.fifo_count

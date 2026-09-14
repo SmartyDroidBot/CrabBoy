@@ -244,7 +244,7 @@ pub fn save_state(gba: &Gba) -> Vec<u8> {
     // Peripherals (format version 5).
     gba.bus.timers.save(&mut w);
     gba.bus.dma.save(&mut w);
-    gba.apu.save(&mut w);
+    gba.bus.apu.save(&mut w);
     w.buf
         .extend_from_slice(&gba.bus.save.eeprom.save_state_sm());
     w.buf.extend_from_slice(&gba.bus.rtc.save_state());
@@ -317,7 +317,7 @@ pub fn load_state(gba: &mut Gba, data: &[u8]) -> Result<(), String> {
 
     gba.bus.timers.load(&mut r)?;
     gba.bus.dma.load(&mut r)?;
-    gba.apu.load(&mut r)?;
+    gba.bus.apu.load(&mut r)?;
     gba.bus.save.eeprom.load_state_sm(&r.array()?);
     gba.bus.rtc.load_state(&r.array()?);
     gba.bus.gpio_data = r.u8()? & 0x0F;

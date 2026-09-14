@@ -6,7 +6,6 @@
 //! the timers, APU and PPU scanlines by the cycles consumed, firing the
 //! appropriate interrupts and DMA triggers.
 
-use crate::apu::Apu;
 use crate::bus::Bus;
 use crate::cpu::mode;
 use crate::cpu::Cpu;
@@ -25,7 +24,6 @@ pub struct Gba {
     pub cpu: Cpu,
     pub bus: Bus,
     pub ppu: Ppu,
-    pub apu: Apu,
     /// Cycles consumed so far in the current line.
     pub(crate) line_cycles: u32,
     /// Current scanline (0..227).
@@ -58,7 +56,6 @@ impl Gba {
             cpu,
             bus,
             ppu: Ppu::new(),
-            apu: Apu::new(),
             line_cycles: 0,
             line: 0x7E,
             frame_count: 0,
@@ -144,11 +141,11 @@ impl Gba {
         self.bus.timers.step(cycles);
         for i in 0..4 {
             if self.bus.timers.just_overflowed(i) {
-                self.apu.timer_overflow(i as u8);
+                self.bus.apu.timer_overflow(i as u8);
                 self.check_dma_fifo(i);
             }
         }
-        self.apu.step(cycles);
+        self.bus.apu.step(cycles);
         self.line_cycles += cycles;
         while self.line_cycles >= ppu::CYCLES_PER_LINE {
             self.line_cycles -= ppu::CYCLES_PER_LINE;
@@ -160,13 +157,12 @@ impl Gba {
     /// down to 16 bytes is refilled by its DMA channel (DMA1 for FIFO A at
     /// 0x040000A0, DMA2 for FIFO B at 0x040000A4) with four words.
     fn check_dma_fifo(&mut self, timer_idx: usize) {
-        let cnt_h = self.bus.io.read16(0x82);
-        let dsa_timer = ((cnt_h >> 10) & 1) as usize;
-        let dsb_timer = ((cnt_h >> 14) & 1) as usize;
-        if dsa_timer == timer_idx && self.apu.fifo_a_count() <= 16 {
+        let dsa_timer = self.bus.apu.dsa_timer() as usize;
+        let dsb_timer = self.bus.apu.dsb_timer() as usize;
+        if dsa_timer == timer_idx && self.bus.apu.fifo_a_count() <= 16 {
             self.refill_fifo(1, 0x0400_00A0);
         }
-        if dsb_timer == timer_idx && self.apu.fifo_b_count() <= 16 {
+        if dsb_timer == timer_idx && self.bus.apu.fifo_b_count() <= 16 {
             self.refill_fifo(2, 0x0400_00A4);
         }
     }
@@ -181,9 +177,9 @@ impl Gba {
             let w = self.bus.read32(src);
             for byte in w.to_le_bytes() {
                 if channel == 1 {
-                    self.apu.push_fifo_a(byte);
+                    self.bus.apu.push_fifo_a(byte);
                 } else {
-                    self.apu.push_fifo_b(byte);
+                    self.bus.apu.push_fifo_b(byte);
                 }
             }
             src = crate::dma::adjust(src, 4, ch.src_adjust());
@@ -476,7 +472,7 @@ impl emu_core::System for Gba {
     }
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
-        let mut buf = self.apu.take_audio();
+        let mut buf = self.bus.apu.take_audio();
         // Frontends bound their own latency; only guard against a caller that
         // never drains by keeping the newest second of audio.
         let cap = self.audio_rate() as usize * 2;
@@ -766,16 +762,16 @@ mod tests {
         gba.bus.write16(0x0400_00D0, 4);
         gba.bus.write16(0x0400_00D2, special);
         gba.check_dma_fifo(0);
-        assert_eq!(gba.apu.fifo_a_count(), 16, "four words queued");
+        assert_eq!(gba.bus.apu.fifo_a_count(), 16, "four words queued");
         assert_eq!(gba.bus.dma.chans[1].cur_src, 0x0300_0010);
         gba.check_dma_fifo(1);
-        assert_eq!(gba.apu.fifo_b_count(), 0, "DMA2 does not target FIFO B");
+        assert_eq!(gba.bus.apu.fifo_b_count(), 0, "DMA2 does not target FIFO B");
         assert_eq!(gba.bus.dma.chans[2].cur_src, 0x0300_0000);
         // The FIFO is only topped up once it has drained to 16 bytes.
         gba.check_dma_fifo(0);
-        assert_eq!(gba.apu.fifo_a_count(), 32);
+        assert_eq!(gba.bus.apu.fifo_a_count(), 32);
         gba.check_dma_fifo(0);
-        assert_eq!(gba.apu.fifo_a_count(), 32);
+        assert_eq!(gba.bus.apu.fifo_a_count(), 32);
     }
 
     #[test]

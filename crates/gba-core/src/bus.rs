@@ -176,6 +176,8 @@ impl Region {
     }
 }
 
+use crate::apu::Apu;
+
 /// A GBA memory bus.
 pub struct Bus {
     /// Optional BIOS image (executed when present; else the region reads as 0).
@@ -195,6 +197,8 @@ pub struct Bus {
     pub dma: Dma,
     /// Timers.
     pub timers: Timers,
+    /// Sound: PSG channels, DirectSound FIFOs and the mixer.
+    pub apu: Apu,
     /// Real-time clock on the cartridge GPIO port.
     pub rtc: Rtc,
     /// Cartridge GPIO (0x080000C4 data, 0xC6 direction, 0xC8 read enable):
@@ -237,6 +241,7 @@ impl Bus {
             io: Io::new(),
             dma: Dma::new(),
             timers: Timers::new(),
+            apu: Apu::new(),
             rtc: Rtc::new(),
             gpio_data: 0,
             gpio_dir: 0,
@@ -421,6 +426,7 @@ impl Bus {
     /// it.
     fn io_read16(&self, off: usize) -> u32 {
         match off {
+            0x60..=0x9F => self.sound_read16(off) as u32,
             0xB0..=0xDF => self.dma.read16(off) as u32,
             0x100 => self.timers.read_cnt_l(0) as u32,
             0x104 => self.timers.read_cnt_l(1) as u32,
@@ -430,7 +436,20 @@ impl Bus {
         }
     }
 
-    /// Read a 16-bit value across the memory map.
+    /// Sound registers the APU must answer itself: the live channel-active
+    /// bits of SOUNDCNT_X, the bias it applies and wave RAM. The rest are
+    /// served from the raw register shadow, which reads as zero while the
+    /// master enable is off.
+    fn sound_read16(&self, off: usize) -> u16 {
+        match off {
+            0x84 => self.apu.read_soundcnt_x(),
+            0x88 => self.apu.soundbias(),
+            0x90..=0x9F => self.apu.read_wave_ram16(off - 0x90),
+            0x60..=0x81 if !self.apu.master_enabled() => 0,
+            _ => self.io.read16(off),
+        }
+    }
+
     /// Read a 16-bit value across the memory map. An odd address returns the
     /// aligned halfword rotated right by 8 within 32 bits, as the ARM7TDMI
     /// does for LDRH.
@@ -523,12 +542,25 @@ impl Bus {
             }
             Region::Io => {
                 let off = Self::index_in(addr, 0x3FF);
-                if off == 0x301 {
+                match off {
                     // HALTCNT: bit 7 clear = HALT, set = STOP. Both park the
                     // CPU until an enabled interrupt arrives.
-                    self.io.halt_requested = true;
-                } else {
-                    self.io.write8(off, value as u8);
+                    0x301 => self.io.halt_requested = true,
+                    0xA0..=0xA7 => self.apu.push_fifo_byte(off, value as u8),
+                    0x60..=0x9F => {
+                        // Merge the byte into the register shadow and hand the
+                        // whole halfword to the APU.
+                        let base = off & !1;
+                        let cur = self.io.read16(base);
+                        let merged = if off & 1 == 0 {
+                            (cur & 0xFF00) | (value as u16 & 0xFF)
+                        } else {
+                            (cur & 0x00FF) | ((value as u16 & 0xFF) << 8)
+                        };
+                        self.io.write8(off, value as u8);
+                        self.apu.write16(base, merged);
+                    }
+                    _ => self.io.write8(off, value as u8),
                 }
             }
             Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
@@ -568,6 +600,7 @@ impl Bus {
                 let off = base & 0x3FF;
                 self.io.write16(off, value as u16);
                 match off {
+                    0x60..=0xA7 => self.apu.write16(off, value as u16),
                     0xB0..=0xDF => self.dma.write16(off, value as u16),
                     0x100..=0x110 => self.write_timer(off, value as u16),
                     _ => {}
@@ -734,6 +767,33 @@ mod tests {
 
     fn bus() -> Bus {
         Bus::new(vec![0; 0x4000])
+    }
+
+    #[test]
+    fn sound_registers_reach_the_apu_through_the_bus() {
+        let mut b = bus();
+        b.write16(0x0400_0084, 0x80);
+        assert!(b.apu.master_enabled());
+        b.write16(0x0400_0080, 0xFF77);
+        assert_eq!(b.read16(0x0400_0080), 0xFF77);
+        // Byte stores merge into the halfword the APU sees.
+        b.write8(0x0400_0080, 0x33);
+        b.write8(0x0400_0081, 0x44);
+        assert_eq!(b.read16(0x0400_0080), 0x4433);
+        assert_eq!(b.apu.read16(0x80), 0x4433);
+        // Restarting channel 1 with a live envelope turns its status bit on.
+        b.write16(0x0400_0062, 0xF000);
+        b.write16(0x0400_0064, 0x8400);
+        assert_eq!(b.read16(0x0400_0084) & 0x8F, 0x81);
+        // FIFO byte and halfword stores land in FIFO A / B.
+        b.write8(0x0400_00A0, 1);
+        b.write16(0x0400_00A4, 0x0302);
+        assert_eq!(b.apu.fifo_a_count(), 1);
+        assert!(b.apu.fifo_b_count() >= 1);
+        // Master disable: the PSG registers read as zero.
+        b.write16(0x0400_0084, 0);
+        assert_eq!(b.read16(0x0400_0080), 0);
+        assert_eq!(b.read16(0x0400_0084) & 0x80, 0);
     }
 
     #[test]
