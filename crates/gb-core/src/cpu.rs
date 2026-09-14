@@ -128,18 +128,22 @@ impl Cpu {
         self.ticked += 4;
     }
 
-    /// One M-cycle that reads `addr` at its end.
+    /// One M-cycle that reads `addr`: the access happens first, then the
+    /// devices run for the rest of the cycle, so a device event in the same
+    /// cycle (a timer reload, an OAM DMA byte) is visible to the next access
+    /// and to the interrupt check that follows the instruction.
     #[inline]
     fn read8(&mut self, bus: &mut Bus, addr: u16) -> u8 {
+        let v = bus.read(addr);
         self.internal(bus);
-        bus.read(addr)
+        v
     }
 
-    /// One M-cycle that writes `addr` at its end.
+    /// One M-cycle that writes `addr` at its start.
     #[inline]
     fn write8(&mut self, bus: &mut Bus, addr: u16, v: u8) {
-        self.internal(bus);
         bus.write(addr, v);
+        self.internal(bus);
     }
 
     #[inline]
@@ -705,17 +709,18 @@ impl Cpu {
             }
             0x76 => {
                 let pending = bus.io[0x0F] & bus.ie & 0x1F;
-                if !self.ime && !self.ei_pending && pending != 0 {
+                if pending == 0 {
+                    self.halted = true;
+                } else if self.ime {
+                    // An interrupt is already pending: HALT is not entered, the
+                    // handler runs first and returns to re-execute HALT.
+                    self.pc = self.pc.wrapping_sub(1);
+                } else {
                     // HALT bug: with IME disabled and an interrupt pending, the
                     // CPU does not halt; the byte after HALT is executed twice.
-                    // An EI immediately before HALT suppresses the bug: HALT then
-                    // halts and enables IME, so the pending interrupt is serviced.
                     self.halt_bug = true;
-                    4
-                } else {
-                    self.halted = true;
-                    4
                 }
+                4
             }
             0x77 => {
                 let v = self.a;
@@ -1691,16 +1696,22 @@ impl Cpu {
         self.ticked = 0;
         self.ime = false;
         self.halted = false;
-        // Two internal cycles, then PC is pushed. The push of the high byte
-        // can overwrite IE (SP = $0000), so the vector is chosen from the
-        // flags as they stand after it; nothing left selects vector $0000.
-        self.internal(bus);
+        // The fetch of the would-be next opcode is thrown away, then an
+        // internal cycle, then PC is pushed. The push of the high byte can
+        // overwrite IE (SP = $0000) and the low byte IF, so IE is sampled
+        // right after the first push and IF after the second; nothing left
+        // selects vector $0000.
+        let pc = self.pc;
+        let _ = self.read8(bus, pc);
         self.internal(bus);
         self.sp = self.sp.wrapping_sub(1);
-        self.write8(bus, self.sp, (self.pc >> 8) as u8);
-        let pending = bus.io[0x0F] & bus.ie & 0x1F;
+        bus.write(self.sp, (self.pc >> 8) as u8);
+        let ie = bus.ie;
+        self.internal(bus);
         self.sp = self.sp.wrapping_sub(1);
-        self.write8(bus, self.sp, self.pc as u8);
+        bus.write(self.sp, self.pc as u8);
+        let pending = bus.io[0x0F] & ie & 0x1F;
+        self.internal(bus);
         self.internal(bus);
         if pending == 0 {
             self.pc = 0;

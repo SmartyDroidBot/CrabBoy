@@ -106,36 +106,31 @@ impl Gb {
             }
         }
 
+        let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
         if self.cpu.halted {
-            let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
-            if pending != 0 {
-                self.cpu.halted = false;
-            } else {
+            if pending == 0 {
                 self.bus.step(4);
                 return 4;
             }
+            self.cpu.halted = false;
         }
 
-        let pending = self.bus.ie & self.bus.io[0x0F] & 0x1F;
-        if self.cpu.ime && pending != 0 {
-            return self.cpu.take_interrupt(&mut self.bus);
-        }
-
-        // EI enables interrupts only *after* the instruction following EI runs,
-        // so `EI; RET` returns before an interrupt fires. Capture whether an EI
-        // executed on the previous step: if it did (and DI has not since cleared
-        // the pending flag), the following instruction has now completed and IME
-        // may be enabled. This is also why `EI; DI` leaves IME disabled.
-        let was_ei = self.cpu.ei_pending;
-        // The CPU advances the bus itself, one M-cycle per memory access or
-        // internal cycle, so devices see every access at its true time.
-        let total = self.cpu.execute(&mut self.bus);
-
-        if was_ei && self.cpu.ei_pending {
+        // EI takes effect after the instruction following it: the instruction
+        // runs with IME set (HALT, for one, behaves accordingly) but the
+        // dispatch decision for this step was taken with the old value. This
+        // is also why `EI; DI` leaves IME disabled.
+        let effective_ime = self.cpu.ime;
+        if self.cpu.ei_pending {
             self.cpu.ime = true;
             self.cpu.ei_pending = false;
         }
-        total
+        if effective_ime && pending != 0 {
+            return self.cpu.take_interrupt(&mut self.bus);
+        }
+
+        // The CPU advances the bus itself, one M-cycle per memory access or
+        // internal cycle, so devices see every access at its true time.
+        self.cpu.execute(&mut self.bus)
     }
 
     /// Current framebuffer as 2-bit shades (`0..=3`) per pixel.
