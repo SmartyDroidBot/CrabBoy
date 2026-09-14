@@ -44,6 +44,11 @@ with a patch version.
 
 ## One-time repository setup
 
-- Settings → Pages → Source: **GitHub Actions**.
+- Settings → Pages → Source: **GitHub Actions** (the repository must be
+  public, or on a plan that allows Pages for private repositories).
+- Settings → Environments → `github-pages` → Deployment branches and tags:
+  add a **tag** rule `v*`. GitHub creates the environment allowing only
+  `main`, and the pages job runs from release tags, so without this rule
+  the deployment is rejected before the job starts.
 - Settings → Actions → General → Workflow permissions: read is enough; the
   release and pages jobs request the write scopes they need themselves.
