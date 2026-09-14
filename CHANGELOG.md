@@ -6,6 +6,49 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
+Game Boy CPU timing release: the CPU is stepped per M-cycle and every
+blargg CPU test, halt_bug and every mooneye acceptance test outside `ppu/`
+pass. Accuracy baseline: 111 of 313.
+
+### Added
+- OAM DMA warm-up cycle, closed OAM for one cycle after the last byte, and
+  bus conflicts: CPU reads on the bus the DMA engine drives return the byte
+  it transferred last (mooneye `oam_dma/sources`).
+- The timer's TAC glitch (disabling or re-clocking the timer while the
+  selected DIV bit is set increments TIMA) and the exact TIMA/TMA write rules
+  around a reload.
+- Post-boot register state: DIV phase ($ABCC DMG, $2678 CGB), IF with the
+  VBlank flag, TAC/P1/STAT/KEY1/VBK unused bits, the sound registers after
+  the start-up chime, the LCD at the top of the frame.
+
+### Changed
+- The GB CPU ticks the bus at every memory access (M-cycle stepping);
+  internal cycles of `INC rr`, `ADD HL,rr`, `LD SP,HL`, taken `JR`/`JP`/
+  `CALL`/`RET`, `RET cc`, `PUSH`, `ADD SP,e` and `LD HL,SP+e` land where
+  the hardware puts them. Accesses happen at the start of their M-cycle so
+  an interrupt raised by the last access of an instruction is dispatched
+  before the next one.
+- Interrupt dispatch takes five M-cycles with a discarded opcode fetch; IE
+  is sampled after the high push and IF after the low push (`PUSH` onto IE
+  can cancel the dispatch to vector $0000).
+- HALT with an interrupt already pending and IME set returns to HALT after
+  the handler; the HALT bug fetches the byte after HALT twice.
+- The serial port is clocked from DIV's bit 8 (bit 3 for the CGB's fast
+  clock); an external-clock transfer waits forever without a partner.
+- Unmapped I/O reads $FF; the CGB register block is hidden on the DMG.
+- Save state format version 3 (OAM DMA engine state, timer reload cycle,
+  serial bit counter).
+
+### Fixed
+- `cpu_instrs` no longer hangs on the DMG: the ROM detected a CGB through
+  the readable KEY1 register and entered STOP for a speed switch.
+- ROR by a multiple of 32 in the GBA core underflowed the carry index in
+  debug builds.
+- The `accuracy` runner expands `..` path segments and runs mem_timing-2 as
+  a memory-result test.
+
 ## [0.2.0] - 2026-09-14
 
 Accuracy harness release: every open-source test suite runs in CI against a
