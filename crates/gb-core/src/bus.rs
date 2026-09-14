@@ -48,6 +48,9 @@ pub struct Bus {
     pub(crate) dma_source: u16,
     pub(crate) dma_remaining: u32,
     pub(crate) serial_remaining: u32,
+    /// The byte in SB when the transfer started; it is what the other end
+    /// (and `serial_buf`) receives.
+    pub(crate) serial_out: u8,
     /// HDMA (CGB) state.
     pub(crate) hdma_active: bool,
     pub(crate) hdma_hblank: bool,
@@ -57,9 +60,34 @@ pub struct Bus {
     pub(crate) hdma_done_this_hblank: bool,
 }
 
+/// The console a cartridge runs on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Model {
+    /// Game Boy (DMG).
+    Dmg,
+    /// Game Boy Color, including its DMG compatibility mode for plain carts.
+    Cgb,
+}
+
+impl Model {
+    /// The model the cartridge header asks for.
+    pub fn for_cart(cart: &Cartridge) -> Model {
+        if cart.is_cgb() {
+            Model::Cgb
+        } else {
+            Model::Dmg
+        }
+    }
+}
+
 impl Bus {
     pub fn new(cart: Cartridge) -> Bus {
-        let is_cgb = cart.is_cgb();
+        let model = Model::for_cart(&cart);
+        Bus::new_with_model(cart, model)
+    }
+
+    pub fn new_with_model(cart: Cartridge, model: Model) -> Bus {
+        let is_cgb = model == Model::Cgb;
         let mut bus = Bus {
             cart,
             wram: [0; 0x8000],
@@ -79,6 +107,7 @@ impl Bus {
             dma_source: 0,
             dma_remaining: 0,
             serial_remaining: 0,
+            serial_out: 0,
             hdma_active: false,
             hdma_hblank: false,
             hdma_len: 0,
@@ -175,6 +204,7 @@ impl Bus {
                     // Start a serial transfer: 8 bits at 8192 Hz (normal) or
                     // 16384 Hz (fast), i.e. 4096 or 2048 T-cycles per byte.
                     self.serial_remaining = if value & 0x01 != 0 { 2048 } else { 4096 };
+                    self.serial_out = self.io[0x01];
                 }
             }
             0xFF04 => {
@@ -322,10 +352,12 @@ impl Bus {
         if self.serial_remaining > 0 {
             self.serial_remaining = self.serial_remaining.saturating_sub(cycles);
             if self.serial_remaining == 0 {
-                self.io[0x01] = 0xFF; // received byte
+                // No link partner: the transmitted byte leaves through
+                // `serial_buf` and $FF shifts in.
+                self.serial_buf.push(self.serial_out);
+                self.io[0x01] = 0xFF;
                 self.io[0x02] &= !0x80; // transfer complete
                 self.io[0x0F] |= 0x08; // serial interrupt
-                self.serial_buf.push(self.io[0x01]);
             }
         }
 

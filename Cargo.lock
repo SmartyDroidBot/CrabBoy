@@ -1017,8 +1017,10 @@ dependencies = [
  "gb-core",
  "gba-core",
  "ico",
+ "png 0.18.1",
  "resvg",
  "sha2",
+ "toml",
  "ureq",
  "zip",
 ]

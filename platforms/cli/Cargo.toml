@@ -53,6 +53,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"
 ico = { version = "0.5", optional = true }
 resvg = { version = "0.48", optional = true, default-features = false }
+png = "0.18"
+toml = "1"
 
 [features]
 # Dev tool that rasterises assets/logo.svg into the icon files (pure Rust).

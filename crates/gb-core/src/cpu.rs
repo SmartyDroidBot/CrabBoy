@@ -16,6 +16,8 @@ pub struct Cpu {
     pub pc: u16,
     pub ime: bool,
     pub ei_pending: bool,
+    /// Set when `ld b,b` executes; test ROMs use the opcode as a breakpoint.
+    pub breakpoint: bool,
     pub halted: bool,
     pub stopped: bool,
     pub(crate) halt_bug: bool,
@@ -40,6 +42,7 @@ impl Cpu {
             halted: false,
             stopped: false,
             halt_bug: false,
+            breakpoint: false,
             timer_interrupts: 0,
         }
     }
@@ -154,6 +157,9 @@ impl Cpu {
         self.halt_bug = false;
         let pc = self.pc;
         let op = self.fetch8(bus);
+        if op == 0x40 {
+            self.breakpoint = true;
+        }
         // Only query the environment once; tracing is a debug-only aid.
         static TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *TRACE_ENABLED.get_or_init(|| std::env::var("GB_TRACE").is_ok()) {

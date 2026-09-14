@@ -10,7 +10,7 @@ pub mod devices;
 pub mod gb;
 mod state;
 
-pub use bus::Bus;
+pub use bus::{Bus, Model};
 pub use cartridge::Cartridge;
 pub use cpu::Cpu;
 pub use devices::joypad;

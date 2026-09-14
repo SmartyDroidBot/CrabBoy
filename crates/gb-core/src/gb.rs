@@ -4,7 +4,7 @@
 //! a uniform, platform-agnostic interface to frontends. Add `Gb::new` to a
 //! system selector to host it.
 
-use crate::bus::Bus;
+use crate::bus::{Bus, Model};
 use crate::cartridge::Cartridge;
 use crate::cpu::Cpu;
 use crate::devices::joypad;
@@ -20,7 +20,15 @@ pub struct Gb {
 
 impl Gb {
     pub fn new(cart: Cartridge) -> Gb {
-        let mut bus = Bus::new(cart);
+        let model = Model::for_cart(&cart);
+        Gb::new_with_model(cart, model)
+    }
+
+    /// Boot the cartridge on a specific console model instead of the one its
+    /// header requests (a CGB running a DMG cart in compatibility mode, or a
+    /// DMG ignoring the colour flag).
+    pub fn new_with_model(cart: Cartridge, model: Model) -> Gb {
+        let mut bus = Bus::new_with_model(cart, model);
         let mut cpu = Cpu::new();
         if bus.is_cgb {
             // The CGB boot ROM leaves the CPU in CGB mode with A=$11 (which
@@ -45,6 +53,12 @@ impl Gb {
     /// Construct a `Box<dyn System>` from a cartridge (frontend convenience).
     pub fn system(cart: Cartridge) -> Box<dyn emu_core::System> {
         Box::new(Gb::new(cart))
+    }
+
+    /// Whether the CPU executed `ld b,b` (opcode $40) since the last call.
+    /// Test suites (mooneye, mealybug, acid2) use it to signal completion.
+    pub fn take_breakpoint(&mut self) -> bool {
+        std::mem::take(&mut self.cpu.breakpoint)
     }
 
     pub fn press_button(&mut self, button: u8) {
@@ -297,6 +311,51 @@ impl emu_core::System for Gb {
 mod tests {
     use super::*;
     use crate::devices::joypad::*;
+
+    #[test]
+    fn serial_buffer_receives_the_transmitted_byte() {
+        use emu_core::System;
+        let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        emu.bus.write(0xFF01, b'P');
+        emu.bus.write(0xFF02, 0x81);
+        emu.run_frame();
+        assert_eq!(emu.bus.serial_buf, vec![b'P']);
+        assert_eq!(
+            emu.bus.read(0xFF01),
+            0xFF,
+            "$FF shifts in without a partner"
+        );
+        assert_eq!(emu.bus.read(0xFF02) & 0x80, 0);
+    }
+
+    #[test]
+    fn model_selection_overrides_the_header() {
+        let cart = Cartridge::load(&[0u8; 0x8000]).unwrap();
+        let emu = Gb::new_with_model(cart, Model::Cgb);
+        assert!(emu.bus.is_cgb);
+        assert_eq!(emu.cpu.a, 0x11);
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x143] = 0x80;
+        let emu = Gb::new_with_model(Cartridge::load(&rom).unwrap(), Model::Dmg);
+        assert!(!emu.bus.is_cgb);
+        assert_eq!(emu.cpu.a, 0x01);
+    }
+
+    #[test]
+    fn ld_b_b_raises_the_breakpoint_flag() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x100] = 0x00; // nop
+        rom[0x101] = 0x40; // ld b,b
+        rom[0x102] = 0x18; // jr -2
+        rom[0x103] = 0xFE;
+        let mut emu = Gb::new(Cartridge::load(&rom).unwrap());
+        assert!(!emu.take_breakpoint());
+        emu.step();
+        assert!(!emu.take_breakpoint());
+        emu.step();
+        assert!(emu.take_breakpoint());
+        assert!(!emu.take_breakpoint(), "the flag is consumed");
+    }
 
     #[test]
     fn take_audio_returns_the_whole_frame() {

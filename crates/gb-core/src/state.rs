@@ -183,6 +183,7 @@ fn load_cpu(r: &mut Reader) -> Result<Cpu, String> {
         halted: r.bool()?,
         stopped: r.bool()?,
         halt_bug: r.bool()?,
+        breakpoint: false,
         timer_interrupts: r.u64()?,
     })
 }
@@ -499,6 +500,7 @@ fn load_bus(r: &mut Reader) -> Result<Bus, String> {
         dma_source: r.u16()?,
         dma_remaining: r.u32()?,
         serial_remaining: r.u32()?,
+        serial_out: 0,
         hdma_active: r.bool()?,
         hdma_hblank: r.bool()?,
         hdma_len: r.u16()?,
