@@ -555,6 +555,14 @@ impl Bus for TestBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ror_by_a_multiple_of_32_keeps_the_value_and_carries_bit_31() {
+        use super::arm::shift_reg;
+        assert_eq!(shift_reg(0x8000_0001, 3, 32, false), (0x8000_0001, true));
+        assert_eq!(shift_reg(0x0000_0001, 3, 64, false), (0x0000_0001, false));
+        assert_eq!(shift_reg(0x0000_0001, 3, 1, false), (0x8000_0000, true));
+    }
     use crate::cpu::flag;
 
     fn arm(bus: &mut TestBus, addr: u32, inst: u32) {

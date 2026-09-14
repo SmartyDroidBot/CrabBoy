@@ -98,11 +98,17 @@ pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -
                 let v = (operand >> 1) | (if carry_in { 1u32 << 31 } else { 0 });
                 (v, operand & 1 != 0)
             } else {
+                // A multiple of 32 leaves the value unchanged with bit 31 as
+                // the carry.
                 let amt = amount & 31;
-                (
-                    operand.rotate_right(amt),
-                    operand & (1u32 << (amt - 1)) != 0,
-                )
+                if amt == 0 {
+                    (operand, operand >> 31 != 0)
+                } else {
+                    (
+                        operand.rotate_right(amt),
+                        operand & (1u32 << (amt - 1)) != 0,
+                    )
+                }
             }
         }
     }
