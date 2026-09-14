@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "crab-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "crab-systems",
  "emu-core",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "crab-desktop"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "crab-systems",
  "eframe",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "crab-systems"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "emu-core",
  "gb-core",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "crab-wasm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "crab-systems",
  "emu-core",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "emu-core"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "encoding_rs"
@@ -1623,14 +1623,14 @@ dependencies = [
 
 [[package]]
 name = "gb-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "emu-core",
 ]
 
 [[package]]
 name = "gba-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "emu-core",
 ]

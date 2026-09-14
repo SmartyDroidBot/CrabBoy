@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-14
+
+Accuracy harness release: every open-source test suite runs in CI against a
+recorded baseline.
+
 ### Added
 - `accuracy` runner (`platforms/cli`) driven by `tests/accuracy/suites.toml`:
   blargg (serial and memory-signature tests), mooneye and SameSuite
