@@ -181,13 +181,15 @@ impl Cpu {
 
     /// Execute one instruction, returning the number of machine cycles used.
     pub fn execute(&mut self, bus: &mut Bus) -> u32 {
-        // If a bugged HALT ran on the previous step, the byte after it must be
-        // fetched again: rewind PC by one after this instruction completes.
-        let was_bugged = self.halt_bug;
-        self.halt_bug = false;
         let pc = self.pc;
         self.ticked = 0;
         let op = self.fetch8(bus);
+        // HALT bug: PC is not advanced by the fetch after a bugged HALT, so the
+        // byte after it serves as this opcode and as the next byte read.
+        if self.halt_bug {
+            self.halt_bug = false;
+            self.pc = pc;
+        }
         if op == 0x40 {
             self.breakpoint = true;
         }
@@ -226,11 +228,6 @@ impl Cpu {
             "opcode {op:02X} at {pc:04X} ticked {} cycles, expected {expected}",
             self.ticked
         );
-        // HALT bug: the instruction following a bugged HALT runs twice, so PC is
-        // rewound after it (the flag was captured at the top of this call).
-        if was_bugged {
-            self.pc = self.pc.wrapping_sub(1);
-        }
         self.ticked
     }
 
@@ -1864,6 +1861,26 @@ mod tests {
             cpu.pc, 0x0102,
             "continues at the byte after the doubled instruction"
         );
+    }
+
+    #[test]
+    fn halt_bug_reuses_the_opcode_byte_as_the_operand() {
+        let (mut cpu, mut bus) = cpu_with_bus();
+        bus.ie = 0x01;
+        bus.io[0x0F] = 0x01;
+        cpu.ime = false;
+        bus.cart.rom[0x0100] = 0x76; // halt
+        bus.cart.rom[0x0101] = 0x3E; // ld a, n
+        bus.cart.rom[0x0102] = 0x12; // n; then runs as ld (de), a
+        bus.cart.rom[0x0103] = 0x00;
+        cpu.set_de(0xC000);
+        cpu.execute(&mut bus); // halt (bug branch)
+        cpu.execute(&mut bus); // ld a, $3E: the operand is the opcode byte again
+        assert_eq!(cpu.a, 0x3E);
+        assert_eq!(cpu.pc, 0x0102);
+        cpu.execute(&mut bus); // $12 executes as ld (de), a
+        assert_eq!(bus.read(0xC000), 0x3E);
+        assert_eq!(cpu.pc, 0x0103);
     }
 
     #[test]
