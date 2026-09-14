@@ -349,6 +349,23 @@ mod tests {
     }
 
     #[test]
+    fn oam_is_unreadable_while_dma_runs() {
+        let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        emu.bus.write(0xC000, 0x42);
+        emu.bus.write(0xFE00, 0x11);
+        emu.bus.write(0xFF46, 0xC0); // DMA from $C000
+        assert!(emu.bus.dma_active());
+        assert_eq!(emu.bus.read(0xFE00), 0xFF);
+        emu.bus.write(0xFE01, 0x99);
+        for _ in 0..160 {
+            emu.bus.step(4);
+        }
+        assert!(!emu.bus.dma_active());
+        assert_eq!(emu.bus.read(0xFE00), 0x42);
+        assert_eq!(emu.bus.read(0xFE01), 0x00, "write during DMA was ignored");
+    }
+
+    #[test]
     fn take_audio_returns_the_whole_frame() {
         use emu_core::System;
         let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());

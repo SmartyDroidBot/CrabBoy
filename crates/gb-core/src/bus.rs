@@ -157,6 +157,8 @@ impl Bus {
             0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xDFFF => self.wram[self.wram_offset(addr)],
             0xE000..=0xFDFF => self.wram[self.wram_offset(addr)],
+            // OAM is inaccessible while the DMA engine writes it.
+            0xFE00..=0xFE9F if self.dma_remaining > 0 => 0xFF,
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00,
             0xFF00 => self.joypad.read(self.io[0x00]),
@@ -194,6 +196,7 @@ impl Bus {
                 let off = self.wram_offset(addr);
                 self.wram[off] = value;
             }
+            0xFE00..=0xFE9F if self.dma_remaining > 0 => {}
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFEA0..=0xFEFF => {}
             0xFF00 => self.io[0x00] = value | 0xC0,
