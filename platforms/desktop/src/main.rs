@@ -365,6 +365,7 @@ impl CrabBoyApp {
         let dirty = if let Some(system) = &mut self.system {
             system.run_frame();
             self.frame_count += 1;
+            self.fps_frames += 1;
             let audio = system.take_audio();
             if !self.fast_forward {
                 if let Some(out) = &mut self.audio {
@@ -578,7 +579,6 @@ impl eframe::App for CrabBoyApp {
         self.handle_input(ctx);
         self.advance(ctx, dt);
 
-        self.fps_frames += 1;
         if now.duration_since(self.last_fps).as_secs_f64() >= 1.0 {
             self.fps = self.fps_frames as f64 / now.duration_since(self.last_fps).as_secs_f64();
             self.fps_frames = 0;
