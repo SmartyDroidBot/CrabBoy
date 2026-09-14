@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-14
+
+Polish release: project branding, a rewritten desktop audio path and
+audible GBA sound.
+
 ### Added
 - Project logo (`assets/`), used in the README, as the desktop window icon
   and Windows executable icon, and as the browser demo's favicon, home-screen
