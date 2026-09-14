@@ -13,7 +13,7 @@ use crate::save::SaveType;
 /// Magic header identifying a CrabBoy GBA save state.
 pub const STATE_MAGIC: &[u8; 4] = b"CRGA";
 /// Current save-state format version.
-pub const STATE_VERSION: u32 = 5;
+pub const STATE_VERSION: u32 = 6;
 
 /// Little-endian serialiser shared by the save-state writers.
 pub(crate) struct Writer {

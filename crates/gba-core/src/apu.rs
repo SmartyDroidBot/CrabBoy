@@ -12,6 +12,21 @@ use emu_core::audio::AudioBuffer;
 
 /// CPU cycles per audio sample (16.78 MHz / 32768 Hz).
 pub const CYCLES_PER_SAMPLE: u32 = 512;
+/// CPU cycles per frame-sequencer step (512 Hz).
+const CYCLES_PER_SEQUENCER_STEP: u32 = 32768;
+
+/// Advance a down-counting timer by `cycles`, reloading it with `period`
+/// (which must be non-zero) each time it expires. Returns how many times it
+/// expired, so a channel can be clocked in bulk instead of per cycle.
+fn run_timer(timer: &mut u32, period: u32, cycles: u32) -> u32 {
+    if cycles < *timer {
+        *timer -= cycles;
+        return 0;
+    }
+    let rest = cycles - *timer;
+    *timer = period - rest % period;
+    1 + rest / period
+}
 
 const DUTY: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1],
@@ -114,7 +129,7 @@ impl Square {
         }
         self.freq = (self.freq & 0x07FF) | ((value & 0x0700) >> 8);
         self.freq = (value >> 8) & 0x07;
-        self.freq_timer = (2048 - self.freq as u32) * 4;
+        self.freq_timer = self.period();
         self.phase = 0;
         self.env.timer = self.env.period;
         if has_sweep {
@@ -147,15 +162,18 @@ impl Square {
         }
         if load {
             self.freq = new & 0x7FF;
-            self.freq_timer = (2048 - self.freq as u32) * 4;
+            self.freq_timer = self.period();
         }
     }
-    fn tick_freq(&mut self) {
-        if self.freq_timer == 0 {
-            self.freq_timer = (2048 - self.freq as u32) * 4;
-            self.phase = (self.phase + 1) & 7;
-        }
-        self.freq_timer -= 1;
+    /// CPU cycles per duty step: the Game Boy's `(2048 - f) * 4` at four
+    /// times the clock.
+    fn period(&self) -> u32 {
+        (2048 - self.freq as u32) * 16
+    }
+    fn clock(&mut self, cycles: u32) {
+        let period = self.period();
+        let steps = run_timer(&mut self.freq_timer, period, cycles);
+        self.phase = (self.phase as u32 + steps) as u8 & 7;
     }
     fn sample(&self) -> f32 {
         if !self.on {
@@ -221,16 +239,19 @@ impl Wave {
             self.length = 256;
         }
         self.freq = (value >> 8) & 0x07;
-        self.freq_timer = (2048 - self.freq as u32) * 4;
+        self.freq_timer = self.period();
         self.phase = 0;
         self.on = self.dac_on;
     }
-    fn tick_freq(&mut self) {
-        if self.freq_timer == 0 {
-            self.freq_timer = (2048 - self.freq as u32) * 4;
-            self.phase = (self.phase + 1) & 31;
-        }
-        self.freq_timer -= 1;
+    /// CPU cycles per wave sample: the Game Boy's `(2048 - f) * 2` at four
+    /// times the clock.
+    fn period(&self) -> u32 {
+        (2048 - self.freq as u32) * 8
+    }
+    fn clock(&mut self, cycles: u32) {
+        let period = self.period();
+        let steps = run_timer(&mut self.freq_timer, period, cycles);
+        self.phase = (self.phase as u32 + steps) as u8 & 31;
     }
     fn sample(&self, wave_ram: &[u8; 16]) -> f32 {
         if !self.on || self.volume_shift == 0 {
@@ -287,21 +308,29 @@ impl Noise {
         self.divisor = ((value >> 8) & 0x07) as u8;
         self.width = value & 0x0800 != 0;
         self.shift = ((value >> 12) & 0x0F) as u8;
-        self.freq_timer = if self.divisor == 0 {
-            8
-        } else {
-            self.divisor as u32 * 16
-        };
+        self.freq_timer = self.period();
         self.lfsr = 0x7FFF;
         self.on = true;
     }
-    fn tick_freq(&mut self) {
-        if self.freq_timer == 0 {
-            self.freq_timer = if self.divisor == 0 {
-                8
-            } else {
-                self.divisor as u32 * 16
-            };
+    /// CPU cycles per LFSR shift: `(r == 0 ? 8 : 16 r) << s` Game Boy cycles
+    /// at four times the clock. Shift values 14 and 15 never clock.
+    fn period(&self) -> u32 {
+        let base = if self.divisor == 0 {
+            32
+        } else {
+            64 * self.divisor as u32
+        };
+        base << self.shift.min(13)
+    }
+    fn clock(&mut self, cycles: u32) {
+        if self.shift >= 14 {
+            return;
+        }
+        let period = self.period();
+        let steps = run_timer(&mut self.freq_timer, period, cycles);
+        // The LFSR repeats after at most 32767 steps (127 in 7-bit mode).
+        let repeat = if self.width { 127 } else { 32767 };
+        for _ in 0..steps % repeat {
             let xor = (self.lfsr & 1) ^ ((self.lfsr >> 1) & 1);
             self.lfsr >>= 1;
             self.lfsr |= xor << 14;
@@ -309,7 +338,6 @@ impl Noise {
                 self.lfsr = (self.lfsr & !(1 << 6)) | (xor << 6);
             }
         }
-        self.freq_timer -= 1;
     }
     fn sample(&self) -> f32 {
         if !self.on {
@@ -368,7 +396,9 @@ pub struct Apu {
     dsa_timer: u8,
     dsb_timer: u8,
     wave_ram: [u8; 16],
+    /// CPU cycles into the current sample and sequencer step.
     cycles: u32,
+    fs_cycles: u32,
     fs: u8,
     soundcnt_l: u16,
     soundcnt_h: u16,
@@ -391,6 +421,7 @@ impl Default for Apu {
             dsb_timer: 0,
             wave_ram: [0; 16],
             cycles: 0,
+            fs_cycles: 0,
             fs: 0,
             soundcnt_l: 0,
             soundcnt_h: 0,
@@ -494,6 +525,7 @@ impl Apu {
         w.u8(self.dsb_timer);
         w.buf.extend_from_slice(&self.wave_ram);
         w.u32(self.cycles);
+        w.u32(self.fs_cycles);
         w.u8(self.fs);
         w.u16(self.soundcnt_l);
         w.u16(self.soundcnt_h);
@@ -513,6 +545,7 @@ impl Apu {
         self.dsb_timer = r.u8()? & 1;
         self.wave_ram = r.array()?;
         self.cycles = r.u32()?;
+        self.fs_cycles = r.u32()?;
         self.fs = r.u8()?;
         self.soundcnt_l = r.u16()?;
         self.soundcnt_h = r.u16()?;
@@ -600,16 +633,32 @@ impl Apu {
         }
     }
 
-    /// Advance the APU by `cycles` CPU cycles, generating samples as needed.
-    pub fn step(&mut self, cycles: u32) {
-        self.cycles += cycles;
-        while self.cycles >= CYCLES_PER_SAMPLE {
-            self.cycles -= CYCLES_PER_SAMPLE;
-            self.fs = (self.fs + 1) & 7;
-            self.sequencer_step();
-            self.tick_freqs();
-            self.push_sample();
+    /// Advance the APU by `cycles` CPU cycles: clock the channel timers and
+    /// the 512 Hz frame sequencer, emitting one sample every 512 cycles.
+    pub fn step(&mut self, mut cycles: u32) {
+        while cycles > 0 {
+            let run = cycles.min(CYCLES_PER_SAMPLE - self.cycles);
+            self.clock_channels(run);
+            self.fs_cycles += run;
+            while self.fs_cycles >= CYCLES_PER_SEQUENCER_STEP {
+                self.fs_cycles -= CYCLES_PER_SEQUENCER_STEP;
+                self.fs = (self.fs + 1) & 7;
+                self.sequencer_step();
+            }
+            self.cycles += run;
+            cycles -= run;
+            if self.cycles == CYCLES_PER_SAMPLE {
+                self.cycles = 0;
+                self.push_sample();
+            }
         }
+    }
+
+    fn clock_channels(&mut self, cycles: u32) {
+        self.sq1.clock(cycles);
+        self.sq2.clock(cycles);
+        self.wave.clock(cycles);
+        self.noise.clock(cycles);
     }
 
     fn sequencer_step(&mut self) {
@@ -622,8 +671,8 @@ impl Apu {
             1 | 3 | 5 => {}
             _ => {}
         }
-        // Sweep (ch1) at step 6, envelope at step 7.
-        if self.fs == 6 {
+        // Sweep (ch1) at steps 2 and 6, envelope at step 7.
+        if self.fs == 2 || self.fs == 6 {
             self.sq1.sweep_tick();
         }
         if self.fs == 7 {
@@ -648,13 +697,6 @@ impl Apu {
                 ch.on = false;
             }
         }
-    }
-
-    fn tick_freqs(&mut self) {
-        self.sq1.tick_freq();
-        self.sq2.tick_freq();
-        self.wave.tick_freq();
-        self.noise.tick_freq();
     }
 
     fn push_sample(&mut self) {
@@ -836,6 +878,35 @@ mod tests {
         let audio = apu.take_audio();
         assert_eq!(audio.samples.len(), 8);
         assert!(audio.samples.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn run_timer_counts_expiries_in_bulk() {
+        let mut t = 10;
+        assert_eq!(run_timer(&mut t, 16, 4), 0);
+        assert_eq!(t, 6);
+        assert_eq!(run_timer(&mut t, 16, 6), 1);
+        assert_eq!(t, 16);
+        // Expiries at cycles 16 and 32 of the 40; 8 cycles remain of the next.
+        assert_eq!(run_timer(&mut t, 16, 40), 2);
+        assert_eq!(t, 8);
+    }
+
+    #[test]
+    fn frame_sequencer_runs_at_512_hz() {
+        let mut apu = Apu::new();
+        // Envelope: volume 15, decreasing, period 1 -> one step per
+        // sequencer cycle of 8 steps = 262144 CPU cycles.
+        apu.write16(0x62, 0x00F1);
+        apu.write16(0x64, 0x8000);
+        assert_eq!(apu.sq1.env.volume, 15);
+        // The envelope is clocked on sequencer step 7 (after 7 x 32768
+        // cycles); the first clock only reloads the period timer, the second
+        // one decrements the volume.
+        apu.step(7 * 32768 + 262144 - 1);
+        assert_eq!(apu.sq1.env.volume, 15);
+        apu.step(1);
+        assert_eq!(apu.sq1.env.volume, 14);
     }
 
     #[test]
