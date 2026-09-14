@@ -131,8 +131,7 @@ impl Bus {
             hdma_dst: 0,
             hdma_done_this_hblank: false,
         };
-        bus.io[0x00] = 0xCF;
-        bus.io[0x40] = 0x91; // post-boot LCDC: LCD on, BG+OBJ enabled
+        bus.boot_state();
         bus.ppu.cgb = is_cgb;
         // Simulate the CGB boot ROM's default palette upload for monochrome
         // games (BG palette 0 / OBJ palettes 0–1); harmless for CGB carts too,
@@ -142,6 +141,40 @@ impl Bus {
             bus.ppu.obj_pal[p * 8..p * 8 + 8].copy_from_slice(&BOOT_PAL_OBJ);
         }
         bus
+    }
+
+    /// The register and device state the boot ROM leaves behind, as measured
+    /// by mooneye's boot_div and boot_hwio tests: DIV's phase, the pending
+    /// VBlank flag, the sound registers after the start-up chime and the
+    /// LCD at the top of the frame.
+    fn boot_state(&mut self) {
+        self.io[0x00] = if self.is_cgb { 0xFF } else { 0xCF };
+        self.io[0x07] = 0xF8;
+        self.io[0x0F] = 0xE1;
+        self.io[0x40] = 0x91; // LCD on, BG + OBJ enabled
+        self.io[0x47] = 0xFC;
+        self.timer.div_counter = if self.is_cgb { 0x2678 } else { 0xABCC };
+        self.io[0x04] = (self.timer.div_counter >> 8) as u8;
+        for (reg, value) in [
+            (0xFF26, 0x80),
+            (0xFF11, 0x80),
+            (0xFF12, 0xF3),
+            (0xFF25, 0xF3),
+            (0xFF24, 0x77),
+            (0xFF13, 0xC1),
+            (0xFF14, 0x87),
+        ] {
+            let io = &mut self.io;
+            self.apu.write(reg, value, io);
+        }
+        // The LCD is at the start of line 0 (mooneye's boot_hwio reads STAT
+        // in mode 0 of line 9 and then LY = 10 about 200 cycles later).
+        self.ppu.ly = 0;
+        self.ppu.mode = 2;
+        self.ppu.prev_mode = 2;
+        self.ppu.dot = 0;
+        self.io[0x41] = 0x02;
+        self.io[0x44] = 0;
     }
 
     pub fn dma_active(&self) -> bool {
@@ -212,22 +245,28 @@ impl Bus {
             0xFE00..=0xFE9F if self.oam_blocked() => 0xFF,
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00,
-            0xFF00 => self.joypad.read(self.io[0x00]),
+            0xFF00 => self.joypad.read(self.io[0x00]) | 0xC0,
             0xFF01 => self.io[0x01],
             0xFF02 => self.io[0x02] | 0x7E,
-            0xFF04..=0xFF07 => self.io[(addr - 0xFF00) as usize],
+            0xFF03 | 0xFF08..=0xFF0E => 0xFF,
+            0xFF04..=0xFF06 => self.io[(addr - 0xFF00) as usize],
+            0xFF07 => self.io[0x07] | 0xF8,
             0xFF0F => self.io[0x0F] | 0xE0,
             0xFF10..=0xFF3F => self.apu.read(addr, &self.io),
+            0xFF41 => self.io[0x41] | 0x80,
+            // The CGB registers do not exist on the DMG.
+            0xFF4C..=0xFF7F if !self.is_cgb => 0xFF,
             0xFF4D => {
                 let speed = if self.double_speed { 0x80 } else { 0 };
-                (self.io[0x4D] & 0x01) | speed
+                (self.io[0x4D] & 0x01) | speed | 0x7E
             }
+            0xFF4F => self.io[0x4F] | 0xFE,
             0xFF68..=0xFF6B => self.ppu.read_pal_reg(addr, &self.io),
             0xFF70 => self.io[0x70] | 0xF8,
+            0xFF4E | 0xFF50 | 0xFF57..=0xFF67 | 0xFF6D..=0xFF6F | 0xFF71 | 0xFF78..=0xFF7F => 0xFF,
             0xFF40..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
-            _ => 0x00,
         }
     }
 
@@ -275,6 +314,7 @@ impl Bus {
             }
             0xFF46 => self.dma(value),
             0xFF44 => { /* LY is read-only on real hardware; writes ignored */ }
+            0xFF4C..=0xFF7F if !self.is_cgb => {}
             0xFF4D => self.io[0x4D] = value & 0x01,
             0xFF4F => self.io[0x4F] = value & 0x01,
             0xFF51..=0xFF54 => self.io[(addr - 0xFF00) as usize] = value,
