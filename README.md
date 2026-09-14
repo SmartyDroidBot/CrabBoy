@@ -26,8 +26,9 @@ docs/
 assets/            Logo and the generated icons (see assets/README.md)
 ```
 
-See [`ROADMAP.md`](ROADMAP.md) for the milestones and [`CHANGELOG.md`](CHANGELOG.md)
-for what each release contains.
+See [`ROADMAP.md`](ROADMAP.md) for the milestones, [`CHANGELOG.md`](CHANGELOG.md)
+for what each release contains and [`docs/accuracy.md`](docs/accuracy.md) for
+the current test-suite results.
 
 ## Status
 

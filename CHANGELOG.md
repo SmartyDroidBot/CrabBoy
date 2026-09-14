@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `accuracy` runner (`platforms/cli`) driven by `tests/accuracy/suites.toml`:
+  blargg (serial and memory-signature tests), mooneye and SameSuite
+  (`ld b,b` register signature), dmg-acid2, cgb-acid2, mealybug and blargg
+  screenshot comparisons, and the jsmolka GBA suites, run in parallel with
+  per-test frame budgets. Results are compared with a committed baseline;
+  CI fails on any change so improvements are recorded deliberately.
+  Baseline results live in `docs/accuracy.md` (77 of 313 pass).
+- gb-core: `Gb::new_with_model` boots a cartridge as DMG or CGB regardless
+  of its header; `Gb::take_breakpoint` reports `ld b,b`.
+
+### Fixed
+- gb-core: the serial port now transmits the byte written to SB (blargg's
+  "Passed"/"Failed" text was never visible); CGB colours expand with
+  `(x << 3) | (x >> 2)` as the reference screenshots do.
+
+### Removed
+- The `probe`, `test_runner` and `run_accuracy` bins, replaced by `crab run`
+  and `accuracy`.
+
 ## [0.1.2] - 2026-09-14
 
 GBA conformance release: the jsmolka CPU, memory, BIOS and save suites
