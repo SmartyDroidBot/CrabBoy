@@ -85,6 +85,8 @@ references this file.
   - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean, and
         so is `cargo clippy -p crab-wasm --target wasm32-unknown-unknown`.
   - [ ] No `rustfmt` diffs.
+  - [ ] `accuracy --ci` passes, or the baseline and `docs/accuracy.md` are
+        updated in the same change with the reason.
   - [ ] Frame hashes unchanged (section 5) unless the change intends to alter
         output, in which case the new hashes are stated in the PR.
   - [ ] WASM bindings and browser demo verified if `platforms/wasm` changed.
@@ -103,9 +105,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+**Accuracy suites** (required for any core change). Fetch the suites once
+with `cargo run --release -p crab-cli --bin fetch_test_roms`, then:
+```sh
+cargo run --release -p crab-cli --bin accuracy -- --ci
+```
+Every result must match `tests/accuracy/baseline.txt`; CI runs the same
+command. A change that fixes or breaks a test updates the baseline in the
+same commit (`--update-baseline`, then `--markdown docs/accuracy.md`) and
+says so in the commit body. Never regress a passing test without an
+explicit reason recorded there.
+
 **Frame-hash regression** (required for any core, `crab-systems` or CLI
-change). Fetch the suites once with
-`cargo run --release -p crab-cli --bin fetch_test_roms`, then:
+change):
 ```sh
 cargo run --release -p crab-cli --bin crab -- run roms/test-suites/gb/dmg-acid2/dmg-acid2.gb --frames 120 --hash
 cargo run --release -p crab-cli --bin crab -- run roms/test-suites/gb/cgb-acid2/cgb-acid2.gbc --frames 120 --hash
