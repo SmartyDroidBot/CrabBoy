@@ -58,7 +58,7 @@ impl Default for SaveCartridge {
             kind: SaveType::None,
             detected: false,
             flash: Mem::filled(0xFF),
-            sram: Mem::zeroed(),
+            sram: Mem::filled(0xFF),
             eeprom: Eeprom::new(),
             bank: 0,
             cmd: Cmd::Idle,
@@ -297,10 +297,14 @@ impl SaveCartridge {
                 }
             }
             Cmd::Erase3 => {
-                if a == 0x5555 && (value == 0x10 || value == 0x30) {
-                    // Sector erase; for simplicity erase the whole selected bank.
-                    let base = self.bank * 0x10000;
-                    self.flash[base..base + 0x10000].fill(0xFF);
+                if a == 0x5555 && value == 0x10 {
+                    // Chip erase.
+                    self.flash[0..FLASH_SIZE].fill(0xFF);
+                    self.dirty = true;
+                } else if value == 0x30 {
+                    // Sector erase: the 4 KB sector containing the address.
+                    let base = self.bank * 0x10000 + (a & 0xF000);
+                    self.flash[base..base + 0x1000].fill(0xFF);
                     self.dirty = true;
                 }
                 self.cmd = Cmd::Idle;
