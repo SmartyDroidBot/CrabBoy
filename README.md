@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="320" alt="CrabBoy"></p>
+
 # CrabBoy
 
 A multi-system emulator in Rust. It hosts a **Game Boy / Game Boy Color**
@@ -21,6 +23,7 @@ docs/
   gba/             Verified hardware notes (boot, BIOS, DMA, I/O, RTC) and the
                    pinned verification runs
   releasing.md     How a release is cut
+assets/            Logo and the generated icons (see assets/README.md)
 ```
 
 See [`ROADMAP.md`](ROADMAP.md) for the milestones and [`CHANGELOG.md`](CHANGELOG.md)
