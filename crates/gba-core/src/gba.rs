@@ -123,6 +123,8 @@ impl Gba {
         if self.cpu.has_bios {
             return;
         }
+        // During the handler the real BIOS has `subs pc, lr, #4` prefetched.
+        self.bus.bios_last = 0xE25E_F004;
         let handler = self.bus.read32(0x0300_7FFC);
         let sp = self.cpu.sp_raw().wrapping_sub(24);
         for (i, r) in [0u32, 1, 2, 3, 12, 14].into_iter().enumerate() {
@@ -133,6 +135,19 @@ impl Gba {
         self.cpu.set_reg(14, Self::IRQ_RETURN_STUB);
         self.cpu.set_reg(0, 0x0400_0000);
         self.cpu.set_pc(handler);
+    }
+
+    /// Reads of the BIOS from outside it return the opcode the BIOS last
+    /// prefetched (two instructions past the one executing). With a real
+    /// image that is the word at `pc + 8`; the HLE IRQ stub mirrors the
+    /// values the real handler leaves behind.
+    fn track_bios_prefetch(&mut self, pc: u32) {
+        if self.bus.has_real_bios() {
+            self.bus.bios_last = self.bus.read32_raw_bios(pc.wrapping_add(8));
+        } else if pc == Self::IRQ_RETURN_STUB + 4 {
+            // After `subs pc, lr, #4` at 0x13C in the real BIOS.
+            self.bus.bios_last = 0xE55E_C002;
+        }
     }
 
     /// Advance the machine by `cycles` (timers, APU, PPU scanlines, DMA).
@@ -319,6 +334,11 @@ impl Gba {
         }
 
         self.bus.begin_step();
+        let pc = self.cpu.pc();
+        self.bus.pc_in_bios = pc < 0x4000;
+        if self.bus.pc_in_bios {
+            self.track_bios_prefetch(pc);
+        }
         let instr = self.cpu.execute(&mut self.bus);
         let total = instr + self.bus.cycles();
         // Dispatch a BIOS SWI (if any) now that the instruction has finished.
@@ -328,6 +348,9 @@ impl Gba {
                 // number so the diagnostic tools can report it.
                 self.last_unknown_swi = Some(num);
             }
+            // The real BIOS leaves its `mov r2, #4` prefetched when an SWI
+            // returns.
+            self.bus.bios_last = 0xE3A0_2004;
         }
         // Immediate DMA fires as soon as its channel is enabled.
         self.bus.run_dma(Timing::Immediate);

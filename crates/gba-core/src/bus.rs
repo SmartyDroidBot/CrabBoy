@@ -170,7 +170,7 @@ impl Region {
             0x0700_0000..=0x07FF_FFFF => Region::Oam,
             0x0800_0000..=0x0CFF_FFFF => Region::Rom,
             0x0D00_0000..=0x0DFF_FFFF => Region::Eeprom,
-            0x0E00_0000..=0x0EFF_FFFF => Region::Sram,
+            0x0E00_0000..=0x0FFF_FFFF => Region::Sram,
             _ => return None,
         })
     }
@@ -209,6 +209,12 @@ pub struct Bus {
     pub(crate) gpio_readable: bool,
     /// Last value driven onto the bus; unmapped reads return it (open bus).
     pub(crate) open_bus: u32,
+    /// Whether the CPU is currently executing from the BIOS region. Reads
+    /// of the BIOS from anywhere else return `bios_last` instead.
+    pub(crate) pc_in_bios: bool,
+    /// The BIOS opcode most recently prefetched by code running inside the
+    /// BIOS (GBATEK "BIOS memory reads"); 0xE129F000 after the boot handoff.
+    pub(crate) bios_last: u32,
     /// Wait-state cycles added by accesses during the current instruction.
     cycles: u32,
     /// If `true`, the previous access was a sequential ROM access (prefetch
@@ -247,6 +253,8 @@ impl Bus {
             gpio_dir: 0,
             gpio_readable: false,
             open_bus: 0,
+            pc_in_bios: false,
+            bios_last: 0xE129_F000,
             cycles: 0,
             last_seq: false,
             #[cfg(feature = "trace")]
@@ -265,6 +273,13 @@ impl Bus {
     /// IRQ-return stub the skip-BIOS boot installs).
     pub fn has_real_bios(&self) -> bool {
         self.bios.len() >= 0x4000
+    }
+
+    /// The BIOS word at `addr`, regardless of where the CPU is executing.
+    pub(crate) fn read32_raw_bios(&self, addr: u32) -> u32 {
+        let base = (addr as usize) & 0x3FFC;
+        let b = |i: usize| self.bios.get(base + i).copied().unwrap_or(0) as u32;
+        b(0) | b(1) << 8 | b(2) << 16 | b(3) << 24
     }
 
     #[cfg(feature = "trace")]
@@ -339,11 +354,16 @@ impl Bus {
         self.cycles += self.wait_for(region, 8);
         self.last_seq = false;
         let v = (match region {
-            Region::Bios => self
-                .bios
-                .get((addr as usize) & 0x3FFF)
-                .copied()
-                .unwrap_or(0),
+            Region::Bios => {
+                if self.pc_in_bios {
+                    self.bios
+                        .get((addr as usize) & 0x3FFF)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    (self.bios_last >> ((addr & 3) * 8)) as u8
+                }
+            }
             Region::Ewram => self.ewram[Self::index_in(addr, EWRAM_SIZE - 1)],
             Region::Iwram => self.iwram[Self::index_in(addr, IWRAM_SIZE - 1)],
             Region::Io => {
@@ -462,9 +482,13 @@ impl Bus {
         let base = (addr as usize) & !1;
         let hw = match region {
             Region::Bios => {
-                let b = self.bios.get(base & 0x3FFF).copied().unwrap_or(0);
-                let b2 = self.bios.get((base + 1) & 0x3FFF).copied().unwrap_or(0);
-                (b as u32) | (b2 as u32) << 8
+                if self.pc_in_bios {
+                    let b = self.bios.get(base & 0x3FFF).copied().unwrap_or(0);
+                    let b2 = self.bios.get((base + 1) & 0x3FFF).copied().unwrap_or(0);
+                    (b as u32) | (b2 as u32) << 8
+                } else {
+                    (self.bios_last >> ((base & 2) * 8)) & 0xFFFF
+                }
             }
             Region::Ewram => {
                 let i = base & (EWRAM_SIZE - 1);
@@ -499,8 +523,9 @@ impl Bus {
                 None => self.rom_half(base & ROM_MASK),
             },
             Region::Sram => {
-                let i = base & 0x1FFFF;
-                self.save.read16(i) as u32
+                // 8-bit bus: the byte at the address fills both lanes.
+                let b = self.save.read8(addr as usize & 0x1FFFF) as u32;
+                b | b << 8
             }
         };
         let v = if addr & 1 != 0 {
@@ -515,8 +540,16 @@ impl Bus {
     /// Read a 32-bit value across the memory map. An unaligned address reads
     /// the aligned word rotated right by 8 bits per byte of misalignment.
     pub fn read32(&mut self, addr: u32) -> u32 {
-        if Region::of(addr).is_none() {
+        let Some(region) = Region::of(addr) else {
             return self.open_bus;
+        };
+        if region == Region::Sram {
+            // 8-bit bus: the byte at the address fills all four lanes.
+            self.cycles += self.wait_for(region, 8);
+            let b = self.save.read8(addr as usize & 0x1FFFF) as u32;
+            let v = b * 0x0101_0101;
+            self.open_bus = v;
+            return v;
         }
         let aligned = addr & !3;
         let lo = self.read16(aligned);
@@ -564,12 +597,28 @@ impl Bus {
                     _ => self.io.write8(off, value as u8),
                 }
             }
-            Region::Palram => self.palram[Self::index_in(addr, PALRAM_SIZE - 1)] = value as u8,
-            Region::Vram => {
-                self.trace_ram_write(addr, 1, value);
-                self.vram[vram_index(addr as usize)] = value as u8
+            // Byte stores to the 16-bit video memories write the byte to
+            // both halves of the halfword (palette RAM and background VRAM),
+            // are ignored for OBJ VRAM, and are ignored entirely for OAM.
+            Region::Palram => {
+                let i = Self::index_in(addr, PALRAM_SIZE - 1) & !1;
+                self.palram[i] = value as u8;
+                self.palram[i + 1] = value as u8;
             }
-            Region::Oam => self.oam[Self::index_in(addr, OAM_SIZE - 1)] = value as u8,
+            Region::Vram => {
+                let i = vram_index(addr as usize) & !1;
+                let obj_start = if self.io.regs[0] & 7 >= 3 {
+                    0x14000
+                } else {
+                    0x10000
+                };
+                if i < obj_start {
+                    self.trace_ram_write(addr & !1, 2, value & 0xFF | (value & 0xFF) << 8);
+                    self.vram[i] = value as u8;
+                    self.vram[i + 1] = value as u8;
+                }
+            }
+            Region::Oam => {}
             Region::Sram => self.save.write8(Self::index_in(addr, 0x1FFFF), value as u8),
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
             Region::Rom => self.gpio_write16(addr as usize & ROM_MASK & !1, value as u16),
@@ -635,8 +684,9 @@ impl Bus {
                 self.oam[i + 1] = (value >> 8) as u8;
             }
             Region::Sram => {
-                let i = base & 0x1FFFF;
-                self.save.write16(i, value as u16);
+                // 8-bit bus: only the lane selected by the address is stored.
+                let lane = (value >> ((addr & 1) * 8)) as u8;
+                self.save.write8(addr as usize & 0x1FFFF, lane);
             }
             Region::Eeprom => self.save.eeprom_write_bit(value as u8),
             Region::Rom => self.gpio_write16(base & ROM_MASK, value as u16),
@@ -646,6 +696,15 @@ impl Bus {
 
     /// Write a 32-bit value across the memory map.
     pub fn write32(&mut self, addr: u32, value: u32) {
+        if Region::of(addr) == Some(Region::Sram) {
+            // 8-bit bus: only the lane selected by the address is stored.
+            self.cycles += self.wait_for(Region::Sram, 8);
+            let lane = (value >> ((addr & 3) * 8)) as u8;
+            self.save.write8(addr as usize & 0x1FFFF, lane);
+            return;
+        }
+        // Word stores ignore the low two address bits.
+        let addr = addr & !3;
         self.write16(addr, value);
         self.write16(addr.wrapping_add(2), value >> 16);
     }
@@ -1093,12 +1152,12 @@ mod tests {
     #[test]
     fn unmapped_region_reads_open_bus() {
         let mut b = bus();
-        assert_eq!(b.read8(0x0FFF_0000), 0);
-        assert_eq!(b.read32(0x0FFF_0000), 0);
+        assert_eq!(b.read8(0x1000_0000), 0);
+        assert_eq!(b.read32(0x1000_0000), 0);
         b.write32(0x0300_0000, 0xDEAD_BEEF);
         b.read32(0x0300_0000);
-        assert_eq!(b.read32(0x0FFF_0000), 0xDEAD_BEEF);
-        assert_eq!(b.read8(0x0FFF_0000), 0xEF);
+        assert_eq!(b.read32(0x1000_0000), 0xDEAD_BEEF);
+        assert_eq!(b.read8(0x1000_0000), 0xEF);
     }
 
     #[test]
