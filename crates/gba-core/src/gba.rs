@@ -744,6 +744,36 @@ mod tests {
     }
 
     #[test]
+    fn direct_sound_through_dma_and_timer_produces_audio() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        // A 64-byte ramp in IWRAM as the sample source.
+        for i in 0..64u32 {
+            gba.bus.write8(0x0300_0000 + i, i * 4);
+        }
+        // Timer 0 overflows every 1024 cycles (16.384 kHz sample clock).
+        gba.bus.write16(0x0400_0100, 0x10000 - 1024);
+        gba.bus.write16(0x0400_0102, 0x80);
+        // DMA1: special timing, 32-bit, fixed destination, IWRAM -> FIFO A.
+        gba.bus.write32(0x0400_00BC, 0x0300_0000);
+        gba.bus.write32(0x0400_00C0, 0x0400_00A0);
+        gba.bus.write16(0x0400_00C4, 4);
+        gba.bus
+            .write16(0x0400_00C6, 0x8000 | (3 << 12) | (1 << 10) | (2 << 5));
+        // DirectSound A at 100 % to both sides on timer 0, FIFO reset.
+        gba.bus
+            .write16(0x0400_0082, (1 << 2) | (1 << 8) | (1 << 9) | (1 << 11));
+        gba.bus.write16(0x0400_0084, 0x80);
+        gba.run_frame();
+        let samples = gba.take_audio().samples;
+        let pairs = samples.len() / 2;
+        assert!((547..=550).contains(&pairs), "{pairs} samples");
+        assert!(samples.iter().any(|&s| s != 0.0), "audio reached the mixer");
+        assert!(samples.iter().any(|&s| s < 0.0), "signed ramp samples");
+        // Both sides carry the same signal.
+        assert!(samples.as_chunks::<2>().0.iter().all(|p| p[0] == p[1]));
+    }
+
+    #[test]
     fn fifo_dma_refills_only_a_channel_aimed_at_the_fifo() {
         let mut gba = Gba::new(vec![0; 0x4000]);
         for i in 0..8u32 {
