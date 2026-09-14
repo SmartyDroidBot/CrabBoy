@@ -32,7 +32,20 @@ fn cond_holds(cpu: &Cpu, cond: u32) -> bool {
     }
 }
 
-/// Barrel shifter for a register operand. Returns (shifted value, carry-out).
+/// Barrel shifter with the amount taken from a register: an amount of 0
+/// leaves the value and the carry unchanged (unlike the immediate encodings,
+/// where 0 means 32 or RRX). Returns (shifted value, carry-out).
+#[inline]
+pub(crate) fn shift_by_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -> (u32, bool) {
+    if amount == 0 {
+        (operand, carry_in)
+    } else {
+        shift_reg(operand, stype, amount, carry_in)
+    }
+}
+
+/// Barrel shifter for an immediate shift amount (0 = 32 for LSR/ASR, RRX for
+/// ROR). Returns (shifted value, carry-out).
 #[inline]
 pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -> (u32, bool) {
     match stype {
@@ -75,14 +88,8 @@ pub(crate) fn shift_reg(operand: u32, stype: u32, amount: u32, carry_in: bool) -
                     operand >> 31 != 0,
                 )
             } else {
-                let sign = operand >> 31 != 0;
                 let c = operand & (1u32 << (amount - 1)) != 0;
-                let v = if sign {
-                    operand | !((1u32 << (32 - amount)) - 1)
-                } else {
-                    operand >> amount
-                };
-                (v, c)
+                (((operand as i32) >> amount) as u32, c)
             }
         }
         _ => {
@@ -116,7 +123,7 @@ fn imm_carry(cpu: &Cpu, imm: u8, rot: u32) -> bool {
     if rot == 0 {
         cpu.cpsr & super::flag::C != 0
     } else {
-        rotate_imm(imm as u32, rot - 1) & (1 << 31) != 0
+        rotate_imm(imm as u32, rot) & (1 << 31) != 0
     }
 }
 
@@ -132,6 +139,27 @@ pub(crate) fn add(a: u32, b: u32) -> (u32, bool, bool) {
 pub(crate) fn sub(a: u32, b: u32) -> (u32, bool, bool) {
     let r = a.wrapping_sub(b);
     let c = a >= b;
+    let v = ((a ^ b) & (a ^ r) & (1 << 31)) != 0;
+    (r, c, v)
+}
+
+/// `a + b + carry` with the flags of the whole operation.
+#[inline]
+pub(crate) fn adc(a: u32, b: u32, carry: bool) -> (u32, bool, bool) {
+    let sum = a as u64 + b as u64 + carry as u64;
+    let r = sum as u32;
+    let c = sum > u32::MAX as u64;
+    let v = ((a ^ r) & (b ^ r) & (1 << 31)) != 0;
+    (r, c, v)
+}
+
+/// `a - b - !carry` with the flags of the whole operation: the carry flag
+/// is clear only if the complete subtraction borrows.
+#[inline]
+pub(crate) fn sbc(a: u32, b: u32, carry: bool) -> (u32, bool, bool) {
+    let borrow = !carry as u64;
+    let r = a.wrapping_sub(b).wrapping_sub(!carry as u32);
+    let c = a as u64 >= b as u64 + borrow;
     let v = ((a ^ b) & (a ^ r) & (1 << 31)) != 0;
     (r, c, v)
 }
@@ -301,61 +329,71 @@ fn data_processing(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let rn = (inst >> 16) & 0xF;
     let rd = (inst >> 12) & 0xF;
 
-    // Operand 2 and its carry.
+    // Operand 2 and its carry. With a register-specified shift amount the
+    // extra internal cycle advances the pipeline, so r15 reads as the
+    // instruction address + 12 instead of + 8.
     let carry_in = cpu.cpsr & super::flag::C != 0;
+    let reg_shift = !i && inst & (1 << 4) != 0;
+    let pc_operand = |r: u32| {
+        if r == 15 && reg_shift {
+            cpu.reg(15).wrapping_add(4)
+        } else {
+            cpu.reg(r)
+        }
+    };
     let (operand2, carry_out) = if i {
         let imm = (inst & 0xFF) as u8;
         let rot = (inst >> 8) & 0xF;
         (rotate_imm(imm as u32, rot), imm_carry(cpu, imm, rot))
     } else {
         let rm = inst & 0xF;
-        let opv = cpu.reg(rm);
+        let opv = pc_operand(rm);
         let stype = (inst >> 5) & 3;
-        if inst & (1 << 4) != 0 {
+        if reg_shift {
             let rs = (inst >> 8) & 0xF;
             let amount = cpu.reg(rs) & 0xFF;
-            shift_reg(opv, stype, amount, carry_in)
+            shift_by_reg(opv, stype, amount, carry_in)
         } else {
             let amount = (inst >> 7) & 0x1F;
             shift_reg(opv, stype, amount, carry_in)
         }
     };
 
-    let rn_v = cpu.reg(rn);
+    let rn_v = pc_operand(rn);
     let old_carry = cpu.cpsr & super::flag::C != 0;
 
     let (result, fc, fv) = match opcode {
-        0 => (rn_v & operand2, carry_out, false), // AND
-        1 => (rn_v ^ operand2, carry_out, false), // EOR
-        2 => sub(rn_v, operand2),                 // SUB
-        3 => sub(operand2, rn_v),                 // RSB
-        4 => add(rn_v, operand2),                 // ADD
-        5 => {
-            let (t, c1, v1) = add(rn_v, operand2);
-            let (t2, c2, v2) = add(t, if old_carry { 1 } else { 0 });
-            (t2, c1 || c2, v1 || v2)
-        } // ADC
-        6 => {
-            let (t, c1, v1) = sub(rn_v, operand2);
-            let (t2, c2, v2) = sub(t, if old_carry { 0 } else { 1 });
-            (t2, c1 || c2, v1 || v2)
-        } // SBC
-        7 => {
-            let (t, c1, v1) = sub(operand2, rn_v);
-            let (t2, c2, v2) = sub(t, if old_carry { 0 } else { 1 });
-            (t2, c1 || c2, v1 || v2)
-        } // RSC
-        8 => (rn_v & operand2, carry_out, false), // TST
-        9 => (rn_v ^ operand2, carry_out, false), // TEQ
-        10 => sub(rn_v, operand2),                // CMP
-        11 => add(rn_v, operand2),                // CMN
-        12 => (rn_v | operand2, carry_out, false), // ORR
-        13 => (operand2, carry_out, false),       // MOV
+        0 => (rn_v & operand2, carry_out, false),   // AND
+        1 => (rn_v ^ operand2, carry_out, false),   // EOR
+        2 => sub(rn_v, operand2),                   // SUB
+        3 => sub(operand2, rn_v),                   // RSB
+        4 => add(rn_v, operand2),                   // ADD
+        5 => adc(rn_v, operand2, old_carry),        // ADC
+        6 => sbc(rn_v, operand2, old_carry),        // SBC
+        7 => sbc(operand2, rn_v, old_carry),        // RSC
+        8 => (rn_v & operand2, carry_out, false),   // TST
+        9 => (rn_v ^ operand2, carry_out, false),   // TEQ
+        10 => sub(rn_v, operand2),                  // CMP
+        11 => add(rn_v, operand2),                  // CMN
+        12 => (rn_v | operand2, carry_out, false),  // ORR
+        13 => (operand2, carry_out, false),         // MOV
         14 => (rn_v & !operand2, carry_out, false), // BIC
-        _ => (!operand2, carry_out, false),       // MVN
+        _ => (!operand2, carry_out, false),         // MVN
     };
 
     let is_test = (8..=11).contains(&opcode);
+
+    if is_test && rd == 15 {
+        // TST/TEQ/CMP/CMN with Rd = 15 (the "P" forms) copy SPSR to CPSR in
+        // privileged modes instead of setting flags, without branching.
+        let m = cpu.cpsr & 0x1F;
+        if m != mode::USR && m != 0x1F {
+            let spsr = cpu.get_spsr(m);
+            cpu.set_cpsr(spsr);
+        }
+        cpu.add_cycles(1);
+        return;
+    }
 
     // TST/TEQ/CMP/CMN always set flags; others set only when S.
     if is_test || (s && !is_test) {
@@ -601,7 +639,12 @@ fn single_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             cpu.set_reg(rd, value);
         }
     } else {
-        let value = cpu.reg(rd);
+        // A stored r15 is the instruction address + 12.
+        let value = if rd == 15 {
+            cpu.reg(15).wrapping_add(4)
+        } else {
+            cpu.reg(rd)
+        };
         if b {
             bus.write8(addr, value);
         } else {
@@ -625,8 +668,13 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let w = inst & (1 << 21) != 0;
     let l = inst & (1 << 20) != 0;
     let rn = (inst >> 16) & 0xF;
-    let list = inst & 0xFFFF;
-    let count = list.count_ones();
+    // An empty register list transfers r15 alone and moves the base by 64
+    // bytes, as if all sixteen registers had been listed.
+    let (list, count) = if inst & 0xFFFF == 0 {
+        (1 << 15, 16)
+    } else {
+        (inst & 0xFFFF, (inst & 0xFFFF).count_ones())
+    };
     let base = cpu.reg(rn);
 
     let mut addr = if u {
@@ -653,7 +701,8 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         let load_usr = s && list & (1 << 15) == 0;
         for r in 0..16u32 {
             if list & (1 << r) != 0 {
-                let v = bus.read32(addr);
+                // Block transfers ignore the low address bits (no rotation).
+                let v = bus.read32(addr & !3);
                 addr = addr.wrapping_add(4);
                 if r == 15 {
                     lr_value = Some(v);
@@ -676,26 +725,32 @@ fn block_transfer(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
         }
     } else {
         // Store. r15 stores pc+8; ^ with r15 stores SPSR instead (in exc. modes).
+        // A written-back base that is not the first register in the list
+        // stores its updated value.
         let store_usr = s;
+        let first = list.trailing_zeros();
         for r in 0..16u32 {
             if list & (1 << r) != 0 {
-                let v = if store_usr {
+                let v = if r == rn && w && r != first {
+                    wb_val
+                } else if store_usr {
                     if r == 15 {
                         let m = cpu.cpsr & 0x1F;
                         if m != mode::USR && m != 0x1F {
                             cpu.get_spsr(m)
                         } else {
-                            cpu.reg(15)
+                            cpu.reg(15).wrapping_add(4)
                         }
                     } else {
                         cpu.usr_reg(r)
                     }
                 } else if r == 15 {
-                    cpu.reg(15)
+                    // A stored r15 is the instruction address + 12.
+                    cpu.reg(15).wrapping_add(4)
                 } else {
                     cpu.reg(r)
                 };
-                bus.write32(addr, v);
+                bus.write32(addr & !3, v);
                 addr = addr.wrapping_add(4);
             }
         }

@@ -3,7 +3,7 @@
 //! Dispatch is by the top five bits (`inst >> 11`), with a few sub-fields
 //! handled by inspecting individual bits. Correctness-first.
 
-use super::arm::{add, set_flags, shift_reg, sub};
+use super::arm::{adc, add, sbc, set_flags, shift_by_reg, shift_reg, sub};
 use super::{flag, Bus, Cpu};
 
 #[inline]
@@ -142,29 +142,21 @@ fn alu(cpu: &mut Cpu, inst: u32) {
         0 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // AND
         1 => (a ^ b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // EOR
         2 => {
-            let (v, c) = shift_reg(a, 0, b & 0xFF, carry_in);
+            let (v, c) = shift_by_reg(a, 0, b & 0xFF, carry_in);
             (v, c, cpu.cpsr & flag::V != 0) // LSL
         }
         3 => {
-            let (v, c) = shift_reg(a, 1, b & 0xFF, carry_in);
+            let (v, c) = shift_by_reg(a, 1, b & 0xFF, carry_in);
             (v, c, cpu.cpsr & flag::V != 0) // LSR
         }
         4 => {
-            let (v, c) = shift_reg(a, 2, b & 0xFF, carry_in);
+            let (v, c) = shift_by_reg(a, 2, b & 0xFF, carry_in);
             (v, c, cpu.cpsr & flag::V != 0) // ASR
         }
-        5 => {
-            let (t, c1, v1) = add(a, b);
-            let (t2, c2, v2) = add(t, if carry_in { 1 } else { 0 });
-            (t2, c1 || c2, v1 || v2) // ADC
-        }
-        6 => {
-            let (t, c1, v1) = sub(a, b);
-            let (t2, c2, v2) = sub(t, if carry_in { 0 } else { 1 });
-            (t2, c1 || c2, v1 || v2) // SBC
-        }
+        5 => adc(a, b, carry_in), // ADC
+        6 => sbc(a, b, carry_in), // SBC
         7 => {
-            let (v, c) = shift_reg(a, 3, b & 0xFF, carry_in);
+            let (v, c) = shift_by_reg(a, 3, b & 0xFF, carry_in);
             (v, c, cpu.cpsr & flag::V != 0) // ROR
         }
         8 => (a & b, cpu.cpsr & flag::C != 0, cpu.cpsr & flag::V != 0), // TST
@@ -407,6 +399,19 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
     let rb = (inst >> 8) & 7;
     let rlist = inst & 0xFF;
     let base = rn(cpu, rb);
+    if rlist == 0 {
+        // Empty list: r15 is transferred and the base moves by 64 bytes.
+        if l {
+            let v = bus.read32(base);
+            cpu.set_reg(rb, base.wrapping_add(0x40));
+            cpu.set_pc(v & !1);
+        } else {
+            bus.write32(base, cpu.reg(15).wrapping_add(2));
+            cpu.set_reg(rb, base.wrapping_add(0x40));
+        }
+        cpu.add_cycles(1);
+        return;
+    }
     let count = rlist.count_ones();
     let mut addr = base;
     if l {
@@ -418,9 +423,17 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut dyn Bus, inst: u32) {
             }
         }
     } else {
+        // A base that is not the first register in the list stores its
+        // written-back value.
+        let first = rlist.trailing_zeros();
         for r in 0..8u32 {
             if rlist & (1 << r) != 0 {
-                bus.write32(addr, rn(cpu, r));
+                let v = if r == rb && r != first {
+                    base.wrapping_add(4 * count)
+                } else {
+                    rn(cpu, r)
+                };
+                bus.write32(addr, v);
                 addr = addr.wrapping_add(4);
             }
         }
