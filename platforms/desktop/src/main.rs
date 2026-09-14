@@ -1,6 +1,8 @@
+mod audio;
+
+use audio::AudioOutput;
 use eframe::egui;
 use emu_core::{Button, System};
-use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -125,6 +127,10 @@ struct CrabBoyApp {
     prev_keys: HashSet<egui::Key>,
     paused: bool,
     fast_forward: bool,
+    /// Last-seen pause/fast-forward flags, to clear queued audio on a change
+    /// whether it came from a key or a menu checkbox.
+    was_paused: bool,
+    was_fast_forward: bool,
     palette: Palette,
     palette_name: String,
     screen_texture: Option<egui::TextureHandle>,
@@ -137,8 +143,7 @@ struct CrabBoyApp {
     status: String,
     rom_title: String,
     last_title: String,
-    audio: Option<(OutputStream, Sink)>,
-    audio_rate: u32,
+    audio: Option<AudioOutput>,
 }
 
 impl CrabBoyApp {
@@ -146,7 +151,7 @@ impl CrabBoyApp {
         cc: &eframe::CreationContext<'_>,
         rom_path: Option<String>,
         bios_path: Option<String>,
-        audio: Option<(OutputStream, Sink)>,
+        audio: Option<AudioOutput>,
     ) -> Self {
         let mut keymap = HashMap::new();
         for b in Button::ALL {
@@ -162,6 +167,8 @@ impl CrabBoyApp {
             prev_keys: HashSet::new(),
             paused: false,
             fast_forward: false,
+            was_paused: false,
+            was_fast_forward: false,
             palette: PALETTES[0].1,
             palette_name: PALETTES[0].0.to_string(),
             screen_texture: None,
@@ -175,7 +182,6 @@ impl CrabBoyApp {
             rom_title: String::new(),
             last_title: String::new(),
             audio,
-            audio_rate: 8192,
         };
         if let Some(path) = rom_path {
             app.load_rom(&path, &cc.egui_ctx);
@@ -242,8 +248,8 @@ impl CrabBoyApp {
         self.system = Some(system);
         self.sav_path = sav_path;
         self.frame_count = 0;
-        self.accum = 0.0;
         self.paused = false;
+        self.restart_timing();
         ctx.request_repaint();
     }
 
@@ -251,8 +257,22 @@ impl CrabBoyApp {
         if let Some(system) = &mut self.system {
             system.reset();
             self.frame_count = 0;
-            self.accum = 0.0;
             self.paused = false;
+            self.restart_timing();
+        }
+    }
+
+    /// Forget queued audio and pending frame time, e.g. after a load or
+    /// reset, so a slow file read is not replayed as a burst of frames.
+    fn restart_timing(&mut self) {
+        self.accum = 0.0;
+        self.last_frame = Instant::now();
+        self.clear_audio();
+    }
+
+    fn clear_audio(&mut self) {
+        if let Some(out) = &mut self.audio {
+            out.clear();
         }
     }
 
@@ -323,6 +343,7 @@ impl CrabBoyApp {
                 self.status = format!("Loaded state {suffix}");
                 // Loading restores SRAM/RTC; refresh the .sav/.rtc files to match.
                 self.flush_save();
+                self.restart_timing();
             }
             Err(e) => self.status = format!("Load failed: {e}"),
         }
@@ -333,23 +354,9 @@ impl CrabBoyApp {
             system.run_frame();
             self.frame_count += 1;
             let audio = system.take_audio();
-            if !audio.samples.is_empty() {
-                let rate = system.audio_rate();
-                if rate != self.audio_rate {
-                    // Sample rate changed (e.g. CGB double-speed toggle); drop
-                    // the old sink and open a fresh one at the new rate.
-                    self.audio.take();
-                    self.audio =
-                        rodio::OutputStream::try_default()
-                            .ok()
-                            .and_then(|(stream, handle)| {
-                                Sink::try_new(&handle).ok().map(|sink| (stream, sink))
-                            });
-                    self.audio_rate = rate;
-                }
-                if let Some((_, sink)) = &self.audio {
-                    let src = SamplesBuffer::new(2, self.audio_rate, audio.samples);
-                    sink.append(src);
+            if !self.fast_forward {
+                if let Some(out) = &mut self.audio {
+                    out.push(&audio.samples, system.audio_rate());
                 }
             }
             system.sram_changed()
@@ -362,6 +369,11 @@ impl CrabBoyApp {
     }
 
     fn advance(&mut self, ctx: &egui::Context, dt: f64) {
+        if (self.paused && !self.was_paused) || self.fast_forward != self.was_fast_forward {
+            self.clear_audio();
+        }
+        self.was_paused = self.paused;
+        self.was_fast_forward = self.fast_forward;
         if self.paused || self.system.is_none() {
             return;
         }
@@ -621,6 +633,10 @@ impl eframe::App for CrabBoyApp {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(&self.status);
+                    if let (Some(out), Some(_)) = (&self.audio, &self.system) {
+                        ui.separator();
+                        ui.label(format!("audio {} ms", out.queued_ms()));
+                    }
                 });
             });
         });
@@ -681,9 +697,7 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
-    let audio = OutputStream::try_default()
-        .ok()
-        .and_then(|(stream, handle)| Sink::try_new(&handle).ok().map(|sink| (stream, sink)));
+    let audio = AudioOutput::open();
     if audio.is_none() {
         eprintln!("warning: no audio output device found; running silently");
     }
