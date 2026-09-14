@@ -350,14 +350,55 @@ mod tests {
         emu.bus.write(0xFE00, 0x11);
         emu.bus.write(0xFF46, 0xC0); // DMA from $C000
         assert!(emu.bus.dma_active());
+        emu.bus.step(4); // warm-up cycle: OAM is still readable
+        assert_eq!(emu.bus.read(0xFE00), 0x11);
+        emu.bus.step(4); // byte 0 lands
         assert_eq!(emu.bus.read(0xFE00), 0xFF);
         emu.bus.write(0xFE01, 0x99);
-        for _ in 0..160 {
+        for _ in 0..159 {
             emu.bus.step(4);
         }
+        assert_eq!(
+            emu.bus.read(0xFE00),
+            0xFF,
+            "one more cycle before OAM opens"
+        );
+        emu.bus.step(4);
         assert!(!emu.bus.dma_active());
         assert_eq!(emu.bus.read(0xFE00), 0x42);
         assert_eq!(emu.bus.read(0xFE01), 0x00, "write during DMA was ignored");
+    }
+
+    #[test]
+    fn a_restarted_dma_keeps_oam_closed_through_the_warm_up() {
+        let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        emu.bus.write(0xFE00, 0x11);
+        emu.bus.write(0xFF46, 0xC0);
+        emu.bus.step(4);
+        emu.bus.write(0xFF46, 0xC0); // restart while running
+        emu.bus.step(4);
+        assert_eq!(emu.bus.read(0xFE00), 0xFF, "no readable warm-up cycle");
+        for _ in 0..161 {
+            emu.bus.step(4);
+        }
+        assert!(!emu.bus.dma_active());
+    }
+
+    #[test]
+    fn reads_on_the_bus_the_dma_engine_drives_return_its_last_byte() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x1000] = 0xA5;
+        rom[0x1001] = 0x5A;
+        let mut emu = Gb::new(Cartridge::load(&rom).unwrap());
+        emu.bus.write(0xFF46, 0x10); // DMA from ROM $1000
+        emu.bus.step(4); // warm-up
+        emu.bus.step(4); // byte 0 ($A5) transferred
+        assert_eq!(emu.bus.read(0x4000), 0xA5, "cartridge bus is busy");
+        assert_eq!(emu.bus.read(0xC000), 0xA5, "DMG work RAM shares the bus");
+        assert_eq!(emu.bus.read(0x8000), 0x00, "video RAM is a separate bus");
+        assert_eq!(emu.bus.read(0xFF80), 0x00, "high RAM is internal");
+        emu.bus.step(4);
+        assert_eq!(emu.bus.read(0x4000), 0x5A);
     }
 
     #[test]

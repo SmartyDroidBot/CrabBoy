@@ -17,7 +17,7 @@ use emu_core::audio::AudioBuffer;
 /// Magic header identifying a CrabBoy save state.
 pub const STATE_MAGIC: &[u8; 4] = b"CBSV";
 /// Current save-state format version.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 /// Encode a cartridge's MBC type as a single byte.
 fn mbc_to_u8(mbc: MbcType) -> u8 {
@@ -314,6 +314,7 @@ fn save_timer(w: &mut Writer, t: &Timer) {
     w.u64(t.reload_deadline);
     w.u8(t.reload_value);
     w.bool(t.reload_pending);
+    w.u64(t.reloaded_at);
 }
 
 fn load_timer(r: &mut Reader) -> Result<Timer, String> {
@@ -323,7 +324,7 @@ fn load_timer(r: &mut Reader) -> Result<Timer, String> {
         reload_deadline: r.u64()?,
         reload_value: r.u8()?,
         reload_pending: r.bool()?,
-        reloaded_at: u64::MAX,
+        reloaded_at: r.u64()?,
     })
 }
 
@@ -472,7 +473,9 @@ fn save_bus(w: &mut Writer, b: &Bus) {
     save_apu(w, &b.apu);
     w.bytes(&b.serial_buf);
     w.u16(b.dma_source);
-    w.u32(b.dma_remaining);
+    w.u8(b.dma_next);
+    w.bool(b.dma_restarting);
+    w.u32(b.dma_phase);
     w.u32(b.serial_remaining);
     w.bool(b.hdma_active);
     w.bool(b.hdma_hblank);
@@ -500,7 +503,9 @@ fn load_bus(r: &mut Reader) -> Result<Bus, String> {
         apu: load_apu(r)?,
         serial_buf: r.bytes()?,
         dma_source: r.u16()?,
-        dma_remaining: r.u32()?,
+        dma_next: r.u8()?,
+        dma_restarting: r.bool()?,
+        dma_phase: r.u32()?,
         serial_remaining: r.u32()?,
         serial_out: 0,
         hdma_active: r.bool()?,

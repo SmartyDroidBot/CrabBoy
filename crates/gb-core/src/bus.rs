@@ -22,6 +22,12 @@ pub const INTERRUPT_JOYPAD: u8 = 0x10;
 const BOOT_PAL_OBJ: [u8; 8] = [0x7F, 0xFF, 0x1F, 0x42, 0xF2, 0x1C, 0x00, 0x00];
 const BOOT_PAL_BG: [u8; 8] = [0x7F, 0xFF, 0xEF, 0x1B, 0x80, 0x61, 0x00, 0x00];
 
+/// `dma_next` value for the cycle between the DMA register write and the
+/// first byte.
+const DMA_WARMUP: u8 = 0xFF;
+/// `dma_next` value while no transfer runs.
+const DMA_IDLE: u8 = 0xA1;
+
 pub struct Bus {
     pub cart: Cartridge,
     /// 8 banks of 8 KiB WRAM (0x8000 bytes). Bank 0 is always at C000–CFFF;
@@ -46,7 +52,15 @@ pub struct Bus {
     /// Carry accumulator for halving device cycles in double-speed mode.
     pub(crate) dev_accum: u32,
     pub(crate) dma_source: u16,
-    pub(crate) dma_remaining: u32,
+    /// Next OAM byte the DMA engine writes: `DMA_WARMUP` for the cycle after
+    /// the register write, `0..=0x9F` while copying, `0xA0` for the final
+    /// cycle in which OAM is still unavailable, `DMA_IDLE` otherwise.
+    pub(crate) dma_next: u8,
+    /// Whether this transfer was started while the previous one still ran;
+    /// OAM then stays unavailable through the warm-up cycle.
+    pub(crate) dma_restarting: bool,
+    /// T-cycles accumulated toward the next DMA M-cycle.
+    pub(crate) dma_phase: u32,
     pub(crate) serial_remaining: u32,
     /// The byte in SB when the transfer started; it is what the other end
     /// (and `serial_buf`) receives.
@@ -105,7 +119,9 @@ impl Bus {
             double_speed: false,
             dev_accum: 0,
             dma_source: 0,
-            dma_remaining: 0,
+            dma_next: DMA_IDLE,
+            dma_restarting: false,
+            dma_phase: 0,
             serial_remaining: 0,
             serial_out: 0,
             hdma_active: false,
@@ -129,7 +145,39 @@ impl Bus {
     }
 
     pub fn dma_active(&self) -> bool {
-        self.dma_remaining > 0
+        self.dma_next != DMA_IDLE
+    }
+
+    /// OAM reads return $FF from the cycle after the warm-up until the cycle
+    /// after the last byte lands; a restarted transfer never reopens it.
+    fn oam_blocked(&self) -> bool {
+        self.dma_active() && (self.dma_next != 0 || self.dma_restarting)
+    }
+
+    /// Which bus an address sits on: the external bus (cartridge and, on the
+    /// DMG, work RAM), video RAM, or the CGB's separate work RAM bus.
+    fn bus_for(&self, addr: u16) -> u8 {
+        match addr {
+            0x8000..=0x9FFF => 1,
+            0xC000..=0xFDFF if self.is_cgb => 2,
+            _ => 0,
+        }
+    }
+
+    /// While the DMA engine drives a bus, a CPU access on the same bus sees
+    /// the byte the engine transferred last instead of its own.
+    fn dma_conflict(&self, addr: u16) -> Option<u16> {
+        if !self.dma_active() || self.dma_next == DMA_WARMUP || self.dma_next == 0 {
+            return None;
+        }
+        if addr >= 0xFE00 {
+            return None;
+        }
+        let src = self.dma_source.wrapping_add(self.dma_next as u16);
+        if addr == src || self.bus_for(addr) != self.bus_for(src) {
+            return None;
+        }
+        Some(src.wrapping_sub(1))
     }
 
     /// Offset into `wram` for a CPU access to C000–FDFF. Bank 0 always covers
@@ -151,6 +199,9 @@ impl Bus {
     }
 
     pub fn read(&self, addr: u16) -> u8 {
+        if let Some(src) = self.dma_conflict(addr) {
+            return self.read_transfer(src);
+        }
         match addr {
             0x0000..=0x7FFF => self.cart.read(addr),
             0x8000..=0x9FFF => self.vram[self.vram_offset(addr)],
@@ -158,7 +209,7 @@ impl Bus {
             0xC000..=0xDFFF => self.wram[self.wram_offset(addr)],
             0xE000..=0xFDFF => self.wram[self.wram_offset(addr)],
             // OAM is inaccessible while the DMA engine writes it.
-            0xFE00..=0xFE9F if self.dma_remaining > 0 => 0xFF,
+            0xFE00..=0xFE9F if self.oam_blocked() => 0xFF,
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00,
             0xFF00 => self.joypad.read(self.io[0x00]),
@@ -196,7 +247,7 @@ impl Bus {
                 let off = self.wram_offset(addr);
                 self.wram[off] = value;
             }
-            0xFE00..=0xFE9F if self.dma_remaining > 0 => {}
+            0xFE00..=0xFE9F if self.dma_active() => {}
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFEA0..=0xFEFF => {}
             0xFF00 => self.io[0x00] = value | 0xC0,
@@ -243,22 +294,45 @@ impl Bus {
 
     fn dma(&mut self, value: u8) {
         self.io[0x46] = value;
-        // The DMA copies 0xA0 bytes from the source page to OAM over 160
-        // M-cycles, during which the CPU is held. The copy runs in `step()`.
+        // The engine copies $A0 bytes from the source page to OAM, one per
+        // M-cycle, after a one-cycle warm-up. The CPU keeps running; only
+        // OAM (and the bus the engine reads from) is affected.
+        self.dma_restarting = self.dma_active() && self.dma_next != 0xA0;
         self.dma_source = (value as u16) << 8;
-        self.dma_remaining = 160;
+        self.dma_next = DMA_WARMUP;
+        self.dma_phase = 0;
     }
 
-    fn read_transfer(&self, addr: usize) -> u8 {
+    /// One M-cycle of the OAM DMA engine.
+    fn dma_cycle(&mut self) {
+        match self.dma_next {
+            DMA_IDLE => {}
+            DMA_WARMUP => self.dma_next = 0,
+            0xA0 => {
+                self.dma_next = DMA_IDLE;
+                self.dma_restarting = false;
+            }
+            n => {
+                let src = self.dma_source.wrapping_add(n as u16);
+                self.oam[n as usize] = self.read_transfer(src);
+                self.dma_next = n + 1;
+            }
+        }
+    }
+
+    /// A read on behalf of the DMA engine. Above $DFFF the DMG sees the work
+    /// RAM mirror; the CGB reads $FF there.
+    fn read_transfer(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x7FFF => self.cart.read(addr as u16),
+            0x0000..=0x7FFF => self.cart.read(addr),
             0x8000..=0x9FFF => {
                 let bank = (self.io[0x4F] as usize & 1) * 0x2000;
-                self.vram[bank + addr - 0x8000]
+                self.vram[bank + addr as usize - 0x8000]
             }
-            0xA000..=0xBFFF => self.cart.read_ram(addr as u16),
-            0xC000..=0xFDFF => self.wram[self.wram_offset(addr as u16)],
-            _ => 0,
+            0xA000..=0xBFFF => self.cart.read_ram(addr),
+            0xC000..=0xDFFF => self.wram[self.wram_offset(addr)],
+            _ if self.is_cgb => 0xFF,
+            _ => self.wram[self.wram_offset(addr & !0x2000)],
         }
     }
 
@@ -288,7 +362,7 @@ impl Bus {
 
     fn hdma_transfer(&mut self, len: usize) {
         for i in 0..len {
-            let byte = self.read_transfer(self.hdma_src + i);
+            let byte = self.read_transfer((self.hdma_src + i) as u16);
             let dst = self.hdma_dst + i;
             if dst <= 0x9FFF {
                 // HDMA always writes VRAM bank 0.
@@ -332,13 +406,12 @@ impl Bus {
 
     /// Advance the clocked devices by `cycles` T-cycles.
     pub fn step(&mut self, cycles: u32) {
-        // DMA: one OAM byte is transferred per M-cycle (4 T-cycles) while active.
-        if self.dma_remaining > 0 {
-            let transferred = self.dma_remaining;
-            for _ in 0..cycles.min(transferred * 4) / 4 {
-                let idx = (160 - self.dma_remaining) as usize;
-                self.oam[idx] = self.read_transfer(self.dma_source as usize + idx);
-                self.dma_remaining -= 1;
+        // OAM DMA runs at the CPU clock: one engine cycle per M-cycle.
+        if self.dma_active() {
+            self.dma_phase += cycles;
+            while self.dma_phase >= 4 {
+                self.dma_phase -= 4;
+                self.dma_cycle();
             }
         }
 
@@ -437,8 +510,13 @@ mod tests {
         }
         bus.write(0xFF46, 0xC0); // source = 0xC000 (WRAM)
         assert!(bus.dma_active());
-        bus.step(640); // 160 M-cycles * 4
-        assert!(!bus.dma_active(), "DMA completes after 640 T-cycles");
+        bus.step(644); // warm-up + 160 bytes, one M-cycle each
+        assert!(
+            bus.dma_active(),
+            "OAM stays closed one cycle after the last byte"
+        );
+        bus.step(4);
+        assert!(!bus.dma_active(), "DMA completes after 162 M-cycles");
         for i in 0..0xA0 {
             assert_eq!(bus.oam[i], (i % 256) as u8, "byte {i} transferred");
         }
