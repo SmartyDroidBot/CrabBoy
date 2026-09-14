@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `accuracy --dump-failures DIR` writes the frame of every failing screenshot
+  test in the reference encoding for diffing.
+
 ## [0.3.0] - 2026-09-14
 
 Game Boy CPU timing release: the CPU is stepped per M-cycle and every

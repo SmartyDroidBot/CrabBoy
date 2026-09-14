@@ -5,6 +5,7 @@
 //! accuracy [--suites tests/accuracy/suites.toml] [--roms roms/test-suites/gb]
 //!          [--baseline tests/accuracy/baseline.txt] [--filter TEXT]
 //!          [--jobs N] [--ci] [--update-baseline] [--markdown FILE] [--verbose]
+//!          [--dump-failures DIR]
 //! ```
 //!
 //! Every ROM runs in-process (a panic counts as a crash) with a frame budget.
@@ -71,6 +72,8 @@ struct Case {
     rel: String,
     path: PathBuf,
     reference: Option<PathBuf>,
+    /// Directory that receives the frame of a failing screenshot test.
+    dump_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -288,6 +291,7 @@ fn cases(suites: &[Suite], root: &Path, filter: Option<&str>) -> Vec<Case> {
                 rel,
                 path: p,
                 reference,
+                dump_dir: None,
             });
         }
     }
@@ -455,7 +459,13 @@ fn run_case(case: &Case) -> Result_ {
             }
             // One more frame so the last writes are on screen.
             gb.run_frame();
-            compare_screenshot(&gb, reference)
+            let result = compare_screenshot(&gb, reference);
+            if result.outcome == Outcome::Fail {
+                if let Some(dir) = &case.dump_dir {
+                    dump_frame(&gb, dir, &case.path);
+                }
+            }
+            result
         }
         other => Result_ {
             outcome: Outcome::Skip,
@@ -517,6 +527,37 @@ fn compare_screenshot(gb: &Gb, reference: &Path) -> Result_ {
             detail: format!("{wrong} pixels differ"),
         }
     }
+}
+
+/// Write the frame the test produced as `<dir>/<rom stem>.png`, in the same
+/// encoding the references use (DMG shades as $FF/$AA/$55/$00 grey).
+fn dump_frame(gb: &Gb, dir: &Path, rom: &Path) {
+    let frame = gb.frame();
+    let rgba: Vec<u8> = if gb.bus.is_cgb {
+        frame
+            .rgb
+            .as_deref()
+            .unwrap_or(&[])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|c| [c[0], c[1], c[2], 0xFF])
+            .collect()
+    } else {
+        const LEVELS: [u8; 4] = [0xFF, 0xAA, 0x55, 0x00];
+        frame
+            .shades
+            .iter()
+            .flat_map(|&s| {
+                let l = LEVELS[(s & 3) as usize];
+                [l, l, l, 0xFF]
+            })
+            .collect()
+    };
+    let png = crab_cli::encode_png(frame.width as u32, frame.height as u32, &rgba);
+    let stem = rom.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(format!("{stem}.png")), png);
 }
 
 fn read_png_rgb(path: &Path) -> std::result::Result<(u32, u32, Vec<u8>), String> {
@@ -603,6 +644,7 @@ fn main() {
     let mut update = false;
     let mut markdown: Option<PathBuf> = None;
     let mut verbose = false;
+    let mut dump_dir: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || {
@@ -623,8 +665,9 @@ fn main() {
             "--update-baseline" => update = true,
             "--markdown" => markdown = Some(value().into()),
             "--verbose" | "-v" => verbose = true,
+            "--dump-failures" => dump_dir = Some(value().into()),
             "-h" | "--help" => {
-                println!("usage: accuracy [--suites F] [--roms DIR] [--baseline F] [--filter TEXT] [--jobs N] [--ci] [--update-baseline] [--markdown F] [--verbose]");
+                println!("usage: accuracy [--suites F] [--roms DIR] [--baseline F] [--filter TEXT] [--jobs N] [--ci] [--update-baseline] [--markdown F] [--verbose] [--dump-failures DIR]");
                 return;
             }
             other => fail(format!("unknown argument {other}")),
@@ -632,7 +675,10 @@ fn main() {
     }
 
     let suites = load_suites(&suites_path);
-    let all = cases(&suites, &roms_root, filter.as_deref());
+    let mut all = cases(&suites, &roms_root, filter.as_deref());
+    for case in &mut all {
+        case.dump_dir = dump_dir.clone();
+    }
     if all.is_empty() {
         fail(
             "no test ROMs found; run `cargo run --release -p crab-cli --bin fetch_test_roms` first",

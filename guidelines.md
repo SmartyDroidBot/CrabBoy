@@ -113,7 +113,9 @@ cargo run --release -p crab-cli --bin accuracy -- --ci
 Every result must match `tests/accuracy/baseline.txt`; CI runs the same
 command. A change that fixes or breaks a test updates the baseline in the
 same commit (`--update-baseline`, then `--markdown docs/accuracy.md`) and
-says so in the commit body. Never regress a passing test without an
+says so in the commit body. `--dump-failures DIR` writes the frame of every
+failing screenshot test as `DIR/<rom>.png` in the reference encoding, so it
+can be diffed against the expected image. Never regress a passing test without an
 explicit reason recorded there.
 
 **Frame-hash regression** (required for any core, `crab-systems` or CLI
