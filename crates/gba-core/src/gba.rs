@@ -477,10 +477,13 @@ impl emu_core::System for Gba {
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
         let mut buf = self.apu.take_audio();
-        // Cap samples per frame to prevent surplus accumulation in the audio
-        // sink, which would cause ever-growing latency.
-        let max_samples = (self.audio_rate() as usize / 60 + 1) * 2;
-        buf.samples.truncate(max_samples);
+        // Frontends bound their own latency; only guard against a caller that
+        // never drains by keeping the newest second of audio.
+        let cap = self.audio_rate() as usize * 2;
+        if buf.samples.len() > cap {
+            let excess = buf.samples.len() - cap;
+            buf.samples.drain(..excess);
+        }
         buf
     }
 
@@ -565,6 +568,16 @@ mod tests {
         gba.reset();
         assert!(!gba.bus.has_real_bios());
         assert_eq!(gba.cpu.pc(), 0x0800_0000);
+    }
+
+    #[test]
+    fn take_audio_returns_the_whole_frame() {
+        let mut gba = Gba::new(vec![0; 0x4000]);
+        gba.run_frame();
+        let pairs = gba.take_audio().samples.len() / 2;
+        // 280896 cycles / 512 = 548.6, so 548 or 549 (plus the boot offset).
+        assert!((547..=550).contains(&pairs), "{pairs} samples");
+        assert!(gba.take_audio().samples.is_empty(), "drained");
     }
 
     #[test]

@@ -66,8 +66,10 @@ pub trait System {
         8192
     }
 
-    /// Drain audio samples produced since the last call (interleaved stereo).
-    /// Returns an empty buffer for systems without audio.
+    /// Drain audio samples produced since the last call (interleaved stereo,
+    /// every sample the emulated frames produced). Frontends bound their own
+    /// playback latency; systems only cap the backlog of a caller that never
+    /// drains. Returns an empty buffer for systems without audio.
     fn take_audio(&mut self) -> AudioBuffer {
         AudioBuffer::new()
     }

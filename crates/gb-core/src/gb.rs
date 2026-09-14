@@ -245,10 +245,13 @@ impl emu_core::System for Gb {
 
     fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
         let mut buf = std::mem::take(&mut self.bus.apu.buffer);
-        // Cap samples per frame to prevent surplus accumulation in the audio
-        // sink, which would cause ever-growing latency.
-        let max_samples = (self.audio_rate() as usize / 60 + 1) * 2;
-        buf.samples.truncate(max_samples);
+        // Frontends bound their own latency; only guard against a caller that
+        // never drains by keeping the newest second of audio.
+        let cap = self.audio_rate() as usize * 2;
+        if buf.samples.len() > cap {
+            let excess = buf.samples.len() - cap;
+            buf.samples.drain(..excess);
+        }
         buf
     }
 
@@ -294,6 +297,18 @@ impl emu_core::System for Gb {
 mod tests {
     use super::*;
     use crate::devices::joypad::*;
+
+    #[test]
+    fn take_audio_returns_the_whole_frame() {
+        use emu_core::System;
+        let mut emu = Gb::new(Cartridge::load(&[0u8; 0x8000]).unwrap());
+        emu.bus.write(0xFF26, 0x80);
+        emu.run_frame();
+        let pairs = emu.take_audio().samples.len() / 2;
+        // 70224 cycles / 512 cycles per sample = 137.16, so 137 or 138.
+        assert!(pairs == 137 || pairs == 138, "{pairs} samples");
+        assert!(emu.take_audio().samples.is_empty(), "drained");
+    }
 
     #[test]
     fn title_and_screen_come_from_the_header() {
