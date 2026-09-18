@@ -1048,6 +1048,8 @@ dependencies = [
 name = "crab-systems"
 version = "0.3.0"
 dependencies = [
+ "ctr-core",
+ "ctr-fs",
  "emu-core",
  "gb-core",
  "gba-core",

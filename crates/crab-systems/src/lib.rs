@@ -15,6 +15,9 @@ pub enum Kind {
     Gbc,
     /// Game Boy Advance.
     Gba,
+    /// Nintendo 3DS.
+    #[cfg(feature = "ctr")]
+    Ctr,
 }
 
 impl Kind {
@@ -24,6 +27,8 @@ impl Kind {
             Kind::Gb => "gb",
             Kind::Gbc => "gbc",
             Kind::Gba => "gba",
+            #[cfg(feature = "ctr")]
+            Kind::Ctr => "3ds",
         }
     }
 
@@ -33,6 +38,8 @@ impl Kind {
             Kind::Gb => "gb",
             Kind::Gbc => "gbc",
             Kind::Gba => "gba",
+            #[cfg(feature = "ctr")]
+            Kind::Ctr => "3ds",
         }
     }
 }
@@ -66,6 +73,10 @@ pub fn detect(rom: &[u8]) -> Option<Kind> {
     if rom.len() >= 0xC0 && rom[0xB2] == 0x96 && rom[0x04..0x0C] == GBA_LOGO {
         return Some(Kind::Gba);
     }
+    #[cfg(feature = "ctr")]
+    if ctr_fs::ImageKind::detect(rom).is_some() {
+        return Some(Kind::Ctr);
+    }
     None
 }
 
@@ -92,6 +103,14 @@ pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, St
                 bios.len()
             )),
             None => Ok(gba_core::Gba::system(rom)),
+        },
+        #[cfg(feature = "ctr")]
+        Some(Kind::Ctr) => match ctr_fs::ImageKind::detect(&rom) {
+            Some(ctr_fs::ImageKind::Firm) => ctr_core::Ctr::system(rom),
+            _ => Err(
+                "3DS game and homebrew images need the firmware boot path, which is not                  implemented yet; only FIRM payloads load"
+                    .to_string(),
+            ),
         },
         None => Err("not a Game Boy, Game Boy Color or Game Boy Advance ROM".to_string()),
     }
@@ -146,6 +165,21 @@ mod tests {
         let gba = load(gba_rom()).unwrap();
         assert_eq!(gba.name(), "gba");
         assert_eq!(gba.screen(), emu_core::Screen::new(240, 160));
+    }
+
+    #[cfg(feature = "ctr")]
+    #[test]
+    fn loads_a_3ds_firm_and_refuses_other_3ds_images() {
+        let firm = ctr_fs::firm::build(0, 0x0800_6000, &[(0x0800_6000, &[0; 4])]);
+        assert_eq!(detect(&firm), Some(Kind::Ctr));
+        let system = load(firm).unwrap();
+        assert_eq!(system.name(), "3ds");
+        assert_eq!(system.screens().len(), 2);
+
+        let mut ncsd = vec![0u8; 0x200];
+        ncsd[0x100..0x104].copy_from_slice(b"NCSD");
+        assert_eq!(detect(&ncsd), Some(Kind::Ctr));
+        assert!(load(ncsd).is_err());
     }
 
     #[test]

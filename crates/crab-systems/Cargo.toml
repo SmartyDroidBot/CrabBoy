@@ -11,3 +11,9 @@ rust-version.workspace = true
 emu-core = { workspace = true }
 gb-core = { workspace = true }
 gba-core = { workspace = true }
+ctr-core = { workspace = true, optional = true }
+ctr-fs = { workspace = true, optional = true }
+
+[features]
+# The Nintendo 3DS core. Off until the core is ready to merge into `main`.
+ctr = ["dep:ctr-core", "dep:ctr-fs"]
