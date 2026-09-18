@@ -22,6 +22,20 @@ gba_bios.bin
 iwram_dump.bin
 **/*.bin
 
+# 3DS: never commit firmware, game images, console dumps or keys
+**/*.firm
+**/*.3ds
+**/*.cci
+**/*.cxi
+**/*.cia
+**/*.3dsx
+**/*.cdc
+**/*.sed
+**/*.img
+otp.mem
+aes_keys.txt
+keys.txt
+
 # Local tool settings
 .claude/settings.local.json
 
