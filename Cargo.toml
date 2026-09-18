@@ -4,6 +4,14 @@ members = [
     "crates/emu-core",
     "crates/gb-core",
     "crates/gba-core",
+    "crates/softfloat",
+    "crates/arm-core",
+    "crates/teak-dsp",
+    "crates/pica",
+    "crates/ctr-crypto",
+    "crates/ctr-fs",
+    "crates/ctr-core",
+    "crates/gdb-stub",
     "crates/crab-systems",
     "platforms/desktop",
     "platforms/cli",
@@ -21,6 +29,14 @@ rust-version = "1.88"
 emu-core = { path = "crates/emu-core" }
 gb-core = { path = "crates/gb-core" }
 gba-core = { path = "crates/gba-core" }
+softfloat = { path = "crates/softfloat" }
+arm-core = { path = "crates/arm-core" }
+teak-dsp = { path = "crates/teak-dsp" }
+pica = { path = "crates/pica" }
+ctr-crypto = { path = "crates/ctr-crypto" }
+ctr-fs = { path = "crates/ctr-fs" }
+ctr-core = { path = "crates/ctr-core" }
+gdb-stub = { path = "crates/gdb-stub" }
 crab-systems = { path = "crates/crab-systems" }
 
 [profile.dev]

@@ -1,0 +1,10 @@
+[package]
+name = "ctr-crypto"
+description = "AES, SHA and RSA engine models of the 3DS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

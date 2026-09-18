@@ -1,0 +1,10 @@
+[package]
+name = "teak-dsp"
+description = "CEVA Teak DSP core of the 3DS, a Rust port of Teakra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

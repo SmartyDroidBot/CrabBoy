@@ -1,0 +1,16 @@
+[package]
+name = "ctr-core"
+description = "Nintendo 3DS core, no GUI/OS/wasm deps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+emu-core = { workspace = true }
+ctr-fs = { workspace = true }
+
+[features]
+# Record bus and I/O activity for the headless diagnostic tools.
+trace = []

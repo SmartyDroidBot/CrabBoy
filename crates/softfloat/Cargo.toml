@@ -1,0 +1,10 @@
+[package]
+name = "softfloat"
+description = "Integer-only IEEE-754 and PICA200 floating point for the 3DS core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

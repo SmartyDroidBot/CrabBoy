@@ -1,0 +1,11 @@
+[package]
+name = "arm-core"
+description = "ARMv5TE and ARMv6K interpreters for the 3DS ARM9 and ARM11"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+softfloat = { workspace = true }
