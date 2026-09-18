@@ -4,6 +4,13 @@
 /// ARM9 runs at exactly half this rate.
 pub const ARM11_HZ: u32 = 268_111_856;
 
+/// ARM11 cycles per ARM9 cycle.
+pub const ARM9_CYCLE: u32 = 2;
+
+/// ARM11 cycles per count of an ARM9 timer with no prescaler: the timers run
+/// at 67,027,964 Hz, half the ARM9 clock (3dbrew, "TIMER Registers").
+pub const ARM9_TIMER_CYCLES: u64 = 4;
+
 /// ARM11 cycles per LCD pixel.
 pub const CYCLES_PER_PIXEL: u32 = 24;
 

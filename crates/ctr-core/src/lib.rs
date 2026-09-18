@@ -10,9 +10,12 @@
 //! firmware is part of the repository; whatever a configuration needs is
 //! supplied by the user at run time.
 
+pub mod arm9;
 pub mod boot;
 pub mod bus;
 pub mod clock;
 pub mod ctr;
+pub mod io;
+pub mod sched;
 
 pub use ctr::Ctr;

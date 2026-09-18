@@ -2,4 +2,4 @@
 
 pub mod shim;
 
-pub use shim::{load_firm, Entry};
+pub use shim::{hand_off, load_firm, Entry};

@@ -10,8 +10,18 @@ All notable changes to this project are documented here. The format follows
 - Nintendo 3DS core scaffolding on the `3ds` branch, behind the
   `crab-systems/ctr` feature: `ctr-core` loads a FIRM payload into physical
   memory, keeps LCD frame time (4,481,136 ARM11 cycles) and reports both
-  screens; `ctr-fs` parses FIRM images and detects NCSD, NCCH and 3DSX. The
-  processors are not emulated yet. See `docs/3ds/overview.md`.
+  screens; `ctr-fs` parses FIRM images and detects NCSD, NCCH and 3DSX. See
+  `docs/3ds/overview.md`.
+- 3DS ARM9: `arm-core` interprets ARMv5TE (ARM and Thumb), checked by unit
+  tests and by 800,000 random instructions against the ARM7TDMI of
+  `gba-core`. `ctr-core` runs it behind the ARM946E-S protection unit and
+  TCMs with the ARM9 interrupt controller, timers, the pad register, an event
+  scheduler and display scan-out, and starts FIRM payloads the way a
+  chainloader does (`docs/3ds/boot.md`). The ARM11, GPU and DSP do not exist
+  yet.
+- `softfloat`: IEEE-754 single and double precision in integer arithmetic with
+  the VFP rounding modes, flush-to-zero, default NaN and cumulative flags,
+  bit-exact against the host in round-to-nearest.
 - `emu_core::System` gains `screens`, `frame_at`, `set_axis`, `set_touch` and
   `set_motion` with defaults that leave existing cores unchanged, `Button`
   gains `ZL` and `ZR`, and `emu_core::{mem, state}` share the heap region

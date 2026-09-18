@@ -1103,6 +1103,7 @@ dependencies = [
 name = "ctr-core"
 version = "0.3.0"
 dependencies = [
+ "arm-core",
  "ctr-fs",
  "emu-core",
 ]

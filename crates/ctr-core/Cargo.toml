@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 emu-core = { workspace = true }
 ctr-fs = { workspace = true }
+arm-core = { workspace = true }
 
 [features]
 # Record bus and I/O activity for the headless diagnostic tools.
