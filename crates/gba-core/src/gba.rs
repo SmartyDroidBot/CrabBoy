@@ -289,8 +289,11 @@ impl Gba {
             emu_core::Button::Down => key::DOWN,
             emu_core::Button::R => key::R,
             emu_core::Button::L => key::L,
-            // GBA has no X/Y.
-            emu_core::Button::X | emu_core::Button::Y => return None,
+            // GBA has no X/Y/ZL/ZR.
+            emu_core::Button::X
+            | emu_core::Button::Y
+            | emu_core::Button::ZL
+            | emu_core::Button::ZR => return None,
         })
     }
 

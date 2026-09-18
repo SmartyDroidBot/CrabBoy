@@ -1,6 +1,11 @@
 //! The frontend-facing system abstraction.
 
-use crate::{audio::AudioBuffer, input::Button, video::Frame, Screen};
+use crate::{
+    audio::AudioBuffer,
+    input::{Axis, Button, Motion},
+    video::Frame,
+    Screen,
+};
 
 /// A complete console as seen by a frontend.
 ///
@@ -25,12 +30,31 @@ pub trait System {
         59.7275
     }
 
+    /// Every display of the console, in a stable order. Single-screen
+    /// consoles return just [`System::screen`]; the 3DS returns the top screen
+    /// first, then the bottom one.
+    fn screens(&self) -> Vec<Screen> {
+        vec![self.screen()]
+    }
+
     /// Reset the system to power-on state (keeps loaded cartridge).
     fn reset(&mut self);
 
     /// Press or release a logical button (see [`Button`]).
     fn press(&mut self, button: Button);
     fn release(&mut self, button: Button);
+
+    /// Move an analog control. Both axes are signed, `i16::MIN..=i16::MAX`,
+    /// with positive `x` to the right and positive `y` up. Default: ignored.
+    fn set_axis(&mut self, _axis: Axis, _x: i16, _y: i16) {}
+
+    /// Touch or release the touch screen. Coordinates are pixels on the
+    /// touch-sensitive display (the second entry of [`System::screens`] on
+    /// the 3DS). Default: ignored.
+    fn set_touch(&mut self, _point: Option<(u16, u16)>) {}
+
+    /// Feed the motion sensors. Default: ignored.
+    fn set_motion(&mut self, _motion: Motion) {}
 
     /// Execute one instruction (or idle cycle), returning cycles consumed.
     fn step(&mut self) -> u32;
@@ -51,6 +75,12 @@ pub trait System {
     /// ones only the 2-bit shades. Frontends should render through
     /// [`Frame::write_rgba`], which handles both.
     fn frame(&self) -> Frame;
+
+    /// Framebuffer of display `index` (see [`System::screens`]). Index 0 is
+    /// always [`System::frame`]; an out-of-range index also returns it.
+    fn frame_at(&self, _index: usize) -> Frame {
+        self.frame()
+    }
 
     /// Zero-copy view of the current framebuffer as 2-bit shades (`0..=3` per
     /// pixel), a fast path for the Game Boy family. Colour-only consoles
