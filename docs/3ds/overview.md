@@ -48,6 +48,18 @@ by default until the merge:
 cargo run --release -p crab-cli --features crab-systems/ctr --bin crab -- info payload.firm
 ```
 
+## Status
+
+- **M0: done.**
+- **M1: implemented, one exit criterion open.** `softfloat`, the ARMv5TE
+  interpreter, the ARM9 protection unit, TCMs, interrupt controller, timers,
+  pad, display scan-out and the boot shim exist and are tested, including two
+  hand-assembled end-to-end payloads. The independent reference is the
+  ARM7TDMI of `gba-core` (800,000 random instructions). Still open: running a
+  third-party ARM9 payload such as `bmbt3ds`, which publishes no binary and so
+  needs an ARM toolchain (devkitARM) to build.
+- Everything else: not started.
+
 ## Milestones
 
 Milestones marked *console* need a 3DS with boot9strap, because they run files

@@ -45,8 +45,27 @@ supervisor calls, the faulting instruction plus 4 for a prefetch abort
 run plus 4 for interrupts. Aborts follow the base-restored
 model: a faulting access leaves the base register unchanged.
 
+## r15 in register-specified shifts
+
+`r15` as the shifted register or as the first operand of a data-processing
+instruction with a register-specified shift reads as the instruction's address
+plus 12, not plus 8. The form is unpredictable in the ARM ARM; the value is
+what jsmolka's `arm.gba` tests 224 and 225 measure on an ARM7TDMI. The ARM9
+is assumed to behave the same, because the extra cycle of a register-specified
+shift exists there too. Not verified on a 3DS.
+
 ## Verification
 
+- `crates/arm-core/tests/jsmolka.rs`: jsmolka's `arm.gba` and `thumb.gba`
+  run on a GBA-shaped flat memory, resuming after each failure. Everything
+  passes except tests of ARM7TDMI behaviour that ARMv5 changed, which the test
+  pins: rotated misaligned loads and swaps and the byte-loading `LDRSH` (ARM
+  355, 408, 409, 452; Thumb 204, 211, 212, 216, 219, 221), a compare with
+  `Rd` = `r15` restoring the CPSR (234), empty register lists transferring
+  `r15` (513, 515, 530-532), `LDM` writeback with the base first in the list
+  (516) and `STM` storing the updated base (522-529). The Thumb suite cannot
+  run past test 223, which pops an even address into `r15` and so enters ARM
+  state on ARMv5.
 - `crates/arm-core/src/tests.rs`: hand-encoded tests per instruction class.
 - `crates/arm-core/tests/differential.rs`: 800,000 random ARM and Thumb
   instructions compared against the ARM7TDMI of `gba-core` on the subset both

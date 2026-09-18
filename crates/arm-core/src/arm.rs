@@ -207,6 +207,13 @@ fn operand2(cpu: &Cpu, instr: u32) -> (u32, bool) {
         let value = cpu.get(instr & 0xF);
         let kind = Shift::from_bits(instr >> 5);
         if instr & 1 << 4 != 0 {
+            // A register-specified shift takes a cycle before the operand is
+            // read, so r15 has moved on to the instruction's address plus 12.
+            let value = if instr & 0xF == 15 {
+                value.wrapping_add(4)
+            } else {
+                value
+            };
             shift_reg(kind, value, cpu.get(instr >> 8 & 0xF), carry)
         } else {
             shift_imm(kind, value, instr >> 7 & 0x1F, carry)
@@ -218,7 +225,12 @@ fn data_processing(cpu: &mut Cpu, instr: u32) -> Exec {
     let opcode = instr >> 21 & 0xF;
     let set_flags = instr & 1 << 20 != 0;
     let rd = instr >> 12 & 0xF;
-    let a = cpu.get(instr >> 16 & 0xF);
+    let register_shift = instr >> 25 & 1 == 0 && instr & 1 << 4 != 0;
+    let mut a = cpu.get(instr >> 16 & 0xF);
+    if register_shift && instr >> 16 & 0xF == 15 {
+        // As for the shifted register: r15 is a cycle further on.
+        a = a.wrapping_add(4);
+    }
     let (b, shifter_carry) = operand2(cpu, instr);
     let carry_in = cpu.flag(psr::C);
 
