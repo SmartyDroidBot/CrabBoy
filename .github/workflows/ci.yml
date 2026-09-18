@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 3ds]
   pull_request:
 
 permissions:
@@ -84,6 +84,24 @@ jobs:
         with:
           name: hashes-${{ matrix.os }}
           path: hashes-${{ matrix.os }}.txt
+
+  ctr:
+    name: 3ds core (ctr feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked --features crab-systems/ctr -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked --features crab-systems/ctr
+      - name: Clippy (wasm32)
+        run: cargo clippy -p crab-wasm --target wasm32-unknown-unknown --locked --features crab-systems/ctr -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest
