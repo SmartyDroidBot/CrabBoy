@@ -1,7 +1,7 @@
 //! CrabBoy core framework.
 //!
 //! This crate defines the traits and shared types that let every console core
-//! (GB today, GBA tomorrow) present a uniform, platform-agnostic interface to
+//! (GB, GBA and the 3DS) present a uniform, platform-agnostic interface to
 //! frontends. It has **no** GUI/OS/wasm dependencies so it compiles unchanged
 //! for `wasm32-unknown-unknown`.
 //!
@@ -19,6 +19,8 @@ pub mod bus;
 pub mod device;
 pub mod host;
 pub mod input;
+pub mod mem;
+pub mod state;
 pub mod system;
 pub mod video;
 
@@ -26,7 +28,8 @@ pub use audio::Sample;
 pub use bus::{Addressable, Bus};
 pub use device::Device;
 pub use host::Host;
-pub use input::Button;
+pub use input::{Axis, Button, Motion};
+pub use mem::Mem;
 pub use system::System;
 pub use video::{Frame, DMG_PALETTE};
 
