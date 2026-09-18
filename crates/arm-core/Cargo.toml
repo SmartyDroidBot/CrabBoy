@@ -9,3 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 softfloat = { workspace = true }
+
+[dev-dependencies]
+# The ARM7TDMI serves as a differential oracle for the common ARMv4T subset.
+gba-core = { workspace = true }

@@ -196,6 +196,7 @@ dependencies = [
 name = "arm-core"
 version = "0.3.0"
 dependencies = [
+ "gba-core",
  "softfloat",
 ]
 
