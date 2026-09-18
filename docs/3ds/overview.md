@@ -54,11 +54,18 @@ cargo run --release -p crab-cli --features crab-systems/ctr --bin crab -- info p
 - **M1: implemented, one exit criterion open.** `softfloat`, the ARMv5TE
   interpreter, the ARM9 protection unit, TCMs, interrupt controller, timers,
   pad, display scan-out and the boot shim exist and are tested, including two
-  hand-assembled end-to-end payloads. The independent reference is the
-  ARM7TDMI of `gba-core` (800,000 random instructions). Still open: running a
-  third-party ARM9 payload such as `bmbt3ds`, which publishes no binary and so
-  needs an ARM toolchain (devkitARM) to build.
+  hand-assembled end-to-end payloads. The independent references are the
+  ARM7TDMI of `gba-core` (800,000 random instructions) and jsmolka's CPU
+  suites. Still open: running a third-party ARM9 payload such as `bmbt3ds`,
+  which publishes no binary and so needs an ARM toolchain (devkitARM) to
+  build.
 - Everything else: not started.
+- **Ordering note.** fastboot3DS's ARM9 side waits for a PXI handshake from
+  its ARM11 side (read in its source), and GodMode9 also ships ARM11 code, so
+  the M2 exit test is unlikely to pass before the ARM11 of M3 exists. The M2
+  units (crypto engines, SDMMC, FAT, NDMA) are still testable on their own
+  with vectors and synthetic images; the GodMode9 check moves to the end of
+  M3.
 
 ## Milestones
 
