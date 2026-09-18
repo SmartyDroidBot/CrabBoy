@@ -30,6 +30,12 @@ See [`ROADMAP.md`](ROADMAP.md) for the milestones, [`CHANGELOG.md`](CHANGELOG.md
 for what each release contains and [`docs/accuracy.md`](docs/accuracy.md) for
 the current test-suite results.
 
+A low-level **Nintendo 3DS** core is in development on the `3ds` branch
+(`crates/ctr-core` and friends, behind the `crab-systems/ctr` feature). It
+loads FIRM payloads but does not emulate the processors yet, and it will need
+files dumped from your own console for anything beyond homebrew; see
+[`docs/3ds/overview.md`](docs/3ds/overview.md).
+
 ## Status
 
 | | Game Boy | Game Boy Color | Game Boy Advance |

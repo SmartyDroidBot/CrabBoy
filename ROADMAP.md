@@ -44,3 +44,10 @@ Ordered by impact on commercial games:
 Tracked per milestone above; the structural work is stepping the bus per
 M-cycle inside instructions, a fetcher/FIFO PPU with mode-3 penalties and a
 DIV-clocked frame sequencer with integer mixing in the APU.
+
+## Nintendo 3DS (branch `3ds`)
+
+A low-level 3DS core is developed on the `3ds` branch and merges only when a
+commercial game runs with both screens, audio and saves on every frontend.
+The strategy, the milestones M0 to M11 and the merge bar are in
+`docs/3ds/overview.md`. It does not change the release milestones above.

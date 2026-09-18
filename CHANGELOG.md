@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Nintendo 3DS core scaffolding on the `3ds` branch, behind the
+  `crab-systems/ctr` feature: `ctr-core` loads a FIRM payload into physical
+  memory, keeps LCD frame time (4,481,136 ARM11 cycles) and reports both
+  screens; `ctr-fs` parses FIRM images and detects NCSD, NCCH and 3DSX. The
+  processors are not emulated yet. See `docs/3ds/overview.md`.
+- `emu_core::System` gains `screens`, `frame_at`, `set_axis`, `set_touch` and
+  `set_motion` with defaults that leave existing cores unchanged, `Button`
+  gains `ZL` and `ZR`, and `emu_core::{mem, state}` share the heap region
+  type and the save-state reader and writer.
 - `accuracy --dump-failures DIR` writes the frame of every failing screenshot
   test in the reference encoding for diffing.
 
