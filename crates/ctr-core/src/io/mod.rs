@@ -11,6 +11,7 @@
 //! reach, or into an unused 4 KB block, is a data abort.
 
 pub mod i2c;
+pub mod ndma;
 pub mod pdc;
 pub mod pxi;
 pub mod sdmmc;
@@ -35,6 +36,8 @@ use timer9::Timers;
 /// ARM9 interrupt sources, as bits of `IRQ_IE` and `IRQ_IF` (3dbrew, "IRQ
 /// Registers").
 pub mod irq9 {
+    /// NDMA channel 0; the other seven follow.
+    pub const NDMA_0: u32 = 1 << 0;
     pub const TIMER_0: u32 = 1 << 8;
     pub const PXI_SYNC: u32 = 1 << 12;
     pub const PXI_SEND_EMPTY: u32 = 1 << 13;
@@ -82,6 +85,7 @@ pub struct Io {
     pub sdmmc: Sdmmc,
     pub aes: AesEngine,
     pub sha: ShaEngine,
+    pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
     sysprot9: u8,
     bootenv: u32,
@@ -134,6 +138,7 @@ impl Io {
             },
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
+            ndma: ndma::Ndma::default(),
             mpcore: Mpcore::new(),
             sysprot9: 0,
             bootenv: 0,
@@ -178,6 +183,57 @@ impl Io {
     fn sdmmc_irq(&mut self) {
         if self.sdmmc.interrupting() {
             self.irq9.pending |= irq9::SDIO_1;
+        }
+    }
+
+    /// Carry out the transfers the ARM9's DMA controller has requests for.
+    /// The controller is a bus master of its own: it reaches physical memory
+    /// and the ARM9's registers, not the TCMs.
+    pub fn run_ndma(&mut self, mem: &mut PhysMem, sched: &mut Scheduler) {
+        use ndma::Update;
+        while let Some(block) = self.ndma.next_block() {
+            let (mut src, mut dst) = (block.src, block.dst);
+            let bytes = block.words as usize * 4;
+            let filling = block.src_update == Update::Fill;
+            let ram_fill = filling && block.dst_update == Update::Increment;
+            if let Some(out) = mem.slice_mut(dst, bytes).filter(|_| ram_fill) {
+                // The common case, a fill of memory, without the per-word
+                // dispatch.
+                for word in out.as_chunks_mut::<4>().0 {
+                    *word = block.fill.to_le_bytes();
+                }
+                dst = dst.wrapping_add(bytes as u32);
+            } else {
+                for _ in 0..block.words {
+                    let word = if filling {
+                        block.fill
+                    } else {
+                        self.dma_read(src, mem, sched)
+                    };
+                    self.dma_write(dst, word, mem, sched);
+                    src = block.src_update.step(src);
+                    dst = block.dst_update.step(dst);
+                }
+            }
+            if self.ndma.finish(block, src, dst) {
+                self.irq9.pending |= irq9::NDMA_0 << block.channel;
+            }
+        }
+    }
+
+    fn dma_read(&mut self, addr: u32, mem: &PhysMem, sched: &Scheduler) -> u32 {
+        if (0x10..=0x17).contains(&(addr >> 24)) {
+            return self.read9(addr, sched).unwrap_or(0);
+        }
+        mem.slice(addr, 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn dma_write(&mut self, addr: u32, word: u32, mem: &mut PhysMem, sched: &mut Scheduler) {
+        if (0x10..=0x17).contains(&(addr >> 24)) {
+            let _ = self.write9(addr, word, !0, sched);
+        } else if let Some(b) = mem.slice_mut(addr, 4) {
+            b.copy_from_slice(&word.to_le_bytes());
         }
     }
 
@@ -288,6 +344,7 @@ impl Io {
                 0xFFC => SOCINFO_OLD_3DS,
                 _ => self.trace.read(addr),
             },
+            0x10002 => self.ndma.read(offset),
             0x10001 => match offset {
                 0x000 => self.irq9.enable,
                 0x004 => self.irq9.pending,
@@ -372,6 +429,7 @@ impl Io {
                 }
                 self.sdmmc_irq();
             }
+            0x10002 => self.ndma.write(offset, value, mask),
             0x10008 => self.write_pxi(Side::Arm9, offset, value, mask),
             0x10009 => {
                 self.aes.write(offset, value, mask);
@@ -625,6 +683,42 @@ mod tests {
         io.write9(0x1000_8008, 0xCAFE, !0, &mut sched);
         assert_ne!(io.mpcore.gic.read_distributor(0, 0x208) & 1 << 0x13, 0);
         assert_eq!(io.read11(0x1016_300C, &sched), Some(0xCAFE));
+    }
+
+    #[test]
+    fn the_dma_controller_fills_and_copies_memory_and_interrupts() {
+        let mut sched = Scheduler::new();
+        let mut mem = PhysMem::new();
+        let mut io = Io::new();
+        // Channel 0 fills four words; channel 1 copies them backwards.
+        io.write9(0x1000_2008, 0x2000_0000, !0, &mut sched);
+        io.write9(0x1000_2010, 4, !0, &mut sched);
+        io.write9(0x1000_2018, 0x1122_3344, !0, &mut sched);
+        io.write9(0x1000_201C, 0xD000_6000, !0, &mut sched);
+        assert!(io.ndma.pending());
+        io.run_ndma(&mut mem, &mut sched);
+        assert_eq!(
+            mem.slice(0x2000_0000, 20).unwrap()[12..],
+            [0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0]
+        );
+        assert_eq!(io.irq9.pending & 0xFF, irq9::NDMA_0);
+        assert_eq!(io.read9(0x1000_201C, &sched).unwrap() >> 31, 0);
+
+        mem.slice_mut(0x2000_0000, 1).unwrap()[0] = 0x99;
+        io.write9(0x1000_2020, 0x2000_0000, !0, &mut sched);
+        io.write9(0x1000_2024, 0x2000_0104, !0, &mut sched);
+        io.write9(0x1000_202C, 2, !0, &mut sched);
+        io.write9(0x1000_2038, 0x9000_0400, !0, &mut sched);
+        io.run_ndma(&mut mem, &mut sched);
+        assert_eq!(
+            mem.slice(0x2000_0100, 8),
+            Some(&[0x44, 0x33, 0x22, 0x11, 0x99, 0x33, 0x22, 0x11][..])
+        );
+        assert_eq!(
+            io.irq9.pending & 0xFF,
+            irq9::NDMA_0,
+            "channel 1 has no interrupt"
+        );
     }
 
     #[test]

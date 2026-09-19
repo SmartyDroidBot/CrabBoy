@@ -79,6 +79,11 @@ fn main() {
         );
     }
 
+    println!(
+        "irq9: enabled {:08x} pending {:08x}",
+        ctr.io().irq9.enable,
+        ctr.io().irq9.pending
+    );
     let gic = &ctr.io().mpcore.gic;
     let words = |base: u32| -> Vec<String> {
         (0..4)

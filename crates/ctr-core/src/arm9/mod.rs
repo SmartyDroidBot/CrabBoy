@@ -149,7 +149,11 @@ impl Arm9Bus<'_> {
                 };
                 self.io
                     .write9(addr & !3, value << shift & mask, mask, self.sched)
-                    .ok_or(Abort)
+                    .ok_or(Abort)?;
+                if self.io.ndma.pending() {
+                    self.io.run_ndma(self.mem, self.sched);
+                }
+                Ok(())
             }
             // The boot ROM ignores writes.
             0xFF if addr >= BOOT9_BASE => Ok(()),

@@ -130,6 +130,8 @@ pub struct Cpu {
     halted: bool,
     /// Exceptions taken so far, in vector order, for diagnostics.
     taken: [u64; 7],
+    /// The return address of the latest exception of each kind.
+    returns: [u32; 7],
     /// The floating-point unit of an ARMv6K processor.
     pub(crate) vfp: Vfp,
 }
@@ -150,6 +152,7 @@ impl Cpu {
             fiq_line: false,
             halted: false,
             taken: [0; 7],
+            returns: [0; 7],
             vfp: Vfp::default(),
         };
         cpu.r[15] = cpu.vector_base(bus);
@@ -209,6 +212,12 @@ impl Cpu {
     /// undefined, supervisor call, prefetch abort, data abort, IRQ, FIQ.
     pub fn exceptions_taken(&self) -> [u64; 7] {
         self.taken
+    }
+
+    /// The link register value of the latest exception of each kind, in
+    /// vector order, for diagnostics.
+    pub fn exception_returns(&self) -> [u32; 7] {
+        self.returns
     }
 
     /// Stop executing until an interrupt line is raised.
@@ -358,6 +367,7 @@ impl Cpu {
     /// mode, already adjusted the way that exception's handler expects.
     pub fn enter<B: Bus>(&mut self, bus: &B, exception: Exception, return_addr: u32) {
         self.taken[exception as usize] += 1;
+        self.returns[exception as usize] = return_addr;
         let old = self.cpsr;
         let mut new = old & !(psr::MODE | psr::T) | exception.mode() | psr::I;
         if matches!(exception, Exception::Reset | Exception::Fiq) {

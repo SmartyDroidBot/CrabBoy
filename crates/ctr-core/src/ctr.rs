@@ -122,12 +122,20 @@ impl Ctr {
     pub fn describe(&self) -> String {
         let one = |name: &str, cpu: &Cpu| {
             let [_, und, svc, pabt, dabt, irq, _] = cpu.exceptions_taken();
-            format!(
+            let returns = cpu.exception_returns();
+            let mut line = format!(
                 "{name} pc {:#010x} cpsr {:#010x}{} und {und} svc {svc} pabt {pabt} dabt {dabt} irq {irq}",
                 cpu.reg(15),
                 cpu.cpsr(),
                 if cpu.halted() { " halted" } else { "" },
-            )
+            );
+            // Where the latest fault of each kind came from.
+            for (what, index, count) in [("und", 1, und), ("pabt", 3, pabt), ("dabt", 4, dabt)] {
+                if count != 0 {
+                    line += &format!(" [{what} lr {:#010x}]", returns[index]);
+                }
+            }
+            line
         };
         format!(
             "{}\n    {}\n    {}",
