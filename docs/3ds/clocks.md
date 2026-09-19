@@ -46,5 +46,6 @@ Constants in use, none of them measured:
 | What | Cost | Why this value |
 |---|---|---|
 | GPU memory fill (PSC0, PSC1) | 1 ARM11 cycle per byte filled, at least one | Software starts a fill and only then arms its wait for the completion interrupt (fastboot3DS clears its event flag after the write), so completion has to come later than the starting write. The memory itself is written at once. |
+| GPU command list (P3D) | 16 ARM11 cycles per word of the list | Completion has to follow the write that starts the list; nothing is drawn yet. |
 | Transfer engine (PPF) | 1 ARM11 cycle per byte written, at least one | As for the fills. |
 | ARM9 DMA (NDMA) | none: a block moves at once | No payload has needed more yet. |

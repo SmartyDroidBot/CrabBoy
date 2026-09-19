@@ -57,7 +57,9 @@ All notable changes to this project are documented here. The format follows
   exponentiation, no dependencies) at 0x1000B000, and a CI comparison of
   3DS frames between the wasm module and native.
 - 3DS: `pica::shader`, an interpreter for the PICA200's shader instruction
-  set with its non-IEEE float rules (`docs/3ds/gpu.md`).
+  set with its non-IEEE float rules, and `pica::command`, the GPU's command
+  lists, internal registers and shader uploads, wired to 0x10401000 with the
+  P3D interrupt (`docs/3ds/gpu.md`).
 - `emu_core::Layout` stacks a console's displays into one image. The desktop
   app, `crab run` and the wasm bindings draw through it, so a 3DS payload
   shows both screens; the pointer held on the bottom screen is the stylus,

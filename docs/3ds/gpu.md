@@ -46,12 +46,38 @@ Open:
   and are counted.
 - The depth of the hardware's call, if and loop stacks is not modelled; the
   interpreter stops at 32 nested blocks or a million instructions.
-- No payload drives the shader unit yet. Bare-metal GPU test programs that
+- No payload drives the GPU yet. Bare-metal GPU test programs that
   need no system software are not known to exist; the published GPU tests are
   applications for the 3DS's operating system.
 
+## Command processor (`pica::command`)
+
+From 3dbrew, "GPU/Internal Registers". The 0x300 internal registers are
+reached two ways: directly at 0x10401000 (four bytes to an ID, a narrow
+write touching only its bytes) and through command lists. A command is a
+parameter and a header (ID, a mask of the parameter's four bytes, a count of
+further parameters, and consecutive mode, which sends those to the following
+IDs instead of the same one), padded to a pair of words. Writing a jump
+register (0x23C, 0x23D; 0x104018F0 on the bus) runs the buffer whose address
+and size registers (in units of eight bytes) go with it; a jump inside a list
+moves to the other buffer. `FINALIZE` (0x010) ends a list, and nothing after
+it runs.
+
+The list takes effect at once; interrupt 0x2D follows 16 ARM11 cycles per
+word later (`clocks.md`; unmeasured, and nothing is drawn yet that would
+take longer). A list without `FINALIZE` hangs the hardware; here it ends
+without an interrupt.
+
+Behind the geometry (0x280) and vertex (0x2B0) shader blocks are their
+upload FIFOs: code and operand descriptors go to a twelve-bit index that
+advances with each word, and float uniforms arrive last component first as
+three words of 24-bit floats (`ZZWWWWWW YYYYZZZZ XXXXXXYY`) or four of single
+precision, the target index advancing after each register; past `c95` they
+are dropped. Boolean and integer uniforms and the entry point are plain
+registers. Every other register only holds its value so far.
+
 ## Not started
 
-The command processor for GPU register writes and command lists, vertex
+Vertex
 loading, primitive assembly, clipping, the rasteriser, texture units and
 combiners, fragment lighting, the framebuffer and the geometry stage.

@@ -28,6 +28,7 @@ pub mod irq {
     pub const PDC0: usize = 0x2A;
     pub const PDC1: usize = 0x2B;
     pub const PPF: usize = 0x2C;
+    pub const P3D: usize = 0x2D;
     pub const PXI_SYNC: usize = 0x50;
     pub const PXI_SEND_EMPTY: usize = 0x52;
     pub const PXI_RECV_NOT_EMPTY: usize = 0x53;

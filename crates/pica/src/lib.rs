@@ -7,7 +7,8 @@
 //! display transfers. It works on plain byte slices of VRAM and FCRAM and has
 //! no dependency on the machine.
 //!
-//! So far: the transfer engine and the shader unit.
+//! So far: the transfer engine, the shader unit and the command processor.
 
+pub mod command;
 pub mod shader;
 pub mod transfer;

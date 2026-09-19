@@ -18,6 +18,10 @@ pub const PSC_FILL_CYCLES_PER_BYTE: u64 = 1;
 /// ARM11 cycles the transfer engine takes per byte written. Not measured.
 pub const PPF_CYCLES_PER_BYTE: u64 = 1;
 
+/// ARM11 cycles the GPU takes per word of a command list. Not measured, and
+/// nothing is drawn yet that would take longer.
+pub const P3D_CYCLES_PER_WORD: u64 = 16;
+
 /// ARM11 cycles per LCD pixel.
 pub const CYCLES_PER_PIXEL: u32 = 24;
 

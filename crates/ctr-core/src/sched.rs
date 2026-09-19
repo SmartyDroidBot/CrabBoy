@@ -25,6 +25,8 @@ pub enum Event {
     PscDone(u8),
     /// The GPU's transfer engine finishes.
     PpfDone,
+    /// The GPU reaches the end of a command list.
+    P3dDone,
 }
 
 #[derive(Default)]

@@ -99,6 +99,7 @@ control says.
 | 0x10202000 | LCD | Latched; the fill colour registers (0x204, 0xA04) reach the panels |
 | 0x10400010, 0x10400020 | PSC0, PSC1 | Memory fills of 16, 24 or 32-bit patterns. The memory is written at once; busy clears, finished sets and interrupt 0x28 or 0x29 fires one ARM11 cycle per byte later (see `clocks.md`) |
 | 0x10400400, 0x10400500 | PDC0, PDC1 | Framebuffer addresses, format, select and stride drive scan-out; the VBlank status bit and interrupts 0x2A and 0x2B fire every 4,481,136 cycles unless masked (3dbrew, "GPU/External Registers") |
+| 0x10401000 | GPU internal registers | The command processor of `pica`: registers by ID, command lists started at 0x104018F0, interrupt 0x2D; see `gpu.md` |
 | 0x10400C00 | Transfer engine | Display transfers and texture copies, see below; finished (bit 8) and interrupt 0x2C one ARM11 cycle per byte written later |
 | 0x17E00000 | MPCore private region | See `arm11.md` |
 

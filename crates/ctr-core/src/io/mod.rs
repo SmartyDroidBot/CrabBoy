@@ -21,7 +21,9 @@ pub mod trace;
 
 use crate::arm11::{irq, Mpcore};
 use crate::bus::PhysMem;
-use crate::clock::{FRAME_CYCLES, PPF_CYCLES_PER_BYTE, PSC_FILL_CYCLES_PER_BYTE};
+use crate::clock::{
+    FRAME_CYCLES, P3D_CYCLES_PER_WORD, PPF_CYCLES_PER_BYTE, PSC_FILL_CYCLES_PER_BYTE,
+};
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
 use ctr_crypto::{AesEngine, RsaEngine, ShaEngine};
@@ -96,6 +98,8 @@ pub struct Io {
     pub aes: AesEngine,
     pub sha: ShaEngine,
     pub rsa: RsaEngine,
+    /// The GPU's command processor and internal registers.
+    pub gpu: pica::command::Gpu,
     pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
     /// The interrupt lines of SD/MMC controllers 1 and 3 as last seen.
@@ -154,6 +158,7 @@ impl Io {
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
             rsa: RsaEngine::new(),
+            gpu: pica::command::Gpu::new(),
             ndma: ndma::Ndma::default(),
             sdmmc_line: [false; 2],
             // As every payload so far sets it: the slot on controller 1.
@@ -234,6 +239,38 @@ impl Io {
             }
         } else if let Some(card) = self.sdmmc.cards[0].take() {
             self.sdmmc3.cards[0] = Some(card);
+        }
+    }
+
+    /// Run the command list of buffer `index`, following jumps to the other
+    /// buffer. The list takes effect at once; the P3D interrupt follows after
+    /// a time in proportion to its length. A list that never writes
+    /// `FINALIZE` hangs the GPU, so nothing follows it.
+    fn run_commands(&mut self, mut index: usize, mem: &PhysMem, sched: &mut Scheduler) {
+        use pica::command::ListEnd;
+        let mut words_run = 0u64;
+        // Two buffers can jump to each other for ever.
+        for _ in 0..64 {
+            let (addr, len) = self.gpu.command_buffer(index);
+            let Some(bytes) = mem.slice(addr, len as usize) else {
+                return;
+            };
+            let words: Vec<u32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .collect();
+            words_run += words.len() as u64;
+            match self.gpu.run_list(&words) {
+                ListEnd::Finalized => {
+                    let cost = words_run * P3D_CYCLES_PER_WORD;
+                    sched.schedule(sched.now() + cost.max(1), Event::P3dDone);
+                    return;
+                }
+                ListEnd::Jump(next) => index = next,
+                ListEnd::Exhausted => return,
+            }
         }
     }
 
@@ -584,6 +621,8 @@ impl Io {
                 0x500..=0x5FF => self.pdc[1].read32(offset),
                 _ => self.latched_or_zero(addr),
             },
+            // The GPU's internal registers, four bytes to an ID.
+            0x10401 if offset < 0xC00 => self.gpu.regs[offset as usize / 4],
             0x10200..=0x10203 | 0x1020F | 0x10401 => {
                 if latches(addr >> 12) {
                     self.latched_or_zero(addr)
@@ -619,6 +658,22 @@ impl Io {
                 }
             }
             0x10400 => self.write_gpu(addr, value, mask, mem, sched),
+            0x10401 if offset < 0xC00 => {
+                use pica::command::reg;
+                let id = offset / 4;
+                let bytes = (0..4)
+                    .filter(|byte| mask >> (byte * 8) & 0xFF != 0)
+                    .fold(0, |bytes, byte| bytes | 1 << byte);
+                self.gpu.write_register(id, value, bytes);
+                match id {
+                    // Written by hand, it interrupts like the end of a list.
+                    reg::FINALIZE => sched.schedule(sched.now() + 1, Event::P3dDone),
+                    reg::CMDBUF_JUMP0 | 0x23D => {
+                        self.run_commands((id - reg::CMDBUF_JUMP0) as usize, mem, sched)
+                    }
+                    _ => {}
+                }
+            }
             0x10200..=0x10203 | 0x1020F | 0x10401 => {
                 if latches(addr >> 12) {
                     self.latch(addr, value, mask);
@@ -728,6 +783,7 @@ impl Io {
                 self.latched.insert(addr, control & !1 | 2);
                 self.mpcore.gic.raise(id);
             }
+            Event::P3dDone => self.mpcore.gic.raise(irq::P3D),
             Event::PpfDone => {
                 // Busy clears, finished sets, the interrupt fires.
                 let control = self.latched_or_zero(0x1040_0C18);
@@ -900,6 +956,35 @@ mod tests {
         io.write9(0x1000_601C, 0, !0, &mut sched);
         io.write9(0x1000_6000, 0, 0xFFFF, &mut sched);
         assert_ne!(io.irq9.pending & irq9::SDIO_1, 0);
+    }
+
+    #[test]
+    fn a_command_list_is_run_from_memory_and_interrupts_when_finalized() {
+        let mut sched = Scheduler::new();
+        let mut mem = PhysMem::new();
+        let mut io = Io::new();
+        // Set register 0x100, then FINALIZE.
+        let list: [u32; 4] = [0xCAFE_F00D, 0x000F_0100, 0x1234_5678, 0x000F_0010];
+        let bytes: Vec<u8> = list.iter().flat_map(|w| w.to_le_bytes()).collect();
+        mem.slice_mut(0x2000_1000, 16)
+            .unwrap()
+            .copy_from_slice(&bytes);
+        io.write11(0x1040_18E0, 16 >> 3, !0, &mut mem, &mut sched);
+        io.write11(0x1040_18E8, 0x2000_1000 >> 3, !0, &mut mem, &mut sched);
+        io.write11(0x1040_18F0, 1, !0, &mut mem, &mut sched);
+        assert_eq!(io.read11(0x1040_1400, &sched), Some(0xCAFE_F00D));
+
+        let pending = |io: &Io| io.mpcore.gic.read_distributor(0, 0x204) & 1 << 0xD != 0;
+        assert!(!pending(&io), "the list takes time");
+        sched.advance(4 * P3D_CYCLES_PER_WORD);
+        let (at, event) = sched.pop_due().unwrap();
+        assert_eq!(event, Event::P3dDone);
+        io.fire(at, event, &mut sched);
+        assert!(pending(&io));
+
+        // A byte write to an internal register touches that byte alone.
+        io.write11(0x1040_1400, 0x0000_AA00, 0x0000_FF00, &mut mem, &mut sched);
+        assert_eq!(io.read11(0x1040_1400, &sched), Some(0xCAFE_AA0D));
     }
 
     #[test]
