@@ -29,16 +29,31 @@ pub enum Event {
     P3dDone,
 }
 
-#[derive(Default)]
-pub struct Scheduler {
+/// A clock and the events waiting on it. The machine's scheduler is a queue
+/// of its hardware [`Event`]s; the high-level 3DS mode keeps one of its own
+/// kind of event.
+pub struct Queue<E> {
     now: Time,
     sequence: u64,
-    queue: BinaryHeap<Reverse<(Time, u64, Event)>>,
+    queue: BinaryHeap<Reverse<(Time, u64, E)>>,
 }
 
-impl Scheduler {
+/// The scheduler of the low-level machine.
+pub type Scheduler = Queue<Event>;
+
+impl<E: Copy + Ord> Default for Queue<E> {
+    fn default() -> Self {
+        Queue {
+            now: 0,
+            sequence: 0,
+            queue: BinaryHeap::new(),
+        }
+    }
+}
+
+impl<E: Copy + Ord> Queue<E> {
     pub fn new() -> Self {
-        Scheduler::default()
+        Self::default()
     }
 
     pub fn now(&self) -> Time {
@@ -59,13 +74,13 @@ impl Scheduler {
     }
 
     /// Fire `event` at `at`, replacing any pending instance of it.
-    pub fn schedule(&mut self, at: Time, event: Event) {
+    pub fn schedule(&mut self, at: Time, event: E) {
         self.cancel(event);
         self.queue.push(Reverse((at, self.sequence, event)));
         self.sequence += 1;
     }
 
-    pub fn cancel(&mut self, event: Event) {
+    pub fn cancel(&mut self, event: E) {
         self.queue.retain(|Reverse((_, _, e))| *e != event);
     }
 
@@ -75,7 +90,7 @@ impl Scheduler {
     }
 
     /// The earliest event that is due by now, with the time it was due.
-    pub fn pop_due(&mut self) -> Option<(Time, Event)> {
+    pub fn pop_due(&mut self) -> Option<(Time, E)> {
         match self.queue.peek() {
             Some(Reverse((at, _, _))) if *at <= self.now => {
                 let Reverse((at, _, event)) = self.queue.pop()?;
