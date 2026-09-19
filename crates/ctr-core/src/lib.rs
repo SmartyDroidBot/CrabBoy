@@ -10,6 +10,7 @@
 //! firmware is part of the repository; whatever a configuration needs is
 //! supplied by the user at run time.
 
+pub mod arm11;
 pub mod arm9;
 pub mod boot;
 pub mod bus;

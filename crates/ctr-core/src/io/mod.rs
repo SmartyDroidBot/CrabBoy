@@ -6,6 +6,7 @@
 //! halfword writes too.
 
 pub mod pdc;
+pub mod pxi;
 pub mod timer9;
 pub mod trace;
 
