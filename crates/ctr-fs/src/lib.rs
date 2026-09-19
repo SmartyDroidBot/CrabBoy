@@ -5,8 +5,10 @@
 
 pub mod fat;
 pub mod firm;
+pub mod threedsx;
 
 pub use firm::{CopyMethod, Firm, FirmError, Section};
+pub use threedsx::{ThreeDsx, ThreeDsxError};
 
 /// The kind of 3DS image a byte buffer holds, judged by its magic alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
