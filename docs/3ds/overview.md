@@ -53,6 +53,7 @@ other cores: hardware-equivalent emulation in pure Rust.
 | `ctr-crypto` | AES, SHA and RSA engine models |
 | `ctr-fs` | FIRM, NCSD, NCCH, 3DSX and friends |
 | `ctr-core` | the machine: bus, MMU/MPU, interrupt controllers, I/O, boot, `System` |
+| `ctr-hle` | the high-level mode: Horizon kernel and services, loaders, a second `System` |
 | `gdb-stub` | GDB remote protocol, free of I/O |
 
 `crab-systems` builds the core behind the `ctr` cargo feature, which stays off

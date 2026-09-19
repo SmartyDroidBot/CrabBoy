@@ -102,7 +102,7 @@ pub fn load_media(
     #[cfg(feature = "ctr")]
     if matches!(
         ctr_fs::ImageKind::detect(&header),
-        Some(kind) if kind != ctr_fs::ImageKind::Firm
+        Some(ctr_fs::ImageKind::Ncsd | ctr_fs::ImageKind::Ncch)
     ) {
         return Err(HLE_PENDING.to_string());
     }
@@ -119,10 +119,10 @@ pub fn load_media(
     load_with(rom, opts)
 }
 
-/// Until the high-level 3DS mode can start a process.
+/// Until the high-level 3DS mode can load a game image.
 #[cfg(feature = "ctr")]
-const HLE_PENDING: &str = "3DS games and homebrew need the high-level mode, which cannot start \
-                           a process yet; only FIRM payloads load";
+const HLE_PENDING: &str = "3DS game images need the high-level mode, which cannot load one yet; \
+                           FIRM payloads and 3DSX homebrew load";
 
 /// Build the console for `rom`.
 pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, String> {
@@ -146,6 +146,7 @@ pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, St
         #[cfg(feature = "ctr")]
         Some(Kind::Ctr) => match ctr_fs::ImageKind::detect(&rom) {
             Some(ctr_fs::ImageKind::Firm) => ctr_core::Ctr::system(rom),
+            Some(ctr_fs::ImageKind::ThreeDsx) => ctr_hle::Horizon::system(rom),
             _ => Err(HLE_PENDING.to_string()),
         },
         None => Err("not a Game Boy, Game Boy Color or Game Boy Advance ROM".to_string()),
@@ -251,6 +252,21 @@ mod tests {
         };
         assert!(load_media(Box::new(huge), &LoadOptions::default()).is_err());
         assert_eq!(bytes_read.get(), HEADER_LEN);
+    }
+
+    #[cfg(feature = "ctr")]
+    #[test]
+    fn homebrew_runs_in_the_high_level_mode() {
+        // svc 0x03: the program exits at once.
+        let code = 0xEF00_0003u32.to_le_bytes();
+        let image = ctr_fs::threedsx::build([&code, &[], &[]], 0, &Default::default());
+        assert_eq!(detect(&image), Some(Kind::Ctr));
+        let mut system = load(image.clone()).unwrap();
+        assert_eq!(system.name(), "3ds");
+        assert!(system.info().contains("high-level"));
+        system.run_frame();
+        assert_eq!(system.screens().len(), 2);
+        assert!(load_media(Box::new(image), &LoadOptions::default()).is_ok());
     }
 
     #[cfg(feature = "ctr")]

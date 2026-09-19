@@ -56,6 +56,14 @@ All notable changes to this project are documented here. The format follows
 - 3DS: the RSA engine (`ctr_crypto::RsaEngine`, hand-written Montgomery
   exponentiation, no dependencies) at 0x1000B000, and a CI comparison of
   3DS frames between the wasm module and native.
+- 3DS: a high-level mode, `ctr-hle`, in which the emulator is the console's
+  operating system and no console dumps are needed. So far it loads a 3DSX
+  homebrew executable into a process and answers its first supervisor calls
+  (`docs/3ds/hle.md`); `arm-core` hands traps to the host for it, the GPU
+  register block became `ctr_core::gpu::GpuExt` to be shared by both modes,
+  and `emu_core::Storage` with `crab_systems::load_media` reads large images
+  in pieces. Booting Nintendo's firmware on the low-level machine is parked
+  until console dumps exist.
 - 3DS: `pica::shader`, an interpreter for the PICA200's shader instruction
   set with its non-IEEE float rules, and `pica::command`, the GPU's command
   lists, internal registers and shader uploads, wired to 0x10401000 with the

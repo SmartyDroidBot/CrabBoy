@@ -11,6 +11,7 @@ members = [
     "crates/ctr-crypto",
     "crates/ctr-fs",
     "crates/ctr-core",
+    "crates/ctr-hle",
     "crates/gdb-stub",
     "crates/crab-systems",
     "platforms/desktop",
@@ -36,6 +37,7 @@ pica = { path = "crates/pica" }
 ctr-crypto = { path = "crates/ctr-crypto" }
 ctr-fs = { path = "crates/ctr-fs" }
 ctr-core = { path = "crates/ctr-core" }
+ctr-hle = { path = "crates/ctr-hle" }
 gdb-stub = { path = "crates/gdb-stub" }
 crab-systems = { path = "crates/crab-systems" }
 

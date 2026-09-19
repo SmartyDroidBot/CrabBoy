@@ -1054,6 +1054,7 @@ version = "0.3.0"
 dependencies = [
  "ctr-core",
  "ctr-fs",
+ "ctr-hle",
  "emu-core",
  "gb-core",
  "gba-core",
@@ -1120,6 +1121,17 @@ version = "0.3.0"
 [[package]]
 name = "ctr-fs"
 version = "0.3.0"
+
+[[package]]
+name = "ctr-hle"
+version = "0.3.0"
+dependencies = [
+ "arm-core",
+ "ctr-core",
+ "ctr-fs",
+ "emu-core",
+ "pica",
+]
 
 [[package]]
 name = "cursor-icon"

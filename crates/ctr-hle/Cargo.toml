@@ -1,0 +1,15 @@
+[package]
+name = "ctr-hle"
+description = "Nintendo 3DS high-level mode: the Horizon kernel and services, no GUI/OS/wasm deps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+emu-core = { workspace = true }
+ctr-fs = { workspace = true }
+arm-core = { workspace = true }
+ctr-core = { workspace = true }
+pica = { workspace = true }
