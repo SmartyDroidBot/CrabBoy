@@ -85,6 +85,19 @@ jobs:
           name: hashes-${{ matrix.os }}
           path: hashes-${{ matrix.os }}.txt
 
+      - name: Record a 3DS frame hash
+        shell: bash
+        run: |
+          cargo build --release --locked -p crab-cli --bin ctr-diag
+          target/release/ctr-diag roms/test-suites/3ds/godmode9/GodMode9.firm 300 --every=300 --sd-fat \
+            | grep '^frame' | awk '{print $1, $2, $3, $4}' | tee "ctr-hashes-${{ matrix.os }}.txt"
+          test -s "ctr-hashes-${{ matrix.os }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctr-hashes-${{ matrix.os }}
+          path: ctr-hashes-${{ matrix.os }}.txt
+
   ctr:
     name: 3ds core (ctr feature)
     runs-on: ubuntu-latest
@@ -178,6 +191,21 @@ jobs:
         run: |
           cd hashes
           ls -la
+          ref=$(ls | head -n1)
+          for f in *; do
+            echo "== $f"; cat "$f"
+            diff "$ref" "$f"
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ctr-hashes-*
+          merge-multiple: true
+          path: ctr-hashes
+
+      - name: The 3DS core must produce identical frames on every native platform
+        run: |
+          cd ctr-hashes
           ref=$(ls | head -n1)
           for f in *; do
             echo "== $f"; cat "$f"
