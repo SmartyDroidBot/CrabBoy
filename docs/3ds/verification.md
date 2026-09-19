@@ -18,12 +18,14 @@ data abort on any processor.
 
 | Run | Frame | Top hash | What is on screen |
 |---|---|---|---|
-| no card | 300 | 0fdd798e | Splash: the logo and "10th anniversary" |
-| `--sd-fat` | 1500 | 68e57cf5 | Root: `[0:] SDCARD (NOLABEL) 31.9 MB`, `[S:] SYSNAND VIRTUAL 943.0 MB`, `[9:] RAMDRIVE`, `[C:] GAMECART`, `[M:] MEMORY VIRTUAL`, `[V:] VRAM VIRTUAL`; clock 20-01-01 00:00; help text below |
-| `--sd-fat`, five `UP` presses from 1300 then `A` at 1400 | 1600 | fa836c18 | Drive `0:` listing `HELLO.TXT  19 Byte` |
+| no card | 40 | 0fdd798e | Splash: the logo and "10th anniversary" |
+| no card | 300 | bc9ff74a | Root without `[0:]`: `[S:] SYSNAND VIRTUAL 943.0 MB`, `[9:] RAMDRIVE`, `[C:] GAMECART`, `[M:] MEMORY VIRTUAL`, `[V:] VRAM VIRTUAL` |
+| `--sd-fat` | 1500 | ebc2e71a | Root with `[0:] SDCARD (NOLABEL) 31.9 MB` selected; clock 20-01-01 00:00; help text below |
+| `--sd-fat --input=A@1400,!A@1406` | 1600 | fa836c18 | Drive `0:` listing `HELLO.TXT  19 Byte` |
 
-The input script of the third run:
-`UP@1300,!UP@1306,UP@1320,!UP@1326,UP@1340,!UP@1346,UP@1360,!UP@1366,UP@1380,!UP@1386,A@1400,!A@1406`.
+The same four runs are the `godmode9-*` suites of `tests/accuracy/suites.toml`
+(kind `ctr-frame`), so CI checks them against the baseline;
+`fetch_test_roms --only 3ds` downloads the pinned release archive.
 
 What these runs exercise: both processors and the second ARM11 core's wait
 routine, the boot shim and its stand-in boot ROM routines, the MMU, the

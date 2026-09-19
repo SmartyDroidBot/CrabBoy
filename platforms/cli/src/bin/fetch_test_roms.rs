@@ -34,6 +34,13 @@ const GBA_FILES: &[&str] = &[
     "unsafe/unsafe.gba",
 ];
 
+/// GodMode9 (GPL-2.0-or-later): a bare-metal 3DS payload for both
+/// processors, used to pin frames of the 3DS core.
+const CTR_URL: &str =
+    "https://github.com/d0k3/GodMode9/releases/download/v2.2.3/GodMode9-v2.2.3-20260331144941.zip";
+const CTR_SHA256: &str = "3673b86240efa4b47769d2d22e1c9e234a906c40163ed54c821164143501beca";
+const CTR_MARKER: &str = "godmode9-v2.2.3";
+
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("fetch_test_roms: {msg}");
     std::process::exit(1)
@@ -140,6 +147,39 @@ fn fetch_gba(dest: &Path, force: bool) -> Result<usize, String> {
     Ok(count)
 }
 
+fn fetch_ctr(dest: &Path, force: bool) -> Result<usize, String> {
+    let dir = dest.join("3ds").join("godmode9");
+    let marker = dir.join(format!("{CTR_MARKER}.ok"));
+    if marker.exists() && !force {
+        println!("3ds: {CTR_MARKER} already present in {}", dir.display());
+        return Ok(0);
+    }
+    println!("3ds: downloading {CTR_URL}");
+    let zip_bytes = download(CTR_URL)?;
+    let actual = sha256_hex(&zip_bytes);
+    if actual != CTR_SHA256 {
+        return Err(format!(
+            "SHA-256 mismatch for {CTR_URL}\n  expected {CTR_SHA256}\n  actual   {actual}"
+        ));
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("opening zip: {e}"))?;
+    let mut entry = archive
+        .by_name("GodMode9.firm")
+        .map_err(|e| format!("GodMode9.firm: {e}"))?;
+    let mut data = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut data)
+        .map_err(|e| format!("extracting GodMode9.firm: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let out = dir.join("GodMode9.firm");
+    std::fs::write(&out, data).map_err(|e| format!("write {}: {e}", out.display()))?;
+    std::fs::write(&marker, format!("{CTR_URL}\n{CTR_SHA256}\n"))
+        .map_err(|e| format!("write {}: {e}", marker.display()))?;
+    println!("3ds: extracted GodMode9.firm to {}", dir.display());
+    Ok(1)
+}
+
 fn main() {
     let mut dest = PathBuf::from("roms/test-suites");
     let mut only: Option<String> = None;
@@ -156,12 +196,12 @@ fn main() {
             "--only" => {
                 only = Some(
                     args.next()
-                        .unwrap_or_else(|| fail("--only needs gb or gba")),
+                        .unwrap_or_else(|| fail("--only needs gb, gba or 3ds")),
                 )
             }
             "--force" => force = true,
             "-h" | "--help" => {
-                println!("usage: fetch_test_roms [--dest DIR] [--only gb|gba] [--force]");
+                println!("usage: fetch_test_roms [--dest DIR] [--only gb|gba|3ds] [--force]");
                 return;
             }
             other => fail(format!("unknown argument {other}")),
@@ -170,8 +210,8 @@ fn main() {
     std::fs::create_dir_all(&dest)
         .unwrap_or_else(|e| fail(format!("mkdir {}: {e}", dest.display())));
     if let Some(o) = &only {
-        if o != "gb" && o != "gba" {
-            fail(format!("--only expects gb or gba, got {o}"));
+        if !["gb", "gba", "3ds"].contains(&o.as_str()) {
+            fail(format!("--only expects gb, gba or 3ds, got {o}"));
         }
     }
     let want = |k: &str| only.as_deref().is_none_or(|o| o == k);
@@ -180,5 +220,8 @@ fn main() {
     }
     if want("gba") {
         fetch_gba(&dest, force).unwrap_or_else(|e| fail(e));
+    }
+    if want("3ds") {
+        fetch_ctr(&dest, force).unwrap_or_else(|e| fail(e));
     }
 }

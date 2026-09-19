@@ -312,3 +312,7 @@ jsmolka-gba/../gba/jsmolka/save/flash64.gba PASS
 jsmolka-gba/../gba/jsmolka/save/none.gba PASS
 jsmolka-gba/../gba/jsmolka/save/sram.gba PASS
 jsmolka-gba/../gba/jsmolka/thumb/thumb.gba PASS
+godmode9-splash/../3ds/godmode9/GodMode9.firm PASS
+godmode9-no-card/../3ds/godmode9/GodMode9.firm PASS
+godmode9-root/../3ds/godmode9/GodMode9.firm PASS
+godmode9-sd-listing/../3ds/godmode9/GodMode9.firm PASS

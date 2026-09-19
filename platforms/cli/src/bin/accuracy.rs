@@ -60,6 +60,11 @@ struct Suite {
     glob: Option<String>,
     reference: Option<String>,
     reference_alt: Option<String>,
+    /// `ctr-frame`: the expected top-screen hash, an input script, and
+    /// whether a FAT16 SD card is inserted.
+    hash: Option<String>,
+    input: Option<String>,
+    sd_fat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +79,9 @@ struct Case {
     reference: Option<PathBuf>,
     /// Directory that receives the frame of a failing screenshot test.
     dump_dir: Option<PathBuf>,
+    hash: Option<String>,
+    input: Option<String>,
+    sd_fat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +124,9 @@ fn load_suites(path: &Path) -> Vec<Suite> {
                 glob: str_field("glob"),
                 reference: str_field("reference"),
                 reference_alt: str_field("reference_alt"),
+                hash: str_field("hash"),
+                input: str_field("input"),
+                sd_fat: s.get("sd_fat").and_then(|v| v.as_bool()).unwrap_or(false),
             }
         })
         .collect()
@@ -292,6 +303,9 @@ fn cases(suites: &[Suite], root: &Path, filter: Option<&str>) -> Vec<Case> {
                 path: p,
                 reference,
                 dump_dir: None,
+                hash: s.hash.clone(),
+                input: s.input.clone(),
+                sd_fat: s.sd_fat,
             });
         }
     }
@@ -340,6 +354,9 @@ fn run_case(case: &Case) -> Result_ {
     };
     if case.kind == "gba-jsmolka" {
         return run_jsmolka(&rom, case.frames);
+    }
+    if case.kind == "ctr-frame" {
+        return run_ctr_frame(rom, case);
     }
     let name = case
         .path
@@ -611,6 +628,55 @@ fn run_jsmolka(rom: &[u8], frames: u64) -> Result_ {
     Result_ {
         outcome: Outcome::Fail,
         detail: format!("frame hash {last:08x}"),
+    }
+}
+
+/// A 3DS payload: run it for the frame budget, with an optional SD card and
+/// input script, and compare the hash of the top screen with the pinned one.
+fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
+    use emu_core::System;
+    let crash = |detail: String| Result_ {
+        outcome: Outcome::Crash,
+        detail,
+    };
+    let mut ctr = match ctr_core::Ctr::from_firm(firm) {
+        Ok(ctr) => ctr,
+        Err(e) => return crash(e),
+    };
+    if case.sd_fat {
+        let files: [(&str, &[u8]); 1] = [("HELLO.TXT", b"Hello from CrabBoy\n")];
+        match ctr_fs::fat::build(&files, 65536) {
+            Ok(image) => ctr.insert_sd(image),
+            Err(e) => return crash(e.to_string()),
+        }
+    }
+    let script = match case.input.as_deref().map(crab_cli::parse_input_script) {
+        Some(Ok(script)) => script,
+        Some(Err(e)) => return crash(e),
+        None => Vec::new(),
+    };
+    for frame in 0..case.frames {
+        for event in script.iter().filter(|e| e.frame == frame) {
+            if event.pressed {
+                ctr.press(event.button);
+            } else {
+                ctr.release(event.button);
+            }
+        }
+        ctr.run_frame();
+    }
+    let hash = crab_cli::fnv1a32(&ctr.frame().to_rgba(&emu_core::DMG_PALETTE));
+    let expected = case.hash.as_deref().unwrap_or("");
+    if format!("{hash:08x}") == expected {
+        Result_ {
+            outcome: Outcome::Pass,
+            detail: String::new(),
+        }
+    } else {
+        Result_ {
+            outcome: Outcome::Fail,
+            detail: format!("frame hash {hash:08x}, expected {expected}"),
+        }
     }
 }
 

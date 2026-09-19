@@ -124,3 +124,43 @@ name = "jsmolka-gba"
 kind = "gba-jsmolka"
 frames = 2000
 glob = "../gba/jsmolka/{arm,thumb,memory,bios,save}/*.gba"
+
+# Nintendo 3DS (branch `3ds`).
+#
+# kind:
+#   ctr-frame       run a FIRM payload for `frames`, optionally with a FAT16
+#                   SD card (`sd_fat`) and an input script (`input`, the
+#                   grammar of `crab run --input`), then compare the FNV-1a
+#                   hash of the top screen with `hash`. The runs are described
+#                   in docs/3ds/verification.md.
+
+[[suite]]
+name = "godmode9-splash"
+kind = "ctr-frame"
+frames = 40
+hash = "0fdd798e"
+roms = ["../3ds/godmode9/GodMode9.firm"]
+
+[[suite]]
+name = "godmode9-no-card"
+kind = "ctr-frame"
+frames = 300
+hash = "bc9ff74a"
+roms = ["../3ds/godmode9/GodMode9.firm"]
+
+[[suite]]
+name = "godmode9-root"
+kind = "ctr-frame"
+frames = 1500
+sd_fat = true
+hash = "ebc2e71a"
+roms = ["../3ds/godmode9/GodMode9.firm"]
+
+[[suite]]
+name = "godmode9-sd-listing"
+kind = "ctr-frame"
+frames = 1600
+sd_fat = true
+input = "A@1400,!A@1406"
+hash = "fa836c18"
+roms = ["../3ds/godmode9/GodMode9.firm"]
