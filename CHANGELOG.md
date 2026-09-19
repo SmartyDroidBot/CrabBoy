@@ -34,6 +34,12 @@ All notable changes to this project are documented here. The format follows
   `set_motion` with defaults that leave existing cores unchanged, `Button`
   gains `ZL` and `ZR`, and `emu_core::{mem, state}` share the heap region
   type and the save-state reader and writer.
+- `emu_core::Layout` stacks a console's displays into one image. The desktop
+  app, `crab run` and the wasm bindings draw through it, so a 3DS payload
+  shows both screens; the pointer held on the bottom screen is the stylus,
+  I/J/K/L move the circle pad, and C, V, Q and W are X, Y, ZL and ZR. Each
+  frontend has a `ctr` feature that turns the 3DS core on. Single-display
+  consoles produce the same frames and hashes as before.
 - `accuracy --dump-failures DIR` writes the frame of every failing screenshot
   test in the reference encoding for diffing.
 

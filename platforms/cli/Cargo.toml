@@ -55,5 +55,7 @@ png = "0.18"
 toml = "1"
 
 [features]
+# The Nintendo 3DS core in `crab` itself (see `crab-systems`).
+ctr = ["crab-systems/ctr"]
 # Dev tool that rasterises assets/logo.svg into the icon files (pure Rust).
 logo-tools = ["dep:resvg", "dep:ico"]

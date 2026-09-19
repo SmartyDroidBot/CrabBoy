@@ -7,7 +7,7 @@
 //! ```
 
 use crab_cli::{encode_png, encode_ppm, encode_wav, fnv1a32, parse_input_script, InputEvent};
-use emu_core::{System, DMG_PALETTE};
+use emu_core::{Layout, System, DMG_PALETTE};
 
 const USAGE: &str = "\
 usage:
@@ -109,8 +109,9 @@ fn load_system(rom_path: &str, bios: Option<&str>, cold: bool) -> Box<dyn System
     crab_systems::load_with(rom, &opts).unwrap_or_else(|e| fail(format!("{rom_path}: {e}")))
 }
 
+/// Every display of the system in one image (the 3DS has two).
 fn rgba(system: &dyn System) -> (u32, u32, Vec<u8>) {
-    let frame = system.frame();
+    let frame = Layout::of(system).compose(system, &DMG_PALETTE);
     (
         frame.width as u32,
         frame.height as u32,

@@ -10,12 +10,12 @@
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings {
-    use emu_core::{Button, System, DMG_PALETTE};
+    use emu_core::{Axis, Button, Layout, System, DMG_PALETTE};
     use wasm_bindgen::prelude::*;
 
     /// Button order used by [`Emulator::set_button`]; also returned by
     /// [`button_names`] so the JS side never hard-codes it.
-    const BUTTONS: [Button; 10] = [
+    const BUTTONS: [Button; 14] = [
         Button::A,
         Button::B,
         Button::Select,
@@ -26,13 +26,17 @@ pub mod bindings {
         Button::Down,
         Button::R,
         Button::L,
+        Button::X,
+        Button::Y,
+        Button::ZL,
+        Button::ZR,
     ];
 
     /// Comma-separated button names, indexed as [`Emulator::set_button`]
-    /// expects: `A,B,Select,Start,Right,Left,Up,Down,R,L`.
+    /// expects: `A,B,Select,Start,Right,Left,Up,Down,R,L,X,Y,ZL,ZR`.
     #[wasm_bindgen]
     pub fn button_names() -> String {
-        "A,B,Select,Start,Right,Left,Up,Down,R,L".to_string()
+        "A,B,Select,Start,Right,Left,Up,Down,R,L,X,Y,ZL,ZR".to_string()
     }
 
     /// Identify a ROM from its header: `"gb"`, `"gbc"`, `"gba"` or `""`.
@@ -49,6 +53,7 @@ pub mod bindings {
     pub struct Emulator {
         sys: Box<dyn System>,
         rgba: Vec<u8>,
+        layout: Layout,
     }
 
     #[wasm_bindgen]
@@ -70,17 +75,20 @@ pub mod bindings {
             let opts = crab_systems::LoadOptions { gba_bios, cold };
             let sys =
                 crab_systems::load_with(rom.to_vec(), &opts).map_err(|e| JsValue::from_str(&e))?;
-            let screen = sys.screen();
+            let layout = Layout::of(sys.as_ref());
             let mut emu = Emulator {
                 sys,
-                rgba: vec![0; screen.width as usize * screen.height as usize * 4],
+                rgba: vec![0; layout.width as usize * layout.height as usize * 4],
+                layout,
             };
             emu.render();
             Ok(emu)
         }
 
         fn render(&mut self) {
-            self.sys.frame().write_rgba(&DMG_PALETTE, &mut self.rgba);
+            self.layout
+                .compose(self.sys.as_ref(), &DMG_PALETTE)
+                .write_rgba(&DMG_PALETTE, &mut self.rgba);
         }
 
         /// Console identifier: `"gb"`, `"gbc"` or `"gba"`.
@@ -98,12 +106,13 @@ pub mod bindings {
             self.sys.info()
         }
 
+        /// Width of the framebuffer: every display of the console, stacked.
         pub fn width(&self) -> u32 {
-            self.sys.screen().width as u32
+            self.layout.width as u32
         }
 
         pub fn height(&self) -> u32 {
-            self.sys.screen().height as u32
+            self.layout.height as u32
         }
 
         /// Nominal video frame rate in Hz.
@@ -153,6 +162,25 @@ pub mod bindings {
                     self.sys.release(b);
                 }
             }
+        }
+
+        /// Hold the stylus at a framebuffer pixel. Points outside a
+        /// touch-sensitive display (the second one of the 3DS) lift it.
+        pub fn set_touch(&mut self, x: u32, y: u32) {
+            let point = self
+                .layout
+                .locate(x.min(u16::MAX as u32) as u16, y.min(u16::MAX as u32) as u16)
+                .and_then(|(index, x, y)| (index == 1).then_some((x, y)));
+            self.sys.set_touch(point);
+        }
+
+        pub fn clear_touch(&mut self) {
+            self.sys.set_touch(None);
+        }
+
+        /// Move the circle pad; both axes span `-32767..=32767`, `y` up.
+        pub fn set_circle_pad(&mut self, x: i16, y: i16) {
+            self.sys.set_axis(Axis::CirclePad, x, y);
         }
 
         /// Reset to power-on state, keeping the cartridge.

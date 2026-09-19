@@ -2,7 +2,7 @@ mod audio;
 
 use audio::AudioOutput;
 use eframe::egui;
-use emu_core::{Button, System};
+use emu_core::{Axis, Button, Layout, System};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -474,6 +474,18 @@ impl CrabBoyApp {
             }
         }
 
+        if let Some(system) = &mut self.system {
+            // The circle pad on I/J/K/L, at full deflection.
+            let axis = |neg: egui::Key, pos: egui::Key| {
+                (keys.contains(&pos) as i16 - keys.contains(&neg) as i16) * i16::MAX
+            };
+            system.set_axis(
+                Axis::CirclePad,
+                axis(egui::Key::J, egui::Key::L),
+                axis(egui::Key::K, egui::Key::I),
+            );
+        }
+
         let shift = ctx.input(|i| i.modifiers.shift);
         for &k in &newly {
             match k {
@@ -496,13 +508,14 @@ impl CrabBoyApp {
     fn draw_screen(&mut self, ui: &mut egui::Ui) {
         let Some(system) = &self.system else {
             ui.label("No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file.");
+            // 3DS payloads (.firm) load as well when built with the `ctr` feature.
             return;
         };
-        let screen = system.screen();
-        let w = screen.width as usize;
-        let h = screen.height as usize;
+        let layout = Layout::of(system.as_ref());
+        let w = layout.width as usize;
+        let h = layout.height as usize;
         if self.uploaded_frame != self.frame_count || self.screen_texture.is_none() {
-            let frame = system.frame();
+            let frame = layout.compose(system.as_ref(), &self.palette.colors);
             self.rgba.resize(w * h * 4, 0);
             frame.write_rgba(&self.palette.colors, &mut self.rgba);
             let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &self.rgba);
@@ -525,7 +538,23 @@ impl CrabBoyApp {
         let avail = ui.available_size();
         let scale = (avail.x / w as f32).min(avail.y / h as f32);
         let size = egui::vec2(w as f32 * scale, h as f32 * scale);
-        ui.image((tex.id(), size));
+        let shown = ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::drag()));
+
+        // The pointer held on a touch-sensitive display is the stylus.
+        let touch = shown
+            .interact_pointer_pos()
+            .filter(|_| shown.is_pointer_button_down_on())
+            .and_then(|p| {
+                let at = (p - shown.rect.min) / scale;
+                if at.x < 0.0 || at.y < 0.0 {
+                    return None;
+                }
+                layout.locate(at.x as u16, at.y as u16)
+            })
+            .and_then(|(index, x, y)| (index == 1).then_some((x, y)));
+        if let Some(system) = &mut self.system {
+            system.set_touch(touch);
+        }
     }
 
     fn palette_ui(&mut self, ui: &mut egui::Ui) {
@@ -566,7 +595,10 @@ fn default_key(b: Button) -> Option<egui::Key> {
         Button::Select => egui::Key::Backspace,
         Button::L => egui::Key::A,
         Button::R => egui::Key::S,
-        _ => return None,
+        Button::X => egui::Key::C,
+        Button::Y => egui::Key::V,
+        Button::ZL => egui::Key::Q,
+        Button::ZR => egui::Key::W,
     })
 }
 
@@ -591,6 +623,7 @@ impl eframe::App for CrabBoyApp {
                     if ui.button("Open ROM...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Game Boy / GBA ROM", &["gb", "gbc", "gba"])
+                            .add_filter("3DS firmware payload", &["firm"])
                             .pick_file()
                         {
                             let p = path.to_string_lossy().to_string();

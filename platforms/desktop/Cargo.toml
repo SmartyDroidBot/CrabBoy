@@ -18,5 +18,9 @@ rodio = "0.19"
 emu-core = { workspace = true }
 crab-systems = { workspace = true }
 
+[features]
+# The Nintendo 3DS core (see `crab-systems`).
+ctr = ["crab-systems/ctr"]
+
 [build-dependencies]
 winresource = "0.1"
