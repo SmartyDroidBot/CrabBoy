@@ -59,6 +59,31 @@ fn main() {
         }
     }
 
+    // One more frame, to show what the software is busy with at the end.
+    ctr.io_mut().trace.take_recent();
+    ctr.run_frame();
+    println!("i/o in the last frame:");
+    for (addr, entry) in ctr.io_mut().trace.take_recent() {
+        println!(
+            "  {addr:#010x}  reads {:8}  writes {:8}  last write {:#010x}",
+            entry.reads, entry.writes, entry.last_write
+        );
+    }
+
+    let gic = &ctr.io().mpcore.gic;
+    let words = |base: u32| -> Vec<String> {
+        (0..4)
+            .map(|n| format!("{:08x}", gic.read_distributor(0, base + n * 4)))
+            .collect()
+    };
+    println!(
+        "gic: control {} enabled {:?} pending {:?} active {:?}",
+        gic.read_distributor(0, 0),
+        words(0x100),
+        words(0x200),
+        words(0x300)
+    );
+
     println!("unmodelled registers:");
     for (addr, entry) in ctr.io().trace.entries() {
         println!(

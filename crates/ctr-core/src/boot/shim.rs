@@ -9,6 +9,9 @@
 //! sets up no key, so it suits bare-metal homebrew only; official firmware
 //! needs the real boot ROMs.
 
+use super::romstubs;
+use crate::arm11::gic::CORES;
+use crate::arm11::Arm11;
 use crate::arm9::Arm9;
 use crate::bus::PhysMem;
 use crate::io::Io;
@@ -78,25 +81,65 @@ fn put32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+/// The ARM11 handlers, at the end of AXI work RAM, in the same order.
+const RAM_VECTORS_11: [Option<u32>; 8] = [
+    None,
+    Some(0x1FFF_FFB8),
+    Some(0x1FFF_FFB0),
+    Some(0x1FFF_FFC0),
+    Some(0x1FFF_FFC8),
+    None,
+    Some(0x1FFF_FFA0),
+    Some(0x1FFF_FFA8),
+];
+
 /// Stand-in for the boot ROM's vector page: each vector loads the address of
 /// its handler in work RAM from a table 0x20 bytes on.
-fn install_vectors(arm9: &mut Arm9) {
+fn install_vectors(rom: &mut [u8], handlers: &[Option<u32>; 8]) {
     const LDR_PC_PC_0X18: u32 = 0xE59F_F018;
     const BRANCH_TO_SELF: u32 = 0xEAFF_FFFE;
-    for (n, handler) in RAM_VECTORS.iter().enumerate() {
+    for (n, handler) in handlers.iter().enumerate() {
         match handler {
             Some(addr) => {
-                put32(&mut arm9.boot9[..], n * 4, LDR_PC_PC_0X18);
-                put32(&mut arm9.boot9[..], 0x20 + n * 4, *addr);
+                put32(rom, n * 4, LDR_PC_PC_0X18);
+                put32(rom, 0x20 + n * 4, *addr);
             }
-            None => put32(&mut arm9.boot9[..], n * 4, BRANCH_TO_SELF),
+            None => put32(rom, n * 4, BRANCH_TO_SELF),
         }
     }
 }
 
-/// Bring the ARM9 side to the state a chainloader hands to a payload.
-pub fn hand_off(arm9: &mut Arm9, io: &mut Io, cpu: &mut Cpu, entry: Entry) {
-    install_vectors(arm9);
+/// Bring the machine to the state a chainloader hands to a payload.
+pub fn hand_off(
+    arm9: &mut Arm9,
+    arm11: &mut Arm11,
+    io: &mut Io,
+    cpu: &mut Cpu,
+    cpu11: &mut [Cpu; CORES],
+    entry: Entry,
+) {
+    install_vectors(&mut arm9.boot9[..], &RAM_VECTORS);
+    install_vectors(&mut arm11.boot11[..], &RAM_VECTORS_11);
+    romstubs::install(&mut arm9.boot9[..], romstubs::ARM9);
+    romstubs::install(&mut arm11.boot11[..], romstubs::ARM11);
+
+    // The interrupt controller as a boot ROM that has used it leaves it, so
+    // that a sleeping core can be woken: distributor and interfaces on.
+    io.mpcore.gic.write_distributor(0, 0x000, 1);
+    for core in 0..CORES {
+        io.mpcore.gic.write_interface(core, 0x00, 1);
+        io.mpcore.gic.write_interface(core, 0x04, 0xF0);
+    }
+    // Core 0 starts the payload's ARM11 code, if it has any; the others wait
+    // to be sent an entry point.
+    for (core, cpu) in cpu11.iter_mut().enumerate() {
+        cpu.set_cpsr(mode::SVC | psr::A | psr::I | psr::F);
+        if core == 0 && entry.arm11 != 0 {
+            cpu.jump(entry.arm11);
+        } else {
+            cpu.jump(romstubs::SECONDARY_WAIT_ADDR);
+        }
+    }
 
     let cp15 = |crn, crm, opc2| CpReg {
         cp: 15,

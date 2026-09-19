@@ -15,6 +15,10 @@ pub type Time = u64;
 pub enum Event {
     /// An ARM9 timer reaches 0x10000.
     Arm9Timer(u8),
+    /// The private timer of an ARM11 core reaches zero.
+    Arm11Timer(u8),
+    /// The display controllers reach the end of a frame.
+    VBlank,
 }
 
 #[derive(Default)]
@@ -31,6 +35,13 @@ impl Scheduler {
 
     pub fn now(&self) -> Time {
         self.now
+    }
+
+    /// Set the clock. Within a quantum each processor runs on its own clock,
+    /// so time steps back when the next processor takes its turn; events are
+    /// only drained once the quantum is over.
+    pub fn set_now(&mut self, now: Time) {
+        self.now = now;
     }
 
     /// Move time forward. Events are not fired; drain them with

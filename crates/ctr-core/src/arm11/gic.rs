@@ -50,6 +50,8 @@ pub struct Gic {
     private: [[Line; PRIVATE]; CORES],
     shared: [Line; LINES - PRIVATE],
     interfaces: [Interface; CORES],
+    /// The IRQ line of each core, refreshed whenever state changes.
+    lines: [bool; CORES],
 }
 
 impl Default for Gic {
@@ -65,6 +67,7 @@ impl Gic {
             private: [[Line::default(); PRIVATE]; CORES],
             shared: [Line::default(); LINES - PRIVATE],
             interfaces: Default::default(),
+            lines: [false; CORES],
         };
         // Software interrupts are always enabled.
         for core in gic.private.iter_mut() {
@@ -95,12 +98,20 @@ impl Gic {
     pub fn raise(&mut self, irq: usize) {
         debug_assert!((PRIVATE..LINES).contains(&irq));
         self.shared[irq - PRIVATE].pending = true;
+        self.refresh();
+    }
+
+    fn refresh(&mut self) {
+        for core in 0..CORES {
+            self.lines[core] = self.best(core).is_some();
+        }
     }
 
     /// Pulse a private interrupt of one core.
     pub fn raise_private(&mut self, core: usize, irq: usize) {
         debug_assert!((16..PRIVATE).contains(&irq));
         self.private[core][irq].pending = true;
+        self.refresh();
     }
 
     /// The highest-priority interrupt `core` could take now, if any.
@@ -123,7 +134,7 @@ impl Gic {
 
     /// Level of the IRQ input of `core`.
     pub fn irq_line(&self, core: usize) -> bool {
-        self.best(core).is_some()
+        self.lines[core]
     }
 
     fn acknowledge(&mut self, core: usize) -> u32 {
@@ -135,6 +146,7 @@ impl Gic {
         line.active = true;
         let source = line.source as u32;
         self.interfaces[core].running.push((irq as u16, priority));
+        self.refresh();
         if irq < 16 {
             irq as u32 | source << 10
         } else {
@@ -152,6 +164,7 @@ impl Gic {
         if let Some(at) = running.iter().rposition(|r| r.0 as usize == irq) {
             running.remove(at);
         }
+        self.refresh();
     }
 
     /// Read a CPU interface register of `core`; `offset` is from 0x17E00100.
@@ -177,6 +190,7 @@ impl Gic {
             0x10 => self.end(core, value),
             _ => {}
         }
+        self.refresh();
     }
 
     /// Read a distributor register as `core`; `offset` is from 0x17E01000.
@@ -265,6 +279,7 @@ impl Gic {
             }
             _ => {}
         }
+        self.refresh();
     }
 }
 

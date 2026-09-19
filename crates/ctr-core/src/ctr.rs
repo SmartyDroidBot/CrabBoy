@@ -1,5 +1,7 @@
 //! The 3DS as a frontend sees it.
 
+use crate::arm11::gic::CORES;
+use crate::arm11::{Arm11, Arm11Bus};
 use crate::arm9::{Arm9, Arm9Bus};
 use crate::boot::{self, Entry};
 use crate::bus::PhysMem;
@@ -16,13 +18,18 @@ pub const BOTTOM_SCREEN: Screen = Screen::new(320, 240);
 
 /// A Nintendo 3DS.
 ///
-/// The ARM9 runs; the ARM11, the GPU and the DSP do not exist yet. See
-/// `docs/3ds/overview.md` for the milestones.
+/// Both ARM11 cores and the ARM9 run; the GPU's 3D engine and the DSP do not
+/// exist yet. See `docs/3ds/overview.md` for the milestones.
 pub struct Ctr {
     firm: Vec<u8>,
     entry: Entry,
     cpu9: Cpu,
+    cpu11: [Cpu; CORES],
+    /// ARM11 cycles each processor has run ahead of the quantum it was given.
+    debt9: u64,
+    debt11: [u64; CORES],
     arm9: Arm9,
+    arm11: Arm11,
     mem: PhysMem,
     io: Io,
     sched: Scheduler,
@@ -34,6 +41,7 @@ impl Ctr {
         let mut mem = PhysMem::new();
         let entry = boot::load_firm(&mut mem, &firm)?;
         let mut arm9 = Arm9::new();
+        let mut arm11 = Arm11::new();
         let mut io = Io::new();
         let mut sched = Scheduler::new();
         let mut cpu9 = Cpu::new(
@@ -45,12 +53,30 @@ impl Ctr {
                 sched: &mut sched,
             },
         );
-        boot::hand_off(&mut arm9, &mut io, &mut cpu9, entry);
+        let mut core = |core| {
+            Cpu::new(
+                Arch::V6k,
+                &Arm11Bus {
+                    core,
+                    arm11: &mut arm11,
+                    mem: &mut mem,
+                    io: &mut io,
+                    sched: &mut sched,
+                },
+            )
+        };
+        let mut cpu11 = [core(0), core(1)];
+        boot::hand_off(&mut arm9, &mut arm11, &mut io, &mut cpu9, &mut cpu11, entry);
+        io.power_on(&mut sched);
         Ok(Ctr {
             firm,
             entry,
             cpu9,
+            cpu11,
+            debt9: 0,
+            debt11: [0; CORES],
             arm9,
+            arm11,
             mem,
             io,
             sched,
@@ -74,18 +100,34 @@ impl Ctr {
         &self.cpu9
     }
 
+    pub fn cpu11(&self, core: usize) -> &Cpu {
+        &self.cpu11[core]
+    }
+
     pub fn io(&self) -> &Io {
         &self.io
     }
 
+    pub fn io_mut(&mut self) -> &mut Io {
+        &mut self.io
+    }
+
     /// One line on where the processors are, for diagnostics.
     pub fn describe(&self) -> String {
-        let [_, und, svc, pabt, dabt, irq, fiq] = self.cpu9.exceptions_taken();
+        let one = |name: &str, cpu: &Cpu| {
+            let [_, und, svc, pabt, dabt, irq, _] = cpu.exceptions_taken();
+            format!(
+                "{name} pc {:#010x} cpsr {:#010x}{} und {und} svc {svc} pabt {pabt} dabt {dabt} irq {irq}",
+                cpu.reg(15),
+                cpu.cpsr(),
+                if cpu.halted() { " halted" } else { "" },
+            )
+        };
         format!(
-            "arm9 pc {:#010x} cpsr {:#010x}{} und {und} svc {svc} pabt {pabt} dabt {dabt} irq {irq} fiq {fiq}",
-            self.cpu9.reg(15),
-            self.cpu9.cpsr(),
-            if self.cpu9.halted() { " halted" } else { "" },
+            "{}\n    {}\n    {}",
+            one("arm9   ", &self.cpu9),
+            one("arm11/0", &self.cpu11[0]),
+            one("arm11/1", &self.cpu11[1]),
         )
     }
 
@@ -113,26 +155,65 @@ impl Ctr {
         })
     }
 
-    /// Run the ARM9 for one instruction, or skip ahead while it waits for an
-    /// interrupt, never past `limit`. Due events fire afterwards.
-    fn advance(&mut self, limit: u64) {
-        self.cpu9.irq_line = self.io.irq9.line();
-        let cycles = if self.cpu9.halted() && !self.cpu9.irq_line {
-            let wake = self.sched.next_due().map_or(limit, |due| due.min(limit));
-            wake.saturating_sub(self.sched.now()).max(1)
-        } else {
+    /// Run every processor through the quantum that starts now, in a fixed
+    /// order, each on its own clock; then move time to the end of the quantum
+    /// and fire what fell due. Effects between processors therefore become
+    /// visible at quantum boundaries, identically on every host.
+    fn quantum(&mut self) {
+        let start = self.sched.now();
+        let length = QUANTUM as u64;
+
+        for core in 0..CORES {
+            let mut used = self.debt11[core];
+            while used < length {
+                self.sched.set_now(start + used);
+                let cpu = &mut self.cpu11[core];
+                cpu.irq_line = self.io.mpcore.gic.irq_line(core);
+                if cpu.halted() && !cpu.irq_line {
+                    used = length;
+                    break;
+                }
+                let mut bus = Arm11Bus {
+                    core,
+                    arm11: &mut self.arm11,
+                    mem: &mut self.mem,
+                    io: &mut self.io,
+                    sched: &mut self.sched,
+                };
+                used += cpu.step(&mut bus) as u64;
+            }
+            self.debt11[core] = used - length;
+        }
+
+        let mut used = self.debt9;
+        while used < length {
+            self.sched.set_now(start + used);
+            self.cpu9.irq_line = self.io.irq9.line();
+            if self.cpu9.halted() && !self.cpu9.irq_line {
+                used = length;
+                break;
+            }
             let mut bus = Arm9Bus {
                 arm9: &mut self.arm9,
                 mem: &mut self.mem,
                 io: &mut self.io,
                 sched: &mut self.sched,
             };
-            (self.cpu9.step(&mut bus) * ARM9_CYCLE) as u64
-        };
-        self.sched.advance(cycles);
+            used += (self.cpu9.step(&mut bus) * ARM9_CYCLE) as u64;
+        }
+        self.debt9 = used - length;
+
+        self.sched.set_now(start + length);
         while let Some((at, event)) = self.sched.pop_due() {
             self.io.fire(at, event, &mut self.sched);
         }
+    }
+
+    /// Whether every processor is asleep with nothing to wake it yet.
+    fn idle(&self) -> bool {
+        self.cpu9.halted()
+            && !self.io.irq9.line()
+            && (0..CORES).all(|n| self.cpu11[n].halted() && !self.io.mpcore.gic.irq_line(n))
     }
 }
 
@@ -143,7 +224,7 @@ impl System for Ctr {
 
     fn info(&self) -> String {
         format!(
-            "3DS FIRM, ARM9 entry {:#010x}, ARM11 entry {:#010x} (ARM9 only; no ARM11, GPU or DSP yet)",
+            "3DS FIRM, ARM9 entry {:#010x}, ARM11 entry {:#010x} (no 3D engine or DSP yet)",
             self.entry.arm9, self.entry.arm11
         )
     }
@@ -183,10 +264,18 @@ impl System for Ctr {
 
     fn step(&mut self) -> u32 {
         let start = self.sched.now();
-        let limit = start + QUANTUM as u64;
-        while self.sched.now() < limit {
-            self.advance(limit);
+        if self.idle() {
+            // Sleep to the quantum that holds the next event, but never for
+            // more than a frame, so the frontend keeps its cadence.
+            let horizon = start + FRAME_CYCLES as u64;
+            let wake = self
+                .sched
+                .next_due()
+                .map_or(horizon, |due| due.min(horizon));
+            let quanta = wake.saturating_sub(start) / QUANTUM as u64;
+            self.sched.set_now(start + quanta * QUANTUM as u64);
         }
+        self.quantum();
         (self.sched.now() - start) as u32
     }
 
@@ -280,6 +369,53 @@ mod tests {
             0x0800_6000,
             &[(0x0800_6000, &main), (0x0800_0000, &handler)],
         )
+    }
+
+    /// The ARM11 sends a word over PXI and sleeps; the ARM9 waits for it and
+    /// stores it at 0x08001000.
+    fn pxi_payload() -> Vec<u8> {
+        let arm11 = words(&[
+            0xE59F_0014, // ldr r0, =0x10163004   PXI_CNT
+            0xE3A0_1902, // mov r1, #0x8000       enable
+            0xE580_1000, // str r1, [r0]
+            0xE59F_200C, // ldr r2, =0x1234
+            0xE580_2004, // str r2, [r0, #4]      PXI_SEND
+            0xE320_F003, // wfi
+            0xEAFF_FFFD, // b   back to the wfi
+            0x1016_3004,
+            0x0000_1234,
+        ]);
+        let arm9 = words(&[
+            0xE59F_0020, // ldr r0, =0x10008004   PXI_CNT
+            0xE3A0_1902, // mov r1, #0x8000
+            0xE580_1000, // str r1, [r0]
+            0xE590_1000, // ldr r1, [r0]
+            0xE311_0C01, // tst r1, #0x100        receive FIFO empty
+            0x1AFF_FFFC, // bne back to the ldr
+            0xE590_2008, // ldr r2, [r0, #8]      PXI_RECV
+            0xE59F_300C, // ldr r3, =0x08001000
+            0xE583_2000, // str r2, [r3]
+            0xEAFF_FFFE, // b   .
+            0x1000_8004,
+            0,
+            0x0800_1000,
+        ]);
+        build(
+            0x1FF8_0000,
+            0x0800_6000,
+            &[(0x0800_6000, &arm9), (0x1FF8_0000, &arm11)],
+        )
+    }
+
+    #[test]
+    fn the_processors_talk_over_pxi() {
+        let mut ctr = Ctr::from_firm(pxi_payload()).unwrap();
+        ctr.run_frame();
+        let word = ctr.mem().slice(0x0800_1000, 4).unwrap();
+        assert_eq!(u32::from_le_bytes(word.try_into().unwrap()), 0x1234);
+        assert!(ctr.cpu11(0).halted());
+        assert!(ctr.cpu11(1).halted(), "the second core waits to be started");
+        assert_eq!(ctr.cpu11(1).exceptions_taken(), [0; 7]);
     }
 
     const BOTTOM_LEFT: usize = 239 * 400 * 3;

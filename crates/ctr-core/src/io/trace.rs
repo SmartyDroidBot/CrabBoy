@@ -17,6 +17,10 @@ pub struct Entry {
 pub struct Trace {
     #[cfg(feature = "trace")]
     entries: BTreeMap<u32, Entry>,
+    /// Every I/O access since the last [`Trace::take_recent`], modelled or
+    /// not.
+    #[cfg(feature = "trace")]
+    recent: BTreeMap<u32, Entry>,
 }
 
 impl Trace {
@@ -38,6 +42,28 @@ impl Trace {
             entry.writes += 1;
             entry.last_write = entry.last_write & !_mask | _value & _mask;
         }
+    }
+
+    /// Note any I/O access, for the recent-activity view.
+    #[inline]
+    pub fn touch(&mut self, _addr: u32, _write: Option<u32>) {
+        #[cfg(feature = "trace")]
+        {
+            let entry = self.recent.entry(_addr).or_default();
+            match _write {
+                Some(value) => {
+                    entry.writes += 1;
+                    entry.last_write = value;
+                }
+                None => entry.reads += 1,
+            }
+        }
+    }
+
+    /// The accesses since the last call, by address.
+    #[cfg(feature = "trace")]
+    pub fn take_recent(&mut self) -> Vec<(u32, Entry)> {
+        std::mem::take(&mut self.recent).into_iter().collect()
     }
 
     /// Every unmodelled register touched so far, by address.
