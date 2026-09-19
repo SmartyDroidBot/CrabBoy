@@ -57,13 +57,15 @@ cargo run --release -p crab-cli --features crab-systems/ctr --bin crab -- info p
   and eMMC cards, NDMA, the AES and SHA engines, PSC fills, the transfer
   engine and the display controllers exist. GodMode9 v2.2.3 browses the SD
   card, fastboot3DS v1.2 and open_agb_firm show their menus on both screens.
-  Missing: the RSA engine and the OTP model (M2), the DMA330 controllers
-  (M3). `docs/3ds/arm11.md` and `docs/3ds/io.md` record the hardware facts.
+  The RSA engine exists and is checked against Python's `pow`, though no
+  payload has used it yet. Missing: the OTP model (M2), the DMA330
+  controllers (M3). `docs/3ds/arm11.md` and `docs/3ds/io.md` record the hardware facts.
 - **M4: done on the native platforms.** Linux 5.11 from the linux-3ds
   project boots on both cores, with `arm9linuxfw` serving virtio over PXI,
   to Buildroot's login prompt; the frame is pinned (`linux-login`) and CI
-  compares it across x86_64 and aarch64. The wasm comparison of 3DS frames
-  is still to do.
+  compares it across x86_64 and aarch64. The wasm build is compared with
+  native on GodMode9 and fastboot3DS (both screens, no card: the wasm
+  bindings cannot insert one yet), not on Linux.
 - The frontends draw both screens and feed touch and the circle pad.
 - **M1: implemented.** `softfloat`, the ARMv5TE
   interpreter, the ARM9 protection unit, TCMs, interrupt controller, timers,

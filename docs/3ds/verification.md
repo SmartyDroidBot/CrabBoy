@@ -91,4 +91,7 @@ installs none and the suite does not run.
 
 These are the `fastboot3ds-*` and `open-agb-firm-browser` suites
 (`both_screens = true`). CI also diffs the frame-300 hashes of all three
-payloads across the native platforms.
+payloads across the native platforms, and the wasm job compares GodMode9 and
+fastboot3DS without a card (frame 300, both screens: 46160e5f and b7169176)
+between the wasm module under Node and the native `crab run`, both built with
+the `ctr` feature.

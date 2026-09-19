@@ -189,6 +189,21 @@ jobs:
           name: hashes-wasm
           path: hashes-wasm.txt
 
+      # The 3DS core is behind a feature until it merges, so it gets a module
+      # and a native binary of its own. Both screens are in the hash.
+      - name: Compare 3DS wasm frame hashes with native
+        run: |
+          cargo build -p crab-wasm --release --locked --target wasm32-unknown-unknown --features ctr
+          wasm-bindgen --target nodejs --out-dir target/wasm-node-ctr target/wasm32-unknown-unknown/release/crab_wasm.wasm
+          cargo build --release --locked -p crab-cli --bin crab --features ctr
+          for firm in godmode9/GodMode9.firm fastboot3ds/fastboot3DS.firm; do
+            rom="roms/test-suites/3ds/$firm"
+            native=$(target/release/crab run "$rom" --frames 300 --hash | grep '^hash')
+            wasm=$(node platforms/wasm/tests/run.js "$rom" --frames 300 --hash --pkg target/wasm-node-ctr/crab_wasm.js | grep '^hash')
+            echo "$firm native: $native wasm: $wasm"
+            test "$native" = "$wasm"
+          done
+
   determinism:
     name: determinism (x86_64 vs aarch64 vs wasm)
     needs: [test, wasm]

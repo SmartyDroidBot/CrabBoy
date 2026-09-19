@@ -53,6 +53,9 @@ All notable changes to this project are documented here. The format follows
   identification registers reading as zero. `ctr_fs::fat` builds
   directories and long file names and reads files by path; suites take
   `sd_files`; `ctr-diag` gains `--sd-dir`, `--mem`, `--save` and `--regs`.
+- 3DS: the RSA engine (`ctr_crypto::RsaEngine`, hand-written Montgomery
+  exponentiation, no dependencies) at 0x1000B000, and a CI comparison of
+  3DS frames between the wasm module and native.
 - `emu_core::Layout` stacks a console's displays into one image. The desktop
   app, `crab run` and the wasm bindings draw through it, so a 3DS payload
   shows both screens; the pointer held on the bottom screen is the stylus,
