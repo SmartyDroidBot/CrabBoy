@@ -10,6 +10,13 @@ pub mod psr {
     pub const C: u32 = 1 << 29;
     pub const V: u32 = 1 << 28;
     pub const Q: u32 = 1 << 27;
+    /// The four `GE` flags of the ARMv6 parallel arithmetic.
+    pub const GE: u32 = 0xF << 16;
+    pub const GE0: u32 = 1 << 16;
+    /// Data big-endian (ARMv6).
+    pub const E: u32 = 1 << 9;
+    /// Imprecise abort mask (ARMv6).
+    pub const A: u32 = 1 << 8;
     pub const I: u32 = 1 << 7;
     pub const F: u32 = 1 << 6;
     pub const T: u32 = 1 << 5;
@@ -32,6 +39,8 @@ pub mod mode {
 pub enum Arch {
     /// ARMv5TE: the ARM946E-S of the 3DS.
     V5te,
+    /// ARMv6K: the ARM11 MPCore of the 3DS.
+    V6k,
 }
 
 /// The exceptions, in vector order.
@@ -145,6 +154,27 @@ impl Cpu {
 
     pub fn arch(&self) -> Arch {
         self.arch
+    }
+
+    pub(crate) fn v6(&self) -> bool {
+        self.arch == Arch::V6k
+    }
+
+    /// The stack pointer of `mode_bits`, whatever the current mode.
+    pub(crate) fn banked_sp(&self, mode_bits: u32) -> u32 {
+        if bank_of(mode_bits) == bank_of(self.cpsr) {
+            self.r[13]
+        } else {
+            self.banked_sp_lr[bank_of(mode_bits)][0]
+        }
+    }
+
+    pub(crate) fn set_banked_sp(&mut self, mode_bits: u32, value: u32) {
+        if bank_of(mode_bits) == bank_of(self.cpsr) {
+            self.r[13] = value;
+        } else {
+            self.banked_sp_lr[bank_of(mode_bits)][0] = value;
+        }
     }
 
     pub fn cpsr(&self) -> u32 {
@@ -320,6 +350,14 @@ impl Cpu {
         let mut new = old & !(psr::MODE | psr::T) | exception.mode() | psr::I;
         if matches!(exception, Exception::Reset | Exception::Fiq) {
             new |= psr::F;
+        }
+        if self.v6() {
+            // ARMv6 masks imprecise aborts on everything but undefined
+            // instructions and supervisor calls, and enters little-endian.
+            if !matches!(exception, Exception::Undefined | Exception::Supervisor) {
+                new |= psr::A;
+            }
+            new &= !psr::E;
         }
         self.set_cpsr(new);
         self.set_spsr(old);

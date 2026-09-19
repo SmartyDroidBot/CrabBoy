@@ -6,6 +6,7 @@
 use crate::alu::{add_with_carry, saturate, shift_imm, shift_reg, Shift};
 use crate::bus::{Bus, CpEffect, CpReg};
 use crate::cpu::{psr, Cpu, Exec, Trap};
+use crate::v6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
@@ -13,6 +14,9 @@ pub(crate) enum Kind {
     Multiply,
     MultiplyLong,
     Swap,
+    Exclusive,
+    Umaal,
+    Media,
     LoadStoreMisc,
     Mrs,
     MsrReg,
@@ -44,6 +48,10 @@ const fn classify(hi: u32, lo: u32) -> Kind {
                     Kind::MultiplyLong
                 } else if hi & 0xFB == 0x10 {
                     Kind::Swap
+                } else if hi == 0x04 {
+                    Kind::Umaal
+                } else if hi & 0xF8 == 0x18 {
+                    Kind::Exclusive
                 } else {
                     Kind::Undefined
                 }
@@ -78,7 +86,7 @@ const fn classify(hi: u32, lo: u32) -> Kind {
         0b010 => Kind::LoadStore,
         0b011 => {
             if lo & 1 != 0 {
-                Kind::Undefined
+                Kind::Media
             } else {
                 Kind::LoadStore
             }
@@ -124,6 +132,11 @@ pub(crate) fn kind_of(instr: u32) -> Kind {
 pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
     let cond = instr >> 28;
     if cond == 0xF {
+        if cpu.v6() {
+            if let Some(result) = v6::unconditional(cpu, bus, instr) {
+                return result;
+            }
+        }
         return unconditional(cpu, instr);
     }
     if cond != 0xE && !cpu.condition(cond) {
@@ -134,11 +147,23 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
         Kind::Multiply => multiply(cpu, instr),
         Kind::MultiplyLong => multiply_long(cpu, instr),
         Kind::Swap => swap(cpu, bus, instr),
+        Kind::Exclusive if cpu.v6() => v6::exclusive(cpu, bus, instr),
+        Kind::Umaal if cpu.v6() => v6::umaal(cpu, instr),
+        Kind::Media if cpu.v6() => v6::media(cpu, bus, instr),
+        Kind::Exclusive | Kind::Umaal | Kind::Media => Err(Trap::Undefined),
         Kind::LoadStoreMisc => load_store_misc(cpu, bus, instr),
         Kind::Mrs => mrs(cpu, instr),
         Kind::MsrReg => {
             let value = cpu.get(instr & 0xF);
             msr(cpu, instr, value)
+        }
+        // ARMv6K hints share the encoding of an MSR that writes no field.
+        // WFE, SEV and YIELD only matter for power and do nothing here.
+        Kind::MsrImm if cpu.v6() && instr & 0x000F_0000 == 0 => {
+            if instr & 0xFF == 3 {
+                cpu.halt();
+            }
+            Ok(1)
         }
         Kind::MsrImm => {
             let value = (instr & 0xFF).rotate_right((instr >> 8 & 0xF) * 2);
@@ -411,8 +436,13 @@ fn mrs(cpu: &mut Cpu, instr: u32) -> Exec {
 }
 
 fn msr(cpu: &mut Cpu, instr: u32, value: u32) -> Exec {
-    const USER: u32 = 0xF800_0000;
-    const PRIVILEGED: u32 = 0x0000_00DF;
+    // ARMv6 adds the GE flags and E for everyone and A for privileged
+    // modes.
+    let (user, privileged_bits) = if cpu.v6() {
+        (0xF80F_0200, 0x0000_01DF)
+    } else {
+        (0xF800_0000, 0x0000_00DF)
+    };
     const STATE: u32 = 0x0100_0020;
 
     let mut byte_mask = 0;
@@ -423,14 +453,14 @@ fn msr(cpu: &mut Cpu, instr: u32, value: u32) -> Exec {
     }
     if instr & 1 << 22 != 0 {
         if cpu.has_spsr() {
-            let mask = byte_mask & (USER | PRIVILEGED | STATE);
+            let mask = byte_mask & (user | privileged_bits | STATE);
             let spsr = cpu.spsr();
             cpu.set_spsr(spsr & !mask | value & mask);
         }
     } else {
-        let mut mask = byte_mask & USER;
+        let mut mask = byte_mask & user;
         if cpu.privileged() {
-            mask |= byte_mask & PRIVILEGED;
+            mask |= byte_mask & privileged_bits;
         }
         let cpsr = cpu.cpsr();
         cpu.set_cpsr(cpsr & !mask | value & mask);
@@ -496,11 +526,16 @@ fn load_store<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
     let translate = instr & 1 << 24 == 0 && instr & 1 << 21 != 0;
     let privileged = cpu.privileged() && !translate;
 
+    let word = if bus.unaligned_access() {
+        addr
+    } else {
+        addr & !3
+    };
     if load {
         let value = if byte {
             bus.read8(addr, privileged)? as u32
         } else {
-            bus.read32(addr & !3, privileged)?
+            bus.read32(word, privileged)?
         };
         if let Some(base) = writeback {
             cpu.r[rn as usize] = base;
@@ -521,7 +556,7 @@ fn load_store<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
         if byte {
             bus.write8(addr, value as u8, privileged)?;
         } else {
-            bus.write32(addr & !3, value, privileged)?;
+            bus.write32(word, value, privileged)?;
         }
         if let Some(base) = writeback {
             cpu.r[rn as usize] = base;
@@ -542,11 +577,16 @@ fn load_store_misc<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
     };
     let (addr, writeback) = index(instr, cpu.get(rn), offset);
     let privileged = cpu.privileged();
+    let half = if bus.unaligned_access() {
+        addr
+    } else {
+        addr & !1
+    };
 
     match (load, instr >> 5 & 3) {
-        (false, 0b01) => bus.write16(addr & !1, cpu.get(rd) as u16, privileged)?,
+        (false, 0b01) => bus.write16(half, cpu.get(rd) as u16, privileged)?,
         (true, 0b01) => {
-            let value = bus.read16(addr & !1, privileged)? as u32;
+            let value = bus.read16(half, privileged)? as u32;
             finish_load(cpu, rn, rd, writeback, value);
             return Ok(2);
         }
@@ -556,7 +596,7 @@ fn load_store_misc<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
             return Ok(2);
         }
         (true, _) => {
-            let value = bus.read16(addr & !1, privileged)? as i16 as u32;
+            let value = bus.read16(half, privileged)? as i16 as u32;
             finish_load(cpu, rn, rd, writeback, value);
             return Ok(2);
         }

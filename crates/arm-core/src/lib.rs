@@ -19,6 +19,7 @@ mod arm;
 mod bus;
 mod cpu;
 mod thumb;
+mod v6;
 
 pub use bus::{Abort, Bus, CpEffect, CpReg};
 pub use cpu::{mode, psr, Arch, Cpu, Exception};

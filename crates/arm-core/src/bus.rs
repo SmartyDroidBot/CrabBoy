@@ -52,6 +52,24 @@ pub trait Bus {
         None
     }
 
+    /// Whether word and halfword accesses may be unaligned (the `U` bit of
+    /// the ARMv6 control register). When false the processor aligns them.
+    fn unaligned_access(&self) -> bool {
+        false
+    }
+
+    /// Mark `addr` for exclusive access by this processor (`LDREX`).
+    fn exclusive_load(&mut self, _addr: u32) {}
+
+    /// Whether this processor still holds `addr` exclusively (`STREX`); the
+    /// mark is cleared either way.
+    fn exclusive_store(&mut self, _addr: u32) -> bool {
+        true
+    }
+
+    /// Drop this processor's exclusive mark (`CLREX`, exception return).
+    fn exclusive_clear(&mut self) {}
+
     /// Whether exception vectors sit at 0xFFFF0000 (the `V` bit of the
     /// system control register) instead of 0.
     fn high_vectors(&self) -> bool {

@@ -3,6 +3,8 @@
 
 use crate::{mode, psr, Abort, Arch, Bus, CpEffect, CpReg, Cpu, Exception};
 
+mod v6;
+
 const MEM: usize = 0x2_0000;
 
 struct Flat {
@@ -12,6 +14,8 @@ struct Flat {
     high_vectors: bool,
     control: u32,
     unprivileged_accesses: u32,
+    unaligned: bool,
+    exclusive: Option<u32>,
 }
 
 impl Flat {
@@ -22,6 +26,8 @@ impl Flat {
             high_vectors: false,
             control: 0x0000_0078,
             unprivileged_accesses: 0,
+            unaligned: false,
+            exclusive: None,
         }
     }
 
@@ -115,17 +121,33 @@ impl Bus for Flat {
     fn high_vectors(&self) -> bool {
         self.high_vectors
     }
+    fn unaligned_access(&self) -> bool {
+        self.unaligned
+    }
+    fn exclusive_load(&mut self, addr: u32) {
+        self.exclusive = Some(addr);
+    }
+    fn exclusive_store(&mut self, addr: u32) -> bool {
+        self.exclusive.take() == Some(addr)
+    }
+    fn exclusive_clear(&mut self) {
+        self.exclusive = None;
+    }
 }
 
 const BASE: u32 = 0x1000;
 
 /// A processor in system mode about to run ARM `code` at `BASE`.
 fn arm(code: &[u32]) -> (Cpu, Flat) {
+    arm_on(Arch::V5te, code)
+}
+
+fn arm_on(arch: Arch, code: &[u32]) -> (Cpu, Flat) {
     let mut bus = Flat::new();
     for (i, word) in code.iter().enumerate() {
         bus.set_word(BASE + i as u32 * 4, *word);
     }
-    let mut cpu = Cpu::new(Arch::V5te, &bus);
+    let mut cpu = Cpu::new(arch, &bus);
     cpu.set_cpsr(mode::SYS);
     cpu.set_reg(13, 0x8000);
     cpu.jump(BASE);
@@ -134,11 +156,15 @@ fn arm(code: &[u32]) -> (Cpu, Flat) {
 
 /// The same for Thumb `code`.
 fn thumb(code: &[u16]) -> (Cpu, Flat) {
+    thumb_on(Arch::V5te, code)
+}
+
+fn thumb_on(arch: Arch, code: &[u16]) -> (Cpu, Flat) {
     let mut bus = Flat::new();
     for (i, half) in code.iter().enumerate() {
         bus.set_half(BASE + i as u32 * 2, *half);
     }
-    let mut cpu = Cpu::new(Arch::V5te, &bus);
+    let mut cpu = Cpu::new(arch, &bus);
     cpu.set_cpsr(mode::SYS);
     cpu.set_reg(13, 0x8000);
     cpu.jump(BASE | 1);

@@ -20,6 +20,12 @@ fn set_logical(cpu: &mut Cpu, (result, carry): (u32, bool)) -> u32 {
 pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
     let low = |shift: u32| (instr >> shift & 7) as usize;
     let privileged = cpu.privileged();
+    // ARMv6 can allow unaligned word and halfword accesses.
+    let (w, h) = if bus.unaligned_access() {
+        (!0u32, !0u32)
+    } else {
+        (!3u32, !1u32)
+    };
 
     match instr >> 11 {
         // LSL, LSR, ASR by immediate.
@@ -80,20 +86,20 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
             let addr = cpu.r[low(3)].wrapping_add(cpu.r[low(6)]);
             let rd = low(0);
             match instr >> 9 & 7 {
-                0 => bus.write32(addr & !3, cpu.r[rd], privileged)?,
-                1 => bus.write16(addr & !1, cpu.r[rd] as u16, privileged)?,
+                0 => bus.write32(addr & w, cpu.r[rd], privileged)?,
+                1 => bus.write16(addr & h, cpu.r[rd] as u16, privileged)?,
                 2 => bus.write8(addr, cpu.r[rd] as u8, privileged)?,
                 3 => cpu.r[rd] = bus.read8(addr, privileged)? as i8 as u32,
-                4 => cpu.r[rd] = bus.read32(addr & !3, privileged)?,
-                5 => cpu.r[rd] = bus.read16(addr & !1, privileged)? as u32,
+                4 => cpu.r[rd] = bus.read32(addr & w, privileged)?,
+                5 => cpu.r[rd] = bus.read16(addr & h, privileged)? as u32,
                 6 => cpu.r[rd] = bus.read8(addr, privileged)? as u32,
-                _ => cpu.r[rd] = bus.read16(addr & !1, privileged)? as i16 as u32,
+                _ => cpu.r[rd] = bus.read16(addr & h, privileged)? as i16 as u32,
             }
             Ok(2)
         }
         // STR and LDR with a 5-bit word offset.
         0b01100 | 0b01101 => {
-            let addr = cpu.r[low(3)].wrapping_add((instr >> 6 & 0x1F) << 2) & !3;
+            let addr = cpu.r[low(3)].wrapping_add((instr >> 6 & 0x1F) << 2) & w;
             if instr & 1 << 11 != 0 {
                 cpu.r[low(0)] = bus.read32(addr, privileged)?;
             } else {
@@ -113,7 +119,7 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
         }
         // STRH and LDRH.
         0b10000 | 0b10001 => {
-            let addr = cpu.r[low(3)].wrapping_add((instr >> 6 & 0x1F) << 1) & !1;
+            let addr = cpu.r[low(3)].wrapping_add((instr >> 6 & 0x1F) << 1) & h;
             if instr & 1 << 11 != 0 {
                 cpu.r[low(0)] = bus.read16(addr, privileged)? as u32;
             } else {
@@ -361,6 +367,47 @@ fn miscellaneous<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
             Ok(count + 1)
         }
         0xE => Err(Trap::Breakpoint),
+        // SXTH, SXTB, UXTH, UXTB.
+        0x2 if cpu.v6() => {
+            let value = cpu.r[(instr >> 3 & 7) as usize];
+            cpu.r[(instr & 7) as usize] = match instr >> 6 & 3 {
+                0 => value as u16 as i16 as u32,
+                1 => value as u8 as i8 as u32,
+                2 => value & 0xFFFF,
+                _ => value & 0xFF,
+            };
+            Ok(1)
+        }
+        // SETEND and CPS.
+        0x6 if cpu.v6() => {
+            if instr & 0xFFF7 == 0xB650 {
+                cpu.set_flag(psr::E, instr & 8 != 0);
+            } else if instr & 0xFFE8 == 0xB660 {
+                if cpu.privileged() {
+                    let bits = (instr & 7) << 6;
+                    let cpsr = cpu.cpsr();
+                    cpu.set_cpsr(if instr & 0x10 != 0 {
+                        cpsr | bits
+                    } else {
+                        cpsr & !bits
+                    });
+                }
+            } else {
+                return Err(Trap::Undefined);
+            }
+            Ok(1)
+        }
+        // REV, REV16, REVSH.
+        0xA if cpu.v6() => {
+            let value = cpu.r[(instr >> 3 & 7) as usize];
+            cpu.r[(instr & 7) as usize] = match instr >> 6 & 3 {
+                0 => value.swap_bytes(),
+                1 => (value >> 8 & 0x00FF_00FF) | (value << 8 & 0xFF00_FF00),
+                3 => (value as u16).swap_bytes() as i16 as u32,
+                _ => return Err(Trap::Undefined),
+            };
+            Ok(1)
+        }
         _ => Err(Trap::Undefined),
     }
 }
