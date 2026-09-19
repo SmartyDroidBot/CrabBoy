@@ -23,6 +23,7 @@ use crate::bus::PhysMem;
 use crate::clock::FRAME_CYCLES;
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
+use ctr_crypto::{AesEngine, ShaEngine};
 use i2c::I2c;
 use pdc::Pdc;
 use pxi::{Pxi, Side};
@@ -38,6 +39,7 @@ pub mod irq9 {
     pub const PXI_SYNC: u32 = 1 << 12;
     pub const PXI_SEND_EMPTY: u32 = 1 << 13;
     pub const PXI_RECV_NOT_EMPTY: u32 = 1 << 14;
+    pub const AES: u32 = 1 << 15;
     pub const SDIO_1: u32 = 1 << 16;
 }
 
@@ -78,6 +80,8 @@ pub struct Io {
     pub i2c: I2c,
     pub spi: Spi,
     pub sdmmc: Sdmmc,
+    pub aes: AesEngine,
+    pub sha: ShaEngine,
     pub mpcore: Mpcore,
     sysprot9: u8,
     bootenv: u32,
@@ -128,6 +132,8 @@ impl Io {
                 sdmmc.cards[1] = Some(Card::new(CardKind::Mmc, Vec::new(), NAND_SECTORS));
                 sdmmc
             },
+            aes: AesEngine::new(),
+            sha: ShaEngine::new(),
             mpcore: Mpcore::new(),
             sysprot9: 0,
             bootenv: 0,
@@ -160,6 +166,12 @@ impl Io {
         }
         if irqs.recv_not_empty[arm11] {
             self.mpcore.gic.raise(irq::PXI_RECV_NOT_EMPTY);
+        }
+    }
+
+    fn aes_irq(&mut self) {
+        if self.aes.take_irq() {
+            self.irq9.pending |= irq9::AES;
         }
     }
 
@@ -271,6 +283,8 @@ impl Io {
         Some(match addr >> 12 {
             0x10000 => match offset {
                 0x000 => self.sysprot9 as u32,
+                // CARDSTATUS: bit 0 set, the game card slot is empty.
+                0x010 => 1,
                 0xFFC => SOCINFO_OLD_3DS,
                 _ => self.trace.read(addr),
             },
@@ -295,6 +309,12 @@ impl Io {
                 value
             }
             0x10008 => self.read_pxi(Side::Arm9, offset),
+            0x10009 => {
+                let value = self.aes.read(offset);
+                self.aes_irq();
+                value
+            }
+            0x1000A => self.sha.read(offset),
             0x10010 => match offset {
                 0x000 => self.bootenv,
                 _ => self.trace.read(addr),
@@ -353,6 +373,11 @@ impl Io {
                 self.sdmmc_irq();
             }
             0x10008 => self.write_pxi(Side::Arm9, offset, value, mask),
+            0x10009 => {
+                self.aes.write(offset, value, mask);
+                self.aes_irq();
+            }
+            0x1000A => self.sha.write(offset, value, mask),
             0x10010 if offset == 0 => self.bootenv = self.bootenv & !mask | value & mask,
             0x10000..=0x1000D | 0x10010..=0x10012 | 0x10018 => self.trace.write(addr, value, mask),
             0x10163 | 0x10200.. => return None,

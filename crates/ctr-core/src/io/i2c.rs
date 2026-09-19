@@ -84,11 +84,12 @@ impl Mcu {
         regs[0x09] = 0x20; // volume slider, mid travel
         regs[0x0B] = 100; // battery percent
         regs[0x0F] = 1 << 1 | 1 << 3; // shell open, adapter plugged in
-                                      // A fixed clock keeps runs reproducible: 2011-03-27 00:00:00, a Sunday.
-        regs[0x33] = 0x00;
-        regs[0x34] = 0x27;
-        regs[0x35] = 0x03;
-        regs[0x36] = 0x11;
+                                      // A fixed clock keeps runs reproducible: 2020-01-01 00:00:00, a
+                                      // Wednesday, in BCD.
+        regs[0x33] = 0x03;
+        regs[0x34] = 0x01;
+        regs[0x35] = 0x01;
+        regs[0x36] = 0x20;
         Mcu {
             regs,
             events: 0,

@@ -21,7 +21,22 @@ pub struct Codec {
     pages: Vec<[u8; 128]>,
     page: u8,
     pointer: Option<(u8, bool)>,
+    /// The touch position as 12-bit converter readings, while touched.
+    pub touch: Option<(u16, u16)>,
+    /// The circle pad's deflection in converter units, right and up positive.
+    pub circle_pad: (i16, i16),
 }
+
+/// The page of converter samples: registers 1 to 0x34 hold five touch X
+/// readings, five touch Y readings, eight circle pad Y readings and eight
+/// circle pad X readings, each a big-endian halfword (GodMode9,
+/// `arm11/source/hw/codec.c`). Bit 12 of a touch reading means "not touched",
+/// the circle pad rests at 0x800 and its X axis is inverted.
+const SAMPLE_PAGE: u8 = 0xFB;
+
+/// Converter units at full deflection. The real travel is not documented;
+/// this clears the thresholds drivers use.
+pub const CIRCLE_PAD_RANGE: i16 = 0x600;
 
 impl Default for Codec {
     fn default() -> Self {
@@ -29,6 +44,8 @@ impl Default for Codec {
             pages: vec![[0; 128]; 256],
             page: 0,
             pointer: None,
+            touch: None,
+            circle_pad: (0, 0),
         }
     }
 }
@@ -59,6 +76,15 @@ impl Codec {
         self.pointer = Some((reg.wrapping_add(1) & 0x7F, read));
         if reg == 0 {
             self.page
+        } else if self.page == SAMPLE_PAGE && (1..=0x34).contains(&reg) {
+            let index = (reg - 1) as usize;
+            let sample: u16 = match index / 2 {
+                0..=4 => self.touch.map_or(0x1000, |(x, _)| x & 0xFFF),
+                5..=9 => self.touch.map_or(0x1000, |(_, y)| y & 0xFFF),
+                10..=17 => (0x800 + self.circle_pad.1) as u16 & 0xFFF,
+                _ => (0x800 - self.circle_pad.0) as u16 & 0xFFF,
+            };
+            sample.to_be_bytes()[index % 2]
         } else {
             self.pages[self.page as usize][reg as usize & 0x7F]
         }
@@ -193,6 +219,24 @@ mod tests {
         transfer(&mut spi, &[0, 0x01], 0, true);
         assert_eq!(transfer(&mut spi, &[0x24 << 1 | 1], 1, true), [0]);
         assert_eq!(transfer(&mut spi, &[1], 1, true), [0x01], "the page");
+    }
+
+    #[test]
+    fn the_sample_page_reports_the_touch_screen_and_the_circle_pad() {
+        let mut spi = Spi::new();
+        transfer(&mut spi, &[0, SAMPLE_PAGE], 0, true);
+        let idle = transfer(&mut spi, &[1 << 1 | 1], 0x34, true);
+        assert_eq!(idle[0] & 0x10, 0x10, "not touched");
+        assert_eq!(idle[0x14..0x16], [0x08, 0x00], "circle pad Y at rest");
+        assert_eq!(idle[0x24..0x26], [0x08, 0x00], "circle pad X at rest");
+
+        spi.codec.touch = Some((0x123, 0x456));
+        spi.codec.circle_pad = (0x100, -0x200);
+        let held = transfer(&mut spi, &[1 << 1 | 1], 0x34, true);
+        assert_eq!(held[0..2], [0x01, 0x23]);
+        assert_eq!(held[10..12], [0x04, 0x56]);
+        assert_eq!(held[0x14..0x16], [0x06, 0x00], "down");
+        assert_eq!(held[0x24..0x26], [0x07, 0x00], "right reads lower");
     }
 
     #[test]

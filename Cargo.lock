@@ -1106,6 +1106,7 @@ name = "ctr-core"
 version = "0.3.0"
 dependencies = [
  "arm-core",
+ "ctr-crypto",
  "ctr-fs",
  "emu-core",
 ]

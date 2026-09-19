@@ -6,6 +6,7 @@ use crate::arm9::{Arm9, Arm9Bus};
 use crate::boot::{self, Entry};
 use crate::bus::PhysMem;
 use crate::clock::{ARM11_HZ, ARM9_CYCLE, FRAME_CYCLES, QUANTUM};
+use crate::io::spi::CIRCLE_PAD_RANGE;
 use crate::io::Io;
 use crate::sched::Scheduler;
 use arm_core::{Arch, Cpu};
@@ -265,6 +266,21 @@ impl System for Ctr {
         if let Some(bit) = Ctr::pad_bit(button) {
             self.io.pad |= bit;
         }
+    }
+
+    fn set_axis(&mut self, axis: emu_core::Axis, x: i16, y: i16) {
+        if axis == emu_core::Axis::CirclePad {
+            let scale = |v: i16| (v as i32 * CIRCLE_PAD_RANGE as i32 / i16::MAX as i32) as i16;
+            self.io.spi.codec.circle_pad = (scale(x), scale(y));
+        }
+    }
+
+    fn set_touch(&mut self, point: Option<(u16, u16)>) {
+        // The converter spans the panel linearly; calibration is software's.
+        self.io.spi.codec.touch = point.map(|(x, y)| {
+            let raw = |v: u16, size: u16| (v.min(size - 1) as u32 * 0x1000 / size as u32) as u16;
+            (raw(x, BOTTOM_SCREEN.width), raw(y, BOTTOM_SCREEN.height))
+        });
     }
 
     fn step(&mut self) -> u32 {
