@@ -16,6 +16,7 @@ are data aborts (GBATEK, "3DS Memory and I/O Map"): the ARM9 sees
 | 0x10003000 | Timers | Four 16-bit timers at 67,027,964 Hz with prescalers 1, 64, 256, 1024 and cascading (3dbrew, "TIMER Registers") |
 | 0x10006000, 0x10007000 | SD/MMC controllers 1 and 3 | See below |
 | 0x10008000 | PXI | See below |
+| 0x1000B000 | RSA | Modular exponentiation over four key slots, interrupt 22; see `ctr_crypto::rsa_engine`. The byte order bits follow GodMode9's driver, which has bit 8 the opposite way to 3dbrew's table. An even modulus gives zero (3dbrew). Completes at once |
 | 0x10010000 | `CFG9_BOOTENV` | Latched; zero is a cold boot |
 
 ## Shared

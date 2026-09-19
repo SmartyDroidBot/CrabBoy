@@ -24,7 +24,7 @@ use crate::bus::PhysMem;
 use crate::clock::{FRAME_CYCLES, PPF_CYCLES_PER_BYTE, PSC_FILL_CYCLES_PER_BYTE};
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
-use ctr_crypto::{AesEngine, ShaEngine};
+use ctr_crypto::{AesEngine, RsaEngine, ShaEngine};
 use i2c::I2c;
 use pdc::Pdc;
 use pxi::{Pxi, Side};
@@ -45,6 +45,7 @@ pub mod irq9 {
     pub const AES: u32 = 1 << 15;
     pub const SDIO_1: u32 = 1 << 16;
     pub const SDIO_3: u32 = 1 << 18;
+    pub const RSA: u32 = 1 << 22;
 }
 
 /// `CFG9_SDMMCCTL` bit 9: the SD slot is on controller 1 (0x10006000), not on
@@ -94,6 +95,7 @@ pub struct Io {
     pub sdmmc3: Sdmmc,
     pub aes: AesEngine,
     pub sha: ShaEngine,
+    pub rsa: RsaEngine,
     pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
     /// The interrupt lines of SD/MMC controllers 1 and 3 as last seen.
@@ -151,6 +153,7 @@ impl Io {
             },
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
+            rsa: RsaEngine::new(),
             ndma: ndma::Ndma::default(),
             sdmmc_line: [false; 2],
             // As every payload so far sets it: the slot on controller 1.
@@ -452,6 +455,7 @@ impl Io {
                 _ => self.trace.read(addr),
             },
             0x10002 => self.ndma.read(offset),
+            0x1000B => self.rsa.read(offset),
             0x10001 => match offset {
                 0x000 => self.irq9.enable,
                 0x004 => self.irq9.pending,
@@ -549,6 +553,12 @@ impl Io {
                 self.aes_irq();
             }
             0x1000A => self.sha.write(offset, value, mask),
+            0x1000B => {
+                self.rsa.write(offset, value, mask);
+                if self.rsa.take_irq() {
+                    self.irq9.pending |= irq9::RSA;
+                }
+            }
             0x10010 if offset == 0 => self.bootenv = self.bootenv & !mask | value & mask,
             0x10000..=0x1000D | 0x10010..=0x10012 | 0x10018 => self.trace.write(addr, value, mask),
             0x10163 | 0x10200.. => return None,

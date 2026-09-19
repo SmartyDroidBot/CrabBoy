@@ -8,8 +8,10 @@
 
 pub mod aes;
 pub mod aes_engine;
+pub mod rsa_engine;
 pub mod sha;
 pub mod sha_engine;
 
 pub use aes_engine::AesEngine;
+pub use rsa_engine::RsaEngine;
 pub use sha_engine::ShaEngine;
