@@ -21,14 +21,11 @@ pub mod trace;
 
 use crate::arm11::{irq, Mpcore};
 use crate::bus::PhysMem;
-use crate::clock::{
-    FRAME_CYCLES, P3D_CYCLES_PER_WORD, PPF_CYCLES_PER_BYTE, PSC_FILL_CYCLES_PER_BYTE,
-};
-use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
+use crate::clock::FRAME_CYCLES;
+use crate::gpu::{GpuExt, GpuIrq, GpuJob};
 use crate::sched::{Event, Scheduler};
 use ctr_crypto::{AesEngine, RsaEngine, ShaEngine};
 use i2c::I2c;
-use pdc::Pdc;
 use pxi::{Pxi, Side};
 use sdmmc::{Card, CardKind, Sdmmc};
 use spi::Spi;
@@ -74,19 +71,12 @@ const SOCINFO_OLD_3DS: u32 = 1;
 /// Sectors of an Old 3DS eMMC (943 MB).
 const NAND_SECTORS: u32 = 0x1D_7800;
 
-/// PDC status bit of the vertical blank, in the framebuffer select register.
-const PDC_STATUS_VBLANK: u32 = 1 << 17;
-/// PDC control: the vertical blank interrupt is masked.
-const PDC_MASK_VBLANK: u32 = 1 << 9;
-
 /// Every memory-mapped unit.
 pub struct Io {
     pub irq9: Irq9,
     pub timers9: Timers,
     /// `HID_PAD`: a clear bit is a pressed button.
     pub pad: u16,
-    /// Top screen, then bottom screen.
-    pub pdc: [Pdc; 2],
     pub pxi: Pxi,
     pub i2c: I2c,
     pub spi: Spi,
@@ -98,8 +88,9 @@ pub struct Io {
     pub aes: AesEngine,
     pub sha: ShaEngine,
     pub rsa: RsaEngine,
-    /// The GPU's command processor and internal registers.
-    pub gpu: pica::command::Gpu,
+    /// The GPU's register block: fills, display controllers, transfers and
+    /// command lists.
+    pub gpu: GpuExt,
     pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
     /// The interrupt lines of SD/MMC controllers 1 and 3 as last seen.
@@ -121,12 +112,22 @@ impl Default for Io {
     }
 }
 
+/// Where the GPU's register block starts.
+const GPU_BASE: u32 = 0x1040_0000;
+
+/// The scheduler event that ends a GPU job.
+fn gpu_event(job: GpuJob) -> Event {
+    match job.unit {
+        GpuIrq::Psc0 => Event::PscDone(0),
+        GpuIrq::Psc1 => Event::PscDone(1),
+        GpuIrq::Ppf => Event::PpfDone,
+        GpuIrq::P3d | GpuIrq::Pdc0 | GpuIrq::Pdc1 => Event::P3dDone,
+    }
+}
+
 /// Blocks whose registers read back what was written.
 fn latches(block: u32) -> bool {
-    matches!(
-        block,
-        0x10140 | 0x10141 | 0x10147 | 0x10202 | 0x10400 | 0x10401
-    )
+    matches!(block, 0x10140 | 0x10141 | 0x10147 | 0x10202)
 }
 
 impl Io {
@@ -145,7 +146,6 @@ impl Io {
             irq9: Irq9::default(),
             timers9: Timers::new(),
             pad: 0x0FFF,
-            pdc: [Pdc::new(TOP_SCREEN), Pdc::new(BOTTOM_SCREEN)],
             pxi: Pxi::new(),
             i2c: I2c::new(),
             spi: Spi::new(),
@@ -158,7 +158,7 @@ impl Io {
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
             rsa: RsaEngine::new(),
-            gpu: pica::command::Gpu::new(),
+            gpu: GpuExt::new(),
             ndma: ndma::Ndma::default(),
             sdmmc_line: [false; 2],
             // As every payload so far sets it: the slot on controller 1.
@@ -242,68 +242,10 @@ impl Io {
         }
     }
 
-    /// Run the command list of buffer `index`, following jumps to the other
-    /// buffer. The list takes effect at once; the P3D interrupt follows after
-    /// a time in proportion to its length. A list that never writes
-    /// `FINALIZE` hangs the GPU, so nothing follows it.
-    fn run_commands(&mut self, mut index: usize, mem: &PhysMem, sched: &mut Scheduler) {
-        use pica::command::ListEnd;
-        let mut words_run = 0u64;
-        // Two buffers can jump to each other for ever.
-        for _ in 0..64 {
-            let (addr, len) = self.gpu.command_buffer(index);
-            let Some(bytes) = mem.slice(addr, len as usize) else {
-                return;
-            };
-            let words: Vec<u32> = bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|word| u32::from_le_bytes(*word))
-                .collect();
-            words_run += words.len() as u64;
-            match self.gpu.run_list(&words) {
-                ListEnd::Finalized => {
-                    let cost = words_run * P3D_CYCLES_PER_WORD;
-                    sched.schedule(sched.now() + cost.max(1), Event::P3dDone);
-                    return;
-                }
-                ListEnd::Jump(next) => index = next,
-                ListEnd::Exhausted => return,
-            }
-        }
-    }
-
-    /// Run the transfer engine as its registers describe, returning the
-    /// number of bytes it writes. A transfer that does not lie in memory, or
-    /// whose settings do not exist, writes nothing and still completes.
-    fn transfer(&mut self, mem: &mut PhysMem) -> usize {
-        use pica::transfer::{DisplayTransfer, TextureCopy};
-        let reg = |io: &Self, offset: u32| io.latched_or_zero(0x1040_0C00 + offset);
-        let (input, output) = (reg(self, 0x00) << 3, reg(self, 0x04) << 3);
-        let flags = reg(self, 0x10);
-        let mut run = |input_len: usize, output_len: usize, go: &dyn Fn(&[u8], &mut [u8])| {
-            let Some(source) = mem.slice(input, input_len).map(<[u8]>::to_vec) else {
-                return 0;
-            };
-            match mem.slice_mut(output, output_len) {
-                Some(target) => {
-                    go(&source, target);
-                    output_len
-                }
-                None => 0,
-            }
-        };
-        if flags & 1 << 3 != 0 {
-            let copy =
-                TextureCopy::from_registers(reg(self, 0x20), reg(self, 0x24), reg(self, 0x28));
-            run(copy.input_len(), copy.output_len(), &|i, o| copy.run(i, o))
-        } else {
-            match DisplayTransfer::from_registers(reg(self, 0x08), reg(self, 0x0C), flags) {
-                Some(t) => run(t.input_len(), t.output_len(), &|i, o| t.run(i, o)),
-                None => 0,
-            }
-        }
+    /// A GPU unit's time is up: it reports, and its interrupt fires.
+    fn gpu_done(&mut self, unit: GpuIrq) {
+        self.gpu.complete(unit);
+        self.mpcore.gic.raise(irq::PSC0 + unit as usize);
     }
 
     /// Carry out the transfers the ARM9's DMA controller has requests for,
@@ -616,14 +558,8 @@ impl Io {
         let offset = addr & 0xFFF;
         Some(match addr >> 12 {
             0x10163 => self.read_pxi(Side::Arm11, offset),
-            0x10400 => match offset {
-                0x400..=0x4FF => self.pdc[0].read32(offset),
-                0x500..=0x5FF => self.pdc[1].read32(offset),
-                _ => self.latched_or_zero(addr),
-            },
-            // The GPU's internal registers, four bytes to an ID.
-            0x10401 if offset < 0xC00 => self.gpu.regs[offset as usize / 4],
-            0x10200..=0x10203 | 0x1020F | 0x10401 => {
+            0x10400 | 0x10401 => self.gpu.read(addr - GPU_BASE),
+            0x10200..=0x10203 | 0x1020F => {
                 if latches(addr >> 12) {
                     self.latched_or_zero(addr)
                 } else {
@@ -652,29 +588,17 @@ impl Io {
                 self.latch(addr, value, mask);
                 // The fill colour of each panel.
                 match offset {
-                    0x204 => self.pdc[0].fill = self.latched_or_zero(addr),
-                    0xA04 => self.pdc[1].fill = self.latched_or_zero(addr),
+                    0x204 => self.gpu.pdc[0].fill = self.latched_or_zero(addr),
+                    0xA04 => self.gpu.pdc[1].fill = self.latched_or_zero(addr),
                     _ => {}
                 }
             }
-            0x10400 => self.write_gpu(addr, value, mask, mem, sched),
-            0x10401 if offset < 0xC00 => {
-                use pica::command::reg;
-                let id = offset / 4;
-                let bytes = (0..4)
-                    .filter(|byte| mask >> (byte * 8) & 0xFF != 0)
-                    .fold(0, |bytes, byte| bytes | 1 << byte);
-                self.gpu.write_register(id, value, bytes);
-                match id {
-                    // Written by hand, it interrupts like the end of a list.
-                    reg::FINALIZE => sched.schedule(sched.now() + 1, Event::P3dDone),
-                    reg::CMDBUF_JUMP0 | 0x23D => {
-                        self.run_commands((id - reg::CMDBUF_JUMP0) as usize, mem, sched)
-                    }
-                    _ => {}
+            0x10400 | 0x10401 => {
+                if let Some(job) = self.gpu.write(addr - GPU_BASE, value, mask, mem) {
+                    sched.schedule(sched.now() + job.cost, gpu_event(job));
                 }
             }
-            0x10200..=0x10203 | 0x1020F | 0x10401 => {
+            0x10200..=0x10203 | 0x1020F => {
                 if latches(addr >> 12) {
                     self.latch(addr, value, mask);
                 } else {
@@ -684,66 +608,6 @@ impl Io {
             _ => return self.write_shared(addr, value, mask),
         }
         Some(())
-    }
-
-    /// The GPU's external registers: memory fills, the display controllers
-    /// and the transfer engine (3dbrew, "GPU/External Registers").
-    fn write_gpu(
-        &mut self,
-        addr: u32,
-        value: u32,
-        mask: u32,
-        mem: &mut PhysMem,
-        sched: &mut Scheduler,
-    ) {
-        let offset = addr & 0xFFF;
-        match offset {
-            0x400..=0x5FF => {
-                let pdc = &mut self.pdc[(offset >> 8 & 1) as usize];
-                let reg = offset & 0xFF;
-                let old = pdc.read32(reg);
-                let written = old & !mask | value & mask;
-                if reg == 0x78 {
-                    // Status bits 16-18 clear when written as one.
-                    const STATUS: u32 = 0x0007_0000;
-                    let status = old & STATUS & !(value & mask);
-                    pdc.write32(reg, written & !STATUS | status);
-                } else {
-                    pdc.write32(reg, written);
-                }
-            }
-            // Memory fill units PSC0 and PSC1.
-            0x01C | 0x02C => {
-                self.latch(addr, value, mask);
-                let control = self.latched_or_zero(addr);
-                if control & 1 != 0 {
-                    let unit = addr & !0xF;
-                    let start = self.latched_or_zero(unit) << 3;
-                    let end = self.latched_or_zero(unit + 4) << 3;
-                    let pattern = self.latched_or_zero(unit + 8);
-                    fill(mem, start, end, pattern, control >> 8 & 3);
-                    // The memory is written at once; the unit stays busy for
-                    // the time the fill takes and then interrupts.
-                    self.latched.insert(addr, control & !2);
-                    let cost = end.saturating_sub(start) as u64 * PSC_FILL_CYCLES_PER_BYTE;
-                    let unit = (offset == 0x02C) as u8;
-                    sched.schedule(sched.now() + cost.max(1), Event::PscDone(unit));
-                }
-            }
-            // The transfer engine. Like a fill, the memory is written at
-            // once and completion follows after the time the work takes.
-            0xC18 => {
-                self.latch(addr, value, mask);
-                let control = self.latched_or_zero(addr);
-                if control & 1 != 0 {
-                    let written = self.transfer(mem);
-                    self.latched.insert(addr, control & !(1 << 8));
-                    let cost = written as u64 * PPF_CYCLES_PER_BYTE;
-                    sched.schedule(sched.now() + cost.max(1), Event::PpfDone);
-                }
-            }
-            _ => self.latch(addr, value, mask),
-        }
     }
 
     /// Whether the protected half of the ARM9 boot ROM is hidden.
@@ -773,58 +637,25 @@ impl Io {
                 }
             }
             Event::PscDone(unit) => {
-                // Busy clears, finished sets, the interrupt fires.
-                let (addr, id) = if unit == 0 {
-                    (0x1040_001C, irq::PSC0)
+                let unit = if unit == 0 {
+                    GpuIrq::Psc0
                 } else {
-                    (0x1040_002C, irq::PSC1)
+                    GpuIrq::Psc1
                 };
-                let control = self.latched_or_zero(addr);
-                self.latched.insert(addr, control & !1 | 2);
-                self.mpcore.gic.raise(id);
+                self.gpu_done(unit);
             }
-            Event::P3dDone => self.mpcore.gic.raise(irq::P3D),
-            Event::PpfDone => {
-                // Busy clears, finished sets, the interrupt fires.
-                let control = self.latched_or_zero(0x1040_0C18);
-                self.latched.insert(0x1040_0C18, control & !1 | 1 << 8);
-                self.mpcore.gic.raise(irq::PPF);
-            }
+            Event::P3dDone => self.gpu_done(GpuIrq::P3d),
+            Event::PpfDone => self.gpu_done(GpuIrq::Ppf),
             Event::VBlank => {
-                for (n, id) in [irq::PDC0, irq::PDC1].into_iter().enumerate() {
-                    let pdc = &mut self.pdc[n];
-                    let control = pdc.read32(0x74);
-                    if control & 1 == 0 {
-                        continue;
-                    }
-                    let status = pdc.read32(0x78);
-                    pdc.write32(0x78, status | PDC_STATUS_VBLANK);
-                    if control & PDC_MASK_VBLANK == 0 {
+                let interrupts = self.gpu.vblank();
+                for (id, wanted) in [irq::PDC0, irq::PDC1].into_iter().zip(interrupts) {
+                    if wanted {
                         self.mpcore.gic.raise(id);
                     }
                 }
                 sched.schedule(at + FRAME_CYCLES as u64, Event::VBlank);
             }
         }
-    }
-}
-
-/// A PSC memory fill of `[start, end)` with a 16-, 24- or 32-bit pattern.
-fn fill(mem: &mut PhysMem, start: u32, end: u32, pattern: u32, width: u32) {
-    let Some(len) = end.checked_sub(start) else {
-        return;
-    };
-    let Some(target) = mem.slice_mut(start, len as usize) else {
-        return;
-    };
-    let bytes = pattern.to_le_bytes();
-    let unit = match width {
-        0 => 2,
-        2 => 4,
-        _ => 3,
-    };
-    for (n, byte) in target.iter_mut().enumerate() {
-        *byte = bytes[n % unit];
     }
 }
 
@@ -976,7 +807,7 @@ mod tests {
 
         let pending = |io: &Io| io.mpcore.gic.read_distributor(0, 0x204) & 1 << 0xD != 0;
         assert!(!pending(&io), "the list takes time");
-        sched.advance(4 * P3D_CYCLES_PER_WORD);
+        sched.advance(4 * crate::clock::P3D_CYCLES_PER_WORD);
         let (at, event) = sched.pop_due().unwrap();
         assert_eq!(event, Event::P3dDone);
         io.fire(at, event, &mut sched);
@@ -1029,8 +860,17 @@ mod tests {
         let pending = io.mpcore.gic.read_distributor(0, 0x204);
         assert_ne!(pending & 1 << 0xA, 0, "top screen");
         assert_eq!(pending & 1 << 0xB, 0, "bottom screen is masked");
-        assert_eq!(io.read11(0x1040_0478, &sched), Some(PDC_STATUS_VBLANK));
-        io.write11(0x1040_0478, PDC_STATUS_VBLANK, !0, &mut mem, &mut sched);
+        assert_eq!(
+            io.read11(0x1040_0478, &sched),
+            Some(crate::gpu::PDC_STATUS_VBLANK)
+        );
+        io.write11(
+            0x1040_0478,
+            crate::gpu::PDC_STATUS_VBLANK,
+            !0,
+            &mut mem,
+            &mut sched,
+        );
         assert_eq!(io.read11(0x1040_0478, &sched), Some(0));
         assert_eq!(sched.next_due(), Some(2 * FRAME_CYCLES as u64));
     }
@@ -1041,6 +881,6 @@ mod tests {
         let mut mem = PhysMem::new();
         let mut io = Io::new();
         io.write11(0x1020_2204, 0x0100_00FF, !0, &mut mem, &mut sched);
-        assert_eq!(io.pdc[0].frame(&mem).rgb.unwrap()[..3], [0xFF, 0, 0]);
+        assert_eq!(io.gpu.pdc[0].frame(&mem).rgb.unwrap()[..3], [0xFF, 0, 0]);
     }
 }

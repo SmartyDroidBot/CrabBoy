@@ -313,11 +313,11 @@ impl System for Ctr {
     }
 
     fn frame(&self) -> Frame {
-        self.io.pdc[0].frame(&self.mem)
+        self.io.gpu.pdc[0].frame(&self.mem)
     }
 
     fn frame_at(&self, index: usize) -> Frame {
-        self.io.pdc[index.min(1)].frame(&self.mem)
+        self.io.gpu.pdc[index.min(1)].frame(&self.mem)
     }
 
     fn audio_rate(&self) -> u32 {

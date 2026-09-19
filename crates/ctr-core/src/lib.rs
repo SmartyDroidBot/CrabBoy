@@ -16,6 +16,7 @@ pub mod boot;
 pub mod bus;
 pub mod clock;
 pub mod ctr;
+pub mod gpu;
 pub mod io;
 pub mod sched;
 

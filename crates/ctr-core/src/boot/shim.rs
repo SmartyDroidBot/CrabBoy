@@ -154,7 +154,7 @@ pub fn hand_off(
     arm9.cp15.write(cp15(9, 1, 0), 0xFFF0_000A);
     arm9.cp15.write(cp15(1, 0, 0), 0x0005_6078);
 
-    let [top, bottom] = &mut io.pdc;
+    let [top, bottom] = &mut io.gpu.pdc;
     top.init_rgb8(FRAMEBUFFERS[0][0], FRAMEBUFFERS[1][0]);
     bottom.init_rgb8(FRAMEBUFFERS[0][2], FRAMEBUFFERS[1][2]);
 
