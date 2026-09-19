@@ -58,6 +58,11 @@ pub trait Bus {
         false
     }
 
+    /// Whether the coprocessor access register lets this mode use the VFP.
+    fn vfp_access(&self, _privileged: bool) -> bool {
+        false
+    }
+
     /// Mark `addr` for exclusive access by this processor (`LDREX`).
     fn exclusive_load(&mut self, _addr: u32) {}
 

@@ -1,6 +1,7 @@
 //! Register file, modes, exceptions and the fetch loop.
 
 use crate::bus::{Abort, Bus};
+use crate::vfp::Vfp;
 use crate::{arm, thumb};
 
 /// Program status register bits.
@@ -129,6 +130,8 @@ pub struct Cpu {
     halted: bool,
     /// Exceptions taken so far, in vector order, for diagnostics.
     taken: [u64; 7],
+    /// The floating-point unit of an ARMv6K processor.
+    pub(crate) vfp: Vfp,
 }
 
 impl Cpu {
@@ -147,6 +150,7 @@ impl Cpu {
             fiq_line: false,
             halted: false,
             taken: [0; 7],
+            vfp: Vfp::default(),
         };
         cpu.r[15] = cpu.vector_base(bus);
         cpu
@@ -154,6 +158,14 @@ impl Cpu {
 
     pub fn arch(&self) -> Arch {
         self.arch
+    }
+
+    pub fn vfp(&self) -> &Vfp {
+        &self.vfp
+    }
+
+    pub fn vfp_mut(&mut self) -> &mut Vfp {
+        &mut self.vfp
     }
 
     pub(crate) fn v6(&self) -> bool {

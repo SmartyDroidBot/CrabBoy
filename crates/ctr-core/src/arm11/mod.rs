@@ -344,6 +344,10 @@ impl Bus for Arm11Bus<'_> {
             .write(reg, value, privileged)
     }
 
+    fn vfp_access(&self, privileged: bool) -> bool {
+        self.arm11.cores[self.core].cp15.vfp_access(privileged)
+    }
+
     fn unaligned_access(&self) -> bool {
         self.arm11.cores[self.core].cp15.unaligned_access()
     }

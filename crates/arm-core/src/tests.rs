@@ -4,6 +4,7 @@
 use crate::{mode, psr, Abort, Arch, Bus, CpEffect, CpReg, Cpu, Exception};
 
 mod v6;
+mod vfp;
 
 const MEM: usize = 0x2_0000;
 
@@ -16,6 +17,7 @@ struct Flat {
     unprivileged_accesses: u32,
     unaligned: bool,
     exclusive: Option<u32>,
+    vfp: bool,
 }
 
 impl Flat {
@@ -28,6 +30,7 @@ impl Flat {
             unprivileged_accesses: 0,
             unaligned: false,
             exclusive: None,
+            vfp: false,
         }
     }
 
@@ -123,6 +126,9 @@ impl Bus for Flat {
     }
     fn unaligned_access(&self) -> bool {
         self.unaligned
+    }
+    fn vfp_access(&self, _privileged: bool) -> bool {
+        self.vfp
     }
     fn exclusive_load(&mut self, addr: u32) {
         self.exclusive = Some(addr);

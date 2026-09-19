@@ -7,6 +7,7 @@ use crate::alu::{add_with_carry, saturate, shift_imm, shift_reg, Shift};
 use crate::bus::{Bus, CpEffect, CpReg};
 use crate::cpu::{psr, Cpu, Exec, Trap};
 use crate::v6;
+use crate::vfp;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
@@ -142,7 +143,15 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
     if cond != 0xE && !cpu.condition(cond) {
         return Ok(1);
     }
-    match kind_of(instr) {
+    let kind = kind_of(instr);
+    let coprocessor = matches!(
+        kind,
+        Kind::CoprocReg | Kind::CoprocData | Kind::CoprocLoadStore | Kind::CoprocDoubleReg
+    );
+    if coprocessor && cpu.v6() && vfp::owns(instr) {
+        return vfp::execute(cpu, bus, instr);
+    }
+    match kind {
         Kind::DataProcessing => data_processing(cpu, instr),
         Kind::Multiply => multiply(cpu, instr),
         Kind::MultiplyLong => multiply_long(cpu, instr),

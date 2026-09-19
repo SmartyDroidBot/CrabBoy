@@ -20,9 +20,11 @@ mod bus;
 mod cpu;
 mod thumb;
 mod v6;
+mod vfp;
 
 pub use bus::{Abort, Bus, CpEffect, CpReg};
 pub use cpu::{mode, psr, Arch, Cpu, Exception};
+pub use vfp::Vfp;
 
 #[cfg(test)]
 mod tests;

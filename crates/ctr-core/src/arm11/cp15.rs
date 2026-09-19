@@ -1,5 +1,4 @@
-//! The system control coprocessor of one ARM11 MPCore core, and the VFP
-//! system registers that share the coprocessor interface.
+//! The system control coprocessor of one ARM11 MPCore core.
 //!
 //! Identification and reset values are those of the 3DS as recorded by the
 //! Azahar emulator; the writable control bits are from GBATEK ("ARM CP15
@@ -27,9 +26,6 @@ pub mod control {
     pub const WRITABLE: u32 = 0x32C0_BB07;
 }
 
-/// `FPEXC.EN`: the VFP is usable.
-const FPEXC_ENABLE: u32 = 1 << 30;
-
 pub struct Cp15 {
     core: u32,
     control: u32,
@@ -44,8 +40,6 @@ pub struct Cp15 {
     context_id: u32,
     /// User read/write, user read-only and privileged-only thread registers.
     thread: [u32; 3],
-    fpexc: u32,
-    fpscr: u32,
 }
 
 impl Cp15 {
@@ -63,8 +57,6 @@ impl Cp15 {
             fcse_pid: 0,
             context_id: 0,
             thread: [0; 3],
-            fpexc: 0,
-            fpscr: 0,
         }
     }
 
@@ -80,8 +72,14 @@ impl Cp15 {
         self.control & control::UNALIGNED != 0
     }
 
-    pub fn vfp_enabled(&self) -> bool {
-        self.fpexc & FPEXC_ENABLE != 0
+    /// Whether the coprocessor access register opens coprocessors 10 and 11
+    /// to this mode: 0b01 is privileged only, 0b11 everyone.
+    pub fn vfp_access(&self, privileged: bool) -> bool {
+        match self.coprocessor_access >> 20 & 3 {
+            0b11 => true,
+            0b01 => privileged,
+            _ => false,
+        }
     }
 
     /// Record a data abort for the handler to read.
@@ -96,9 +94,6 @@ impl Cp15 {
     }
 
     pub fn read(&self, reg: CpReg, privileged: bool) -> Option<u32> {
-        if reg.cp == 10 || reg.cp == 11 {
-            return self.read_vfp(reg, privileged);
-        }
         if reg.cp != 15 || reg.opc1 != 0 {
             return None;
         }
@@ -151,9 +146,6 @@ impl Cp15 {
     }
 
     pub fn write(&mut self, reg: CpReg, value: u32, privileged: bool) -> Option<CpEffect> {
-        if reg.cp == 10 || reg.cp == 11 {
-            return self.write_vfp(reg, value, privileged);
-        }
         if reg.cp != 15 || reg.opc1 != 0 {
             return None;
         }
@@ -194,33 +186,6 @@ impl Cp15 {
             }
             (13, 0, n @ 2..=4) => self.thread[n as usize - 2] = value,
             (9, _, _) | (10, _, _) | (15, _, _) => {}
-            _ => return None,
-        }
-        Some(CpEffect::None)
-    }
-
-    /// FPSID, FPSCR and FPEXC, reached with `MRC`/`MCR` on coprocessor 10.
-    fn read_vfp(&self, reg: CpReg, privileged: bool) -> Option<u32> {
-        if self.coprocessor_access >> 20 & 3 == 0 || reg.opc1 != 7 {
-            return None;
-        }
-        match reg.crn {
-            // VFP11: ARM, VFPv2, single and double precision.
-            0 => Some(0x4101_20B4),
-            1 if self.vfp_enabled() => Some(self.fpscr),
-            8 if privileged => Some(self.fpexc),
-            _ => None,
-        }
-    }
-
-    fn write_vfp(&mut self, reg: CpReg, value: u32, privileged: bool) -> Option<CpEffect> {
-        if self.coprocessor_access >> 20 & 3 == 0 || reg.opc1 != 7 {
-            return None;
-        }
-        match reg.crn {
-            0 => {}
-            1 if self.vfp_enabled() => self.fpscr = value,
-            8 if privileged => self.fpexc = value,
             _ => return None,
         }
         Some(CpEffect::None)
@@ -291,25 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn the_vfp_registers_need_coprocessor_access_and_the_enable_bit() {
-        let fpexc = CpReg {
-            cp: 10,
-            opc1: 7,
-            crn: 8,
-            crm: 0,
-            opc2: 0,
-        };
-        let fpscr = CpReg { crn: 1, ..fpexc };
+    fn coprocessor_access_gates_the_vfp_by_mode() {
         let mut cp15 = Cp15::new(0);
-        assert_eq!(cp15.write(fpexc, 1 << 30, true), None);
+        assert!(!cp15.vfp_access(true));
+        cp15.write(reg(1, 0, 2), 0x0050_0000, true);
+        assert!(cp15.vfp_access(true) && !cp15.vfp_access(false));
         cp15.write(reg(1, 0, 2), 0x00F0_0000, true);
-        assert_eq!(
-            cp15.write(fpscr, 0x03C0_0000, true),
-            None,
-            "not enabled yet"
-        );
-        assert_eq!(cp15.write(fpexc, 1 << 30, true), Some(CpEffect::None));
-        assert_eq!(cp15.write(fpscr, 0x03C0_0000, true), Some(CpEffect::None));
-        assert_eq!(cp15.read(fpscr, false), Some(0x03C0_0000));
+        assert!(cp15.vfp_access(false));
     }
 }
