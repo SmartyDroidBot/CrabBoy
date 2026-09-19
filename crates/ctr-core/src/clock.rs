@@ -15,6 +15,9 @@ pub const ARM9_TIMER_CYCLES: u64 = 4;
 /// constant that keeps completion after the write that starts the fill.
 pub const PSC_FILL_CYCLES_PER_BYTE: u64 = 1;
 
+/// ARM11 cycles the transfer engine takes per byte written. Not measured.
+pub const PPF_CYCLES_PER_BYTE: u64 = 1;
+
 /// ARM11 cycles per LCD pixel.
 pub const CYCLES_PER_PIXEL: u32 = 24;
 

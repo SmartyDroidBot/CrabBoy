@@ -17,10 +17,14 @@ pub enum Event {
     Arm9Timer(u8),
     /// The private timer of an ARM11 core reaches zero.
     Arm11Timer(u8),
+    /// The watchdog of an ARM11 core reaches zero.
+    Arm11Watchdog(u8),
     /// The display controllers reach the end of a frame.
     VBlank,
     /// A memory fill unit of the GPU finishes.
     PscDone(u8),
+    /// The GPU's transfer engine finishes.
+    PpfDone,
 }
 
 #[derive(Default)]

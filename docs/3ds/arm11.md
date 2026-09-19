@@ -64,7 +64,12 @@ pending interrupt is delivered when it is strictly more urgent than the
 priority mask and than the running priority; ties go to the lower number.
 Hardware lines are modelled as pulses: a raised line stays pending until it is
 acknowledged. The private timer counts at half the core clock divided by its
-prescaler plus one and raises interrupt 29. The watchdog is not modelled.
+prescaler plus one and raises interrupt 29. The watchdog at +0x20 is the same
+counter and raises interrupt 30; libn3ds uses it as its sleep timer. Its
+watchdog mode (control bit 3, left only by writing 0x12345678 and 0x87654321
+to the disable register) would reset the machine at zero, which is not
+modelled: it counts as a timer there too. Only the accessing core's watchdog
+is mapped, at 0x620.
 
 Interrupt numbers are in `arm11::irq` (3dbrew, "ARM11 Interrupts").
 

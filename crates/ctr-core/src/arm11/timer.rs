@@ -7,6 +7,13 @@
 //! once every `(prescaler + 1)` periods of the peripheral clock, half the
 //! processor clock. As with the ARM9 timers, the counter is computed from
 //! the clock and the scheduler holds the moment it reaches zero.
+//!
+//! The watchdog at `+0x20` is the same counter with two more registers:
+//! `+0x10` the reset flag and `+0x14` the disable register, where writing
+//! 0x12345678 and then 0x87654321 leaves watchdog mode (control bit 3, which
+//! a control write can only set). In timer mode it raises interrupt 30 where
+//! the timer raises 29. Watchdog mode would reset the machine at zero; that
+//! is not modelled, and it counts as a timer there too.
 
 use crate::sched::{Event, Scheduler, Time};
 
@@ -16,7 +23,9 @@ const PERIPHERAL_CYCLES: u64 = 2;
 const ENABLE: u32 = 1 << 0;
 const RELOAD: u32 = 1 << 1;
 const IRQ: u32 = 1 << 2;
+const WATCHDOG_MODE: u32 = 1 << 3;
 const CONTROL_MASK: u32 = 0xFF07;
+const DISABLE_KEYS: [u32; 2] = [0x1234_5678, 0x8765_4321];
 
 #[derive(Default)]
 pub struct PrivateTimer {
@@ -27,12 +36,25 @@ pub struct PrivateTimer {
     counter: u32,
     since: Time,
     event: bool,
+    /// This is the core's watchdog, not its timer.
+    watchdog: bool,
+    /// The first disable key was the last write to the disable register.
+    unlocking: bool,
 }
 
 impl PrivateTimer {
     pub fn new(core: u8) -> Self {
         PrivateTimer {
             core,
+            ..PrivateTimer::default()
+        }
+    }
+
+    /// The watchdog of `core`.
+    pub fn watchdog(core: u8) -> Self {
+        PrivateTimer {
+            core,
+            watchdog: true,
             ..PrivateTimer::default()
         }
     }
@@ -56,7 +78,11 @@ impl PrivateTimer {
     }
 
     fn schedule(&self, sched: &mut Scheduler) {
-        let event = Event::Arm11Timer(self.core);
+        let event = if self.watchdog {
+            Event::Arm11Watchdog(self.core)
+        } else {
+            Event::Arm11Timer(self.core)
+        };
         if self.running() {
             sched.schedule(self.since + self.counter as u64 * self.period(), event);
         } else {
@@ -85,7 +111,19 @@ impl PrivateTimer {
             0x04 => self.counter = value,
             0x08 => {
                 self.counter = self.counter_at(now);
-                self.control = value & CONTROL_MASK;
+                let mode = if self.watchdog {
+                    (self.control | value) & WATCHDOG_MODE
+                } else {
+                    0
+                };
+                self.control = value & CONTROL_MASK | mode;
+            }
+            0x14 if self.watchdog => {
+                if self.unlocking && value == DISABLE_KEYS[1] {
+                    self.control &= !WATCHDOG_MODE;
+                }
+                self.unlocking = value == DISABLE_KEYS[0];
+                return;
             }
             0x0C => {
                 if value & 1 != 0 {
@@ -117,6 +155,39 @@ impl PrivateTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_watchdog_counts_as_a_timer_with_its_own_event() {
+        let mut sched = Scheduler::new();
+        let mut dog = PrivateTimer::watchdog(1);
+        dog.write(0x00, 10, &mut sched);
+        dog.write(0x08, ENABLE | IRQ, &mut sched);
+        sched.advance(20);
+        let (at, event) = sched.pop_due().unwrap();
+        assert_eq!(event, Event::Arm11Watchdog(1));
+        assert!(dog.expire(at, &mut sched));
+        assert_eq!(dog.read(0x0C, sched.now()), 1);
+        assert_eq!(dog.read(0x04, sched.now()), 0);
+    }
+
+    #[test]
+    fn watchdog_mode_is_left_only_through_the_disable_keys() {
+        let mut sched = Scheduler::new();
+        let mut dog = PrivateTimer::watchdog(0);
+        dog.write(0x08, WATCHDOG_MODE, &mut sched);
+        dog.write(0x08, 0, &mut sched);
+        assert_ne!(dog.read(0x08, 0) & WATCHDOG_MODE, 0);
+        dog.write(0x14, DISABLE_KEYS[1], &mut sched);
+        assert_ne!(dog.read(0x08, 0) & WATCHDOG_MODE, 0);
+        dog.write(0x14, DISABLE_KEYS[0], &mut sched);
+        dog.write(0x14, DISABLE_KEYS[1], &mut sched);
+        assert_eq!(dog.read(0x08, 0) & WATCHDOG_MODE, 0);
+
+        // The plain timer has no such bit.
+        let mut timer = PrivateTimer::new(0);
+        timer.write(0x08, WATCHDOG_MODE, &mut sched);
+        assert_eq!(timer.read(0x08, 0), 0);
+    }
 
     #[test]
     fn counts_down_at_the_prescaled_rate_and_reloads() {

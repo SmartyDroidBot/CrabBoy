@@ -1109,6 +1109,7 @@ dependencies = [
  "ctr-crypto",
  "ctr-fs",
  "emu-core",
+ "pica",
 ]
 
 [[package]]

@@ -49,6 +49,7 @@ const SCU_CONFIG: u32 = 0x0000_0011;
 pub struct Mpcore {
     pub gic: Gic,
     pub timers: [PrivateTimer; CORES],
+    pub watchdogs: [PrivateTimer; CORES],
     scu_control: u32,
 }
 
@@ -63,6 +64,7 @@ impl Mpcore {
         Mpcore {
             gic: Gic::new(),
             timers: [PrivateTimer::new(0), PrivateTimer::new(1)],
+            watchdogs: [PrivateTimer::watchdog(0), PrivateTimer::watchdog(1)],
             scu_control: 0x1FFE,
         }
     }
@@ -83,7 +85,8 @@ impl Mpcore {
                 self.gic.read_interface(target, offset & 0xFF)
             }
             0x600..=0x61F => self.timers[core].read(offset & 0x1F, sched.now()),
-            0x620..=0x6FF => 0,
+            0x620..=0x63F => self.watchdogs[core].read(offset & 0x1F, sched.now()),
+            0x640..=0x6FF => 0,
             0x700..=0xAFF => {
                 let target = (offset as usize - 0x700) >> 8;
                 match self.timers.get(target) {
@@ -108,7 +111,8 @@ impl Mpcore {
                 }
             }
             0x600..=0x61F => self.timers[core].write(offset & 0x1F, value, sched),
-            0x620..=0x6FF => {}
+            0x620..=0x63F => self.watchdogs[core].write(offset & 0x1F, value, sched),
+            0x640..=0x6FF => {}
             0x700..=0xAFF => {
                 let target = (offset as usize - 0x700) >> 8;
                 if let Some(timer) = self.timers.get_mut(target) {

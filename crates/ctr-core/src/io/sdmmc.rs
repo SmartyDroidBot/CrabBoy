@@ -343,6 +343,12 @@ impl Sdmmc {
         self.datactl32 & DATACTL32_ENABLE != 0
     }
 
+    /// Whether the 32-bit FIFO asks the DMA controller for service: a block
+    /// is waiting to be read, or one is wanted for writing.
+    pub fn dma_request(&self) -> bool {
+        self.datactl32 & DATACTL32_ENABLE != 0 && self.transfer.is_some()
+    }
+
     /// Whether an unmasked event is pending, for the ARM9 interrupt.
     pub fn interrupting(&self) -> bool {
         self.status & !self.irq_mask & status::EVENTS != 0

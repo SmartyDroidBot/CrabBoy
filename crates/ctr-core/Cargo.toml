@@ -12,6 +12,7 @@ emu-core = { workspace = true }
 ctr-fs = { workspace = true }
 arm-core = { workspace = true }
 ctr-crypto = { workspace = true }
+pica = { workspace = true }
 
 [features]
 # Record bus and I/O activity for the headless diagnostic tools.

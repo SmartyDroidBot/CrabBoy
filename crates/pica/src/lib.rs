@@ -6,3 +6,7 @@
 //! look-up tables, texture decoding, framebuffer formats, memory fills and
 //! display transfers. It works on plain byte slices of VRAM and FCRAM and has
 //! no dependency on the machine.
+//!
+//! So far: the transfer engine.
+
+pub mod transfer;

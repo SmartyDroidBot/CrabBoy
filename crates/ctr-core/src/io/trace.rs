@@ -2,7 +2,19 @@
 //! diagnostic tools. Without the `trace` feature it records nothing.
 
 #[cfg(feature = "trace")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+
+/// How many watched accesses are kept; older ones are dropped.
+#[cfg(feature = "trace")]
+const LOG_LEN: usize = 4000;
+
+/// One access to a watched address, in order of occurrence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Access {
+    pub addr: u32,
+    pub write: bool,
+    pub value: u32,
+}
 
 /// One unmodelled register and how it was used.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -21,6 +33,11 @@ pub struct Trace {
     /// not.
     #[cfg(feature = "trace")]
     recent: BTreeMap<u32, Entry>,
+    /// Address ranges whose accesses are logged in order, ends included.
+    #[cfg(feature = "trace")]
+    watched: Vec<(u32, u32)>,
+    #[cfg(feature = "trace")]
+    log: VecDeque<Access>,
 }
 
 impl Trace {
@@ -58,6 +75,38 @@ impl Trace {
                 None => entry.reads += 1,
             }
         }
+    }
+
+    /// Note the value of an access to a watched address.
+    #[inline]
+    pub fn log(&mut self, _addr: u32, _write: bool, _value: u32) {
+        #[cfg(feature = "trace")]
+        if self
+            .watched
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&_addr))
+        {
+            if self.log.len() == LOG_LEN {
+                self.log.pop_front();
+            }
+            self.log.push_back(Access {
+                addr: _addr,
+                write: _write,
+                value: _value,
+            });
+        }
+    }
+
+    /// Log every access to `lo..=hi` from now on.
+    #[cfg(feature = "trace")]
+    pub fn watch(&mut self, lo: u32, hi: u32) {
+        self.watched.push((lo, hi));
+    }
+
+    /// The latest watched accesses, oldest first.
+    #[cfg(feature = "trace")]
+    pub fn logged(&self) -> impl Iterator<Item = Access> + '_ {
+        self.log.iter().copied()
     }
 
     /// The accesses since the last call, by address.

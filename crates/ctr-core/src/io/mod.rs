@@ -21,7 +21,7 @@ pub mod trace;
 
 use crate::arm11::{irq, Mpcore};
 use crate::bus::PhysMem;
-use crate::clock::{FRAME_CYCLES, PSC_FILL_CYCLES_PER_BYTE};
+use crate::clock::{FRAME_CYCLES, PPF_CYCLES_PER_BYTE, PSC_FILL_CYCLES_PER_BYTE};
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
 use ctr_crypto::{AesEngine, ShaEngine};
@@ -44,7 +44,12 @@ pub mod irq9 {
     pub const PXI_RECV_NOT_EMPTY: u32 = 1 << 14;
     pub const AES: u32 = 1 << 15;
     pub const SDIO_1: u32 = 1 << 16;
+    pub const SDIO_3: u32 = 1 << 18;
 }
+
+/// `CFG9_SDMMCCTL` bit 9: the SD slot is on controller 1 (0x10006000), not on
+/// controller 3 (0x10007000) (3dbrew, "CONFIG9 Registers").
+const SDMMCCTL_SLOT_ON_1: u16 = 1 << 9;
 
 /// The ARM9 interrupt controller at 0x10001000: an enable word and a pending
 /// word that is cleared by writing ones.
@@ -82,13 +87,19 @@ pub struct Io {
     pub pxi: Pxi,
     pub i2c: I2c,
     pub spi: Spi,
+    /// SD/MMC controller 1 at 0x10006000: the eMMC, and the SD slot while
+    /// `CFG9_SDMMCCTL` routes it here.
     pub sdmmc: Sdmmc,
+    /// Controller 3 at 0x10007000, the other home of the SD slot.
+    pub sdmmc3: Sdmmc,
     pub aes: AesEngine,
     pub sha: ShaEngine,
     pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
-    /// The SD controller's interrupt line as last seen.
-    sdmmc_line: bool,
+    /// The interrupt lines of SD/MMC controllers 1 and 3 as last seen.
+    sdmmc_line: [bool; 2],
+    /// `CFG9_SDMMCCTL`: port power, and which controller has the SD slot.
+    sdmmcctl: u16,
     sysprot9: u8,
     bootenv: u32,
     /// Registers that only hold what was written: configuration blocks whose
@@ -141,7 +152,10 @@ impl Io {
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
             ndma: ndma::Ndma::default(),
-            sdmmc_line: false,
+            sdmmc_line: [false; 2],
+            // As every payload so far sets it: the slot on controller 1.
+            sdmmcctl: SDMMCCTL_SLOT_ON_1,
+            sdmmc3: Sdmmc::new(),
             mpcore: Mpcore::new(),
             sysprot9: 0,
             bootenv: 0,
@@ -187,19 +201,85 @@ impl Io {
     /// A driver that leaves its status bits set gets one interrupt per
     /// event, not one per acknowledgement (fastboot3DS relies on this).
     fn sdmmc_irq(&mut self) {
-        let line = self.sdmmc.interrupting();
-        if line && !self.sdmmc_line {
-            self.irq9.pending |= irq9::SDIO_1;
+        let lines = [
+            (self.sdmmc.interrupting(), irq9::SDIO_1),
+            (self.sdmmc3.interrupting(), irq9::SDIO_3),
+        ];
+        for (n, (line, irq)) in lines.into_iter().enumerate() {
+            if line && !self.sdmmc_line[n] {
+                self.irq9.pending |= irq;
+            }
+            self.sdmmc_line[n] = line;
         }
-        self.sdmmc_line = line;
     }
 
-    /// Carry out the transfers the ARM9's DMA controller has requests for.
+    /// The controller of a register block.
+    fn sdmmc_at(&mut self, block: u32) -> &mut Sdmmc {
+        if block == 0x10007 {
+            &mut self.sdmmc3
+        } else {
+            &mut self.sdmmc
+        }
+    }
+
+    /// Put the SD slot on the controller `CFG9_SDMMCCTL` selects. The card
+    /// keeps its state: it is the same card behind a different host.
+    fn route_sd(&mut self) {
+        if self.sdmmcctl & SDMMCCTL_SLOT_ON_1 != 0 {
+            if let Some(card) = self.sdmmc3.cards[0].take() {
+                self.sdmmc.cards[0] = Some(card);
+            }
+        } else if let Some(card) = self.sdmmc.cards[0].take() {
+            self.sdmmc3.cards[0] = Some(card);
+        }
+    }
+
+    /// Run the transfer engine as its registers describe, returning the
+    /// number of bytes it writes. A transfer that does not lie in memory, or
+    /// whose settings do not exist, writes nothing and still completes.
+    fn transfer(&mut self, mem: &mut PhysMem) -> usize {
+        use pica::transfer::{DisplayTransfer, TextureCopy};
+        let reg = |io: &Self, offset: u32| io.latched_or_zero(0x1040_0C00 + offset);
+        let (input, output) = (reg(self, 0x00) << 3, reg(self, 0x04) << 3);
+        let flags = reg(self, 0x10);
+        let mut run = |input_len: usize, output_len: usize, go: &dyn Fn(&[u8], &mut [u8])| {
+            let Some(source) = mem.slice(input, input_len).map(<[u8]>::to_vec) else {
+                return 0;
+            };
+            match mem.slice_mut(output, output_len) {
+                Some(target) => {
+                    go(&source, target);
+                    output_len
+                }
+                None => 0,
+            }
+        };
+        if flags & 1 << 3 != 0 {
+            let copy =
+                TextureCopy::from_registers(reg(self, 0x20), reg(self, 0x24), reg(self, 0x28));
+            run(copy.input_len(), copy.output_len(), &|i, o| copy.run(i, o))
+        } else {
+            match DisplayTransfer::from_registers(reg(self, 0x08), reg(self, 0x0C), flags) {
+                Some(t) => run(t.input_len(), t.output_len(), &|i, o| t.run(i, o)),
+                None => 0,
+            }
+        }
+    }
+
+    /// Carry out the transfers the ARM9's DMA controller has requests for,
+    /// those its devices raise included.
     /// The controller is a bus master of its own: it reaches physical memory
     /// and the ARM9's registers, not the TCMs.
     pub fn run_ndma(&mut self, mem: &mut PhysMem, sched: &mut Scheduler) {
         use ndma::Update;
-        while let Some(block) = self.ndma.next_block() {
+        // A channel that does not serve the device that started it would be
+        // asked again for ever; real hardware would spin too, but the
+        // processors would keep running beside it.
+        for _ in 0..0x1_0000 {
+            self.dma_requests();
+            let Some(block) = self.ndma.next_block() else {
+                break;
+            };
             let (mut src, mut dst) = (block.src, block.dst);
             let bytes = block.words as usize * 4;
             let filling = block.src_update == Update::Fill;
@@ -229,6 +309,16 @@ impl Io {
         }
     }
 
+    /// Pass the devices' requests for data on to the DMA controller.
+    fn dma_requests(&mut self) {
+        if self.sdmmc.dma_request() {
+            self.ndma.request(ndma::Device::Tmio1);
+        }
+        if self.sdmmc3.dma_request() {
+            self.ndma.request(ndma::Device::Tmio3);
+        }
+    }
+
     fn dma_read(&mut self, addr: u32, mem: &PhysMem, sched: &Scheduler) -> u32 {
         if (0x10..=0x17).contains(&(addr >> 24)) {
             return self.read9(addr, sched).unwrap_or(0);
@@ -249,7 +339,9 @@ impl Io {
     /// the image, rounded up to a whole number of 512 KB units.
     pub fn insert_sd(&mut self, image: Vec<u8>) {
         let sectors = (image.len().div_ceil(512 * 1024) * 1024) as u32;
+        self.sdmmc3.cards[0] = None;
         self.sdmmc.cards[0] = Some(Card::new(CardKind::Sd, image, sectors.max(1024)));
+        self.route_sd();
     }
 
     fn read_pxi(&mut self, side: Side, offset: u32) -> u32 {
@@ -342,11 +434,18 @@ impl Io {
     /// Read the word at `addr` (aligned) as the ARM9 sees it. `None` is a
     /// data abort.
     pub fn read9(&mut self, addr: u32, sched: &Scheduler) -> Option<u32> {
+        let value = self.read9_inner(addr, sched);
+        self.trace.log(addr, false, value.unwrap_or(0));
+        value
+    }
+
+    fn read9_inner(&mut self, addr: u32, sched: &Scheduler) -> Option<u32> {
         self.trace.touch(addr, None);
         let offset = addr & 0xFFF;
         Some(match addr >> 12 {
             0x10000 => match offset {
                 0x000 => self.sysprot9 as u32,
+                0x020 => self.sdmmcctl as u32,
                 // CARDSTATUS: bit 0 set, the game card slot is empty.
                 0x010 => 1,
                 0xFFC => SOCINFO_OLD_3DS,
@@ -363,12 +462,13 @@ impl Io {
                 let control = self.timers9.read16(offset & 0xC | 2, sched.now()) as u32;
                 control << 16 | counter
             }
-            0x10006 => {
+            block @ (0x10006 | 0x10007) => {
+                let sdmmc = self.sdmmc_at(block);
                 let value = if offset == 0x10C {
-                    self.sdmmc.read_fifo32()
+                    sdmmc.read_fifo32()
                 } else {
-                    let low = self.sdmmc.read16(offset as usize) as u32;
-                    low | (self.sdmmc.read16(offset as usize + 2) as u32) << 16
+                    let low = sdmmc.read16(offset as usize) as u32;
+                    low | (sdmmc.read16(offset as usize + 2) as u32) << 16
                 };
                 self.sdmmc_irq();
                 value
@@ -401,6 +501,7 @@ impl Io {
         sched: &mut Scheduler,
     ) -> Option<()> {
         self.trace.touch(addr, Some(value));
+        self.trace.log(addr, true, value);
         let offset = addr & 0xFFF;
         match addr >> 12 {
             0x10000 if offset == 0 => {
@@ -408,6 +509,10 @@ impl Io {
                     // Both protection bits are sticky.
                     self.sysprot9 |= value as u8 & 3;
                 }
+            }
+            0x10000 if offset == 0x020 => {
+                self.sdmmcctl = (self.sdmmcctl as u32 & !mask | value & mask) as u16;
+                self.route_sd();
             }
             0x10001 => match offset {
                 0x000 => self.irq9.enable = self.irq9.enable & !mask | value & mask,
@@ -423,16 +528,16 @@ impl Io {
                         .write16(offset & 0xC | 2, (value >> 16) as u16, sched);
                 }
             }
-            0x10006 => {
+            block @ (0x10006 | 0x10007) => {
+                let sdmmc = self.sdmmc_at(block);
                 if offset == 0x10C {
-                    self.sdmmc.write_fifo32(value);
+                    sdmmc.write_fifo32(value);
                 } else {
                     if mask & 0xFFFF != 0 {
-                        self.sdmmc.write16(offset as usize, value as u16);
+                        sdmmc.write16(offset as usize, value as u16);
                     }
                     if mask >> 16 != 0 {
-                        self.sdmmc
-                            .write16(offset as usize + 2, (value >> 16) as u16);
+                        sdmmc.write16(offset as usize + 2, (value >> 16) as u16);
                     }
                 }
                 self.sdmmc_irq();
@@ -453,7 +558,13 @@ impl Io {
     }
 
     /// Read the word at `addr` as an ARM11 core.
-    pub fn read11(&mut self, addr: u32, _sched: &Scheduler) -> Option<u32> {
+    pub fn read11(&mut self, addr: u32, sched: &Scheduler) -> Option<u32> {
+        let value = self.read11_inner(addr, sched);
+        self.trace.log(addr, false, value.unwrap_or(0));
+        value
+    }
+
+    fn read11_inner(&mut self, addr: u32, _sched: &Scheduler) -> Option<u32> {
         self.trace.touch(addr, None);
         let offset = addr & 0xFFF;
         Some(match addr >> 12 {
@@ -484,6 +595,7 @@ impl Io {
         sched: &mut Scheduler,
     ) -> Option<()> {
         self.trace.touch(addr, Some(value));
+        self.trace.log(addr, true, value);
         let offset = addr & 0xFFF;
         match addr >> 12 {
             0x10163 => self.write_pxi(Side::Arm11, offset, value, mask),
@@ -553,15 +665,16 @@ impl Io {
                     sched.schedule(sched.now() + cost.max(1), Event::PscDone(unit));
                 }
             }
-            // The transfer engine is not modelled: it reports completion and
-            // the trace records that it was asked.
+            // The transfer engine. Like a fill, the memory is written at
+            // once and completion follows after the time the work takes.
             0xC18 => {
                 self.latch(addr, value, mask);
-                if self.latched_or_zero(addr) & 1 != 0 {
-                    self.trace.write(addr, value, mask);
-                    let control = self.latched_or_zero(addr);
-                    self.latched.insert(addr, control & !1 | 1 << 8);
-                    self.mpcore.gic.raise(irq::PPF);
+                let control = self.latched_or_zero(addr);
+                if control & 1 != 0 {
+                    let written = self.transfer(mem);
+                    self.latched.insert(addr, control & !(1 << 8));
+                    let cost = written as u64 * PPF_CYCLES_PER_BYTE;
+                    sched.schedule(sched.now() + cost.max(1), Event::PpfDone);
                 }
             }
             _ => self.latch(addr, value, mask),
@@ -587,6 +700,13 @@ impl Io {
                         .raise_private(core as usize, crate::arm11::gic::IRQ_TIMER);
                 }
             }
+            Event::Arm11Watchdog(core) => {
+                if self.mpcore.watchdogs[core as usize].expire(at, sched) {
+                    self.mpcore
+                        .gic
+                        .raise_private(core as usize, crate::arm11::gic::IRQ_WATCHDOG);
+                }
+            }
             Event::PscDone(unit) => {
                 // Busy clears, finished sets, the interrupt fires.
                 let (addr, id) = if unit == 0 {
@@ -597,6 +717,12 @@ impl Io {
                 let control = self.latched_or_zero(addr);
                 self.latched.insert(addr, control & !1 | 2);
                 self.mpcore.gic.raise(id);
+            }
+            Event::PpfDone => {
+                // Busy clears, finished sets, the interrupt fires.
+                let control = self.latched_or_zero(0x1040_0C18);
+                self.latched.insert(0x1040_0C18, control & !1 | 1 << 8);
+                self.mpcore.gic.raise(irq::PPF);
             }
             Event::VBlank => {
                 for (n, id) in [irq::PDC0, irq::PDC1].into_iter().enumerate() {
