@@ -87,6 +87,8 @@ pub struct Io {
     pub sha: ShaEngine,
     pub ndma: ndma::Ndma,
     pub mpcore: Mpcore,
+    /// The SD controller's interrupt line as last seen.
+    sdmmc_line: bool,
     sysprot9: u8,
     bootenv: u32,
     /// Registers that only hold what was written: configuration blocks whose
@@ -139,6 +141,7 @@ impl Io {
             aes: AesEngine::new(),
             sha: ShaEngine::new(),
             ndma: ndma::Ndma::default(),
+            sdmmc_line: false,
             mpcore: Mpcore::new(),
             sysprot9: 0,
             bootenv: 0,
@@ -180,10 +183,15 @@ impl Io {
         }
     }
 
+    /// The pending word latches the rising edge of the controller's line.
+    /// A driver that leaves its status bits set gets one interrupt per
+    /// event, not one per acknowledgement (fastboot3DS relies on this).
     fn sdmmc_irq(&mut self) {
-        if self.sdmmc.interrupting() {
+        let line = self.sdmmc.interrupting();
+        if line && !self.sdmmc_line {
             self.irq9.pending |= irq9::SDIO_1;
         }
+        self.sdmmc_line = line;
     }
 
     /// Carry out the transfers the ARM9's DMA controller has requests for.
@@ -719,6 +727,27 @@ mod tests {
             irq9::NDMA_0,
             "channel 1 has no interrupt"
         );
+    }
+
+    #[test]
+    fn the_sd_interrupt_latches_an_edge_not_the_level() {
+        let mut sched = Scheduler::new();
+        let mut io = Io::new();
+        // Unmask every event, then send GO_IDLE_STATE.
+        io.write9(0x1000_6020, 0, !0, &mut sched);
+        io.write9(0x1000_6000, 0, 0xFFFF, &mut sched);
+        assert_ne!(io.irq9.pending & irq9::SDIO_1, 0);
+
+        // Acknowledged with the status left set: no second interrupt.
+        io.write9(0x1000_1004, irq9::SDIO_1, !0, &mut sched);
+        io.read9(0x1000_601C, &sched);
+        io.write9(0x1000_6020, 0, !0, &mut sched);
+        assert_eq!(io.irq9.pending & irq9::SDIO_1, 0);
+
+        // Status cleared and a new command: a new edge.
+        io.write9(0x1000_601C, 0, !0, &mut sched);
+        io.write9(0x1000_6000, 0, 0xFFFF, &mut sched);
+        assert_ne!(io.irq9.pending & irq9::SDIO_1, 0);
     }
 
     #[test]
