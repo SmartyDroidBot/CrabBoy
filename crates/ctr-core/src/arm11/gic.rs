@@ -33,6 +33,9 @@ struct Line {
     targets: u8,
     /// For a software interrupt, the core that sent it.
     source: u8,
+    /// The two configuration bits: bit 1 edge-triggered, bit 0 the 1-N
+    /// model. Held for software to read back; lines are pulses either way.
+    config: u8,
 }
 
 #[derive(Clone, Default)]
@@ -217,6 +220,15 @@ impl Gic {
             0x200..=0x2FF => bits(|l| l.pending),
             0x300..=0x37F => bits(|l| l.active),
             0x400..=0x7FF => bytes(|l| l.priority),
+            0xC00..=0xCFF => {
+                // Two bits a line, sixteen lines a word. Software interrupts
+                // always read as edge-triggered (as QEMU's 11MPCore model).
+                let first = (offset as usize & 0xFC) * 4;
+                (0..16).filter(|n| first + n < LINES).fold(0, |word, n| {
+                    let fixed = if first + n < 16 { 0b10 } else { 0 };
+                    word | ((self.line(core, first + n).config | fixed) as u32) << (n * 2)
+                })
+            }
             0x800..=0xBFF => {
                 let first = offset as usize & 0x3FC;
                 if first < PRIVATE {
@@ -261,6 +273,12 @@ impl Gic {
                 for byte in (0..4).filter(|byte| (PRIVATE..LINES).contains(&(first + byte))) {
                     self.line_mut(core, first + byte).targets =
                         (value >> (byte * 8)) as u8 & ((1 << CORES) - 1);
+                }
+            }
+            0xC00..=0xCFF => {
+                let first = (offset as usize & 0xFC) * 4;
+                for n in (0..16).filter(|n| first + n < LINES) {
+                    self.line_mut(core, first + n).config = (value >> (n * 2)) as u8 & 3;
                 }
             }
             0xF00 => {
@@ -308,6 +326,22 @@ mod tests {
         gic.write_distributor(0, 0x800 + byte, old | (targets as u32) << shift);
         let old = gic.read_distributor(0, 0x400 + byte);
         gic.write_distributor(0, 0x400 + byte, old | (priority as u32) << shift);
+    }
+
+    #[test]
+    fn configuration_bits_read_back_and_software_interrupts_are_edge_triggered() {
+        let mut gic = Gic::new();
+        assert_eq!(gic.read_distributor(0, 0xC00), 0xAAAA_AAAA);
+        // Interrupt 29, the private timer: bits 27:26 of the second word.
+        gic.write_distributor(0, 0xC04, 0b11 << 26);
+        assert_eq!(gic.read_distributor(0, 0xC04), 0b11 << 26);
+        assert_eq!(gic.read_distributor(1, 0xC04), 0, "private to core 0");
+        gic.write_distributor(0, 0xC14, 0b10);
+        assert_eq!(
+            gic.read_distributor(1, 0xC14),
+            0b10,
+            "interrupt 80 is shared"
+        );
     }
 
     #[test]

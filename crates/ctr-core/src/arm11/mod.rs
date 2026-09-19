@@ -59,6 +59,21 @@ impl Default for Mpcore {
     }
 }
 
+/// The debug coprocessor, as far as software looks at it at start-up: the
+/// debug ID register says ARMv6 debug with six breakpoints and two
+/// watchpoints, and the status register reads as zero (monitor debug off).
+/// Linux reads the ID unguarded and then leaves hardware breakpoints alone.
+/// The layout is the ARMv6 one; the variant and revision fields copy the
+/// main ID register and are not confirmed against hardware.
+fn debug_read(reg: CpReg, privileged: bool) -> Option<u32> {
+    const DIDR: u32 = 0x1501_0024;
+    match (reg.opc1, reg.crn, reg.crm, reg.opc2) {
+        (0, 0, 0, 0) => Some(DIDR),
+        (0, 0, 1, 0) if privileged => Some(0),
+        _ => None,
+    }
+}
+
 impl Mpcore {
     pub fn new() -> Self {
         Mpcore {
@@ -138,7 +153,7 @@ pub struct Arm11 {
     pub cores: [Core; CORES],
     /// The boot ROM, or the stand-in routines of the boot shim.
     pub boot11: Mem<u8, BOOT11_LEN>,
-    /// Physical address each core holds for exclusive access.
+    /// The physical word each core has marked for exclusive access.
     exclusive: [Option<u32>; CORES],
 }
 
@@ -201,7 +216,21 @@ impl Arm11Bus<'_> {
         }
     }
 
+    /// The word of a virtual address, as the exclusive monitor names it. The
+    /// access it belongs to has just been translated, so this cannot fault.
+    fn monitored_word(&mut self, va: u32) -> u32 {
+        self.translate(va, Access::Read, true).unwrap_or(va) & !3
+    }
+
     fn write_physical(&mut self, pa: u32, len: usize, value: u32) -> Option<()> {
+        // Any store to a word ends the other cores' exclusive access to it:
+        // Linux releases a spinlock with a plain store, and a core that read
+        // the lock before that must not get to write the old owner back.
+        for (core, mark) in self.arm11.exclusive.iter_mut().enumerate() {
+            if core != self.core && *mark == Some(pa & !3) {
+                *mark = None;
+            }
+        }
         match pa >> 24 {
             0x00 if pa < 0x2_0000 => Some(()),
             0xFF if pa >= 0xFFFF_0000 => Some(()),
@@ -340,6 +369,9 @@ impl Bus for Arm11Bus<'_> {
     }
 
     fn coproc_read(&mut self, reg: CpReg, privileged: bool) -> Option<u32> {
+        if reg.cp == 14 {
+            return debug_read(reg, privileged);
+        }
         self.arm11.cores[self.core].cp15.read(reg, privileged)
     }
     fn coproc_write(&mut self, reg: CpReg, value: u32, privileged: bool) -> Option<CpEffect> {
@@ -357,20 +389,15 @@ impl Bus for Arm11Bus<'_> {
     }
 
     fn exclusive_load(&mut self, addr: u32) {
-        self.arm11.exclusive[self.core] = Some(addr);
+        let word = self.monitored_word(addr);
+        self.arm11.exclusive[self.core] = Some(word);
     }
 
     fn exclusive_store(&mut self, addr: u32) -> bool {
-        let held = self.arm11.exclusive[self.core].take() == Some(addr);
-        if held {
-            // A successful store breaks every other reservation on the word.
-            for mark in self.arm11.exclusive.iter_mut() {
-                if *mark == Some(addr) {
-                    *mark = None;
-                }
-            }
-        }
-        held
+        // The store that follows a success goes through `write_physical`,
+        // which breaks every other reservation on the word.
+        let word = self.monitored_word(addr);
+        self.arm11.exclusive[self.core].take() == Some(word)
     }
 
     fn exclusive_clear(&mut self) {
@@ -379,5 +406,86 @@ impl Bus for Arm11Bus<'_> {
 
     fn high_vectors(&self) -> bool {
         self.arm11.cores[self.core].cp15.high_vectors()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rig {
+        arm11: Arm11,
+        mem: PhysMem,
+        io: Io,
+        sched: Scheduler,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            Rig {
+                arm11: Arm11::new(),
+                mem: PhysMem::new(),
+                io: Io::new(),
+                sched: Scheduler::new(),
+            }
+        }
+
+        fn core(&mut self, core: usize) -> Arm11Bus<'_> {
+            Arm11Bus {
+                core,
+                arm11: &mut self.arm11,
+                mem: &mut self.mem,
+                io: &mut self.io,
+                sched: &mut self.sched,
+            }
+        }
+    }
+
+    const LOCK: u32 = 0x2000_0100;
+
+    #[test]
+    fn a_plain_store_by_another_core_ends_exclusive_access() {
+        let mut rig = Rig::new();
+        rig.core(0).exclusive_load(LOCK);
+        // The other core releases the lock: a halfword store into the word.
+        rig.core(1).write16(LOCK + 2, 1, true).unwrap();
+        assert!(!rig.core(0).exclusive_store(LOCK));
+    }
+
+    #[test]
+    fn a_core_keeps_its_mark_over_its_own_and_unrelated_stores() {
+        let mut rig = Rig::new();
+        rig.core(0).exclusive_load(LOCK);
+        rig.core(0).write32(LOCK, 5, true).unwrap();
+        rig.core(1).write32(LOCK + 4, 5, true).unwrap();
+        assert!(rig.core(0).exclusive_store(LOCK));
+        assert!(!rig.core(0).exclusive_store(LOCK), "the mark is used up");
+    }
+
+    #[test]
+    fn an_exclusive_store_by_one_core_fails_the_other() {
+        let mut rig = Rig::new();
+        rig.core(0).exclusive_load(LOCK);
+        rig.core(1).exclusive_load(LOCK);
+        assert!(rig.core(1).exclusive_store(LOCK));
+        rig.core(1).write32(LOCK, 1, true).unwrap();
+        assert!(!rig.core(0).exclusive_store(LOCK));
+    }
+
+    #[test]
+    fn the_debug_id_register_reads_and_the_rest_of_cp14_is_undefined() {
+        let mut rig = Rig::new();
+        let reg = |crm, opc2| CpReg {
+            cp: 14,
+            opc1: 0,
+            crn: 0,
+            crm,
+            opc2,
+        };
+        let didr = rig.core(0).coproc_read(reg(0, 0), true).unwrap();
+        assert_eq!(didr >> 16 & 0xF, 1, "ARMv6 debug");
+        assert_eq!(rig.core(0).coproc_read(reg(1, 0), true), Some(0));
+        assert_eq!(rig.core(0).coproc_read(reg(1, 0), false), None);
+        assert_eq!(rig.core(0).coproc_read(reg(0, 4), true), None);
     }
 }

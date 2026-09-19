@@ -124,6 +124,9 @@ impl Cp15 {
             (0, 2, 2) => 0x1122_1011,
             (0, 2, 3) => 0x0110_2131,
             (0, 2, 4) => 0x141,
+            // The unused slots of the identification block read as zero;
+            // Linux reads ID_ISAR5 on anything with this scheme.
+            (0, 2..=7, _) => 0,
             (1, 0, 0) => self.control,
             (1, 0, 1) => self.auxiliary_control,
             (1, 0, 2) => self.coprocessor_access,

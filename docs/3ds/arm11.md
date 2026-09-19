@@ -18,8 +18,11 @@ software can enable the unit), big-endian data (`CPSR.E` is recorded only),
 and alignment faults (`SCTLR.A`).
 
 Exclusive access uses one reservation per core, kept by the bus as a physical
-address; a successful `STREX` by one core clears every other reservation on
-that word. Plain stores do not clear reservations.
+word address. Any store by a core, exclusive or plain, clears the other
+cores' reservations on that word: Linux releases a spinlock with a plain
+`STRH`, and a core that loaded the lock word before that must fail its
+`STREX`, or it writes the old owner back and the lock is never free again
+(this hung the kernel's SMP start-up).
 
 ## System control coprocessor
 
@@ -71,7 +74,22 @@ to the disable register) would reset the machine at zero, which is not
 modelled: it counts as a timer there too. Only the accessing core's watchdog
 is mapped, at 0x620.
 
+The configuration registers (0xC00, two bits a line: edge-triggered and the
+1-N model) hold what is written, because Linux reads them back and calls an
+interrupt "secure or misconfigured" otherwise; software interrupts always
+read as edge-triggered. This follows QEMU's 11MPCore model, the TRM not being
+at hand; lines are pulses whatever is written.
+
 Interrupt numbers are in `arm11::irq` (3dbrew, "ARM11 Interrupts").
+
+## Debug coprocessor
+
+Coprocessor 14 answers two reads: the debug ID register (ARMv6 debug, six
+breakpoints, two watchpoints; the variant and revision fields are unconfirmed)
+and the status register, zero. Linux reads the ID unguarded during start-up
+and an undefined instruction there is fatal; it then finds this debug
+architecture unsupported and leaves the rest alone. Everything else on
+coprocessor 14 is undefined.
 
 ## Start-up
 
