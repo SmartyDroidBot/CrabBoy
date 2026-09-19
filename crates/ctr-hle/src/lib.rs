@@ -16,6 +16,7 @@
 //! images only and contains no keys.
 
 pub mod horizon;
+pub mod kernel;
 pub mod memory;
 pub mod result;
 pub mod svc;

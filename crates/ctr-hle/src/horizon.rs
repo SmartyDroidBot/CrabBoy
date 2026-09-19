@@ -1,13 +1,15 @@
 //! The high-level console: a process, the kernel that serves it, and the
 //! clock they share.
 //!
-//! Time is counted in ARM11 cycles, as on the low-level machine. A thread
-//! runs for a quantum, then the events that fell due are delivered; when no
-//! thread can run, time jumps to the next event. Nothing depends on the host,
-//! so a run repeats exactly.
+//! Time is counted in ARM11 cycles, as on the low-level machine. The thread
+//! the kernel picks runs for a quantum, then the events that fell due are
+//! delivered; when no thread can run, time jumps to the next event. Nothing
+//! depends on the host, so a run repeats exactly.
 
+use crate::kernel::{Kernel, Object, ThreadId};
 use crate::memory::{
     AddressSpace, BusState, HleBus, Perm, CODE_BASE, LINEAR_BASE_OLD, PAGE, STACK_TOP, TLS_BASE,
+    TLS_LEN,
 };
 use crate::svc::{self, Outcome};
 use arm_core::{Arch, Cpu, HostTrap, HostTrapKind};
@@ -26,27 +28,30 @@ pub const QUANTUM: u64 = 1024;
 /// The application's part of FCRAM on an Old 3DS in its default mode.
 const APPLICATION_MEMORY: u32 = 64 << 20;
 const MAIN_STACK_LEN: u32 = 0x4000;
+/// The main thread's priority when the image does not say (3DSX).
+const DEFAULT_PRIORITY: u8 = 0x30;
 /// Where the framebuffers lie in VRAM until a program sets its own: the
 /// addresses a chainloader uses (see `ctr_core::boot`).
 const DEFAULT_FRAMEBUFFERS: [u32; 2] = [0x1830_0000, 0x1834_6500];
 /// Lines of log kept; a program that floods it loses the oldest.
 const LOG_LINES: usize = 1000;
+/// Threads whose thread-local storage fits the pages set aside for it.
+const MAX_THREADS: u32 = 8 * (PAGE / TLS_LEN);
 
 /// What the clock delivers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum HleEvent {
     /// The display controllers reach the end of a frame.
     VBlank,
-    /// The sleeping thread's time is up.
-    Wake,
+    /// A thread's sleep or timeout is over.
+    ThreadWake(u32),
+    /// A timer object fires.
+    Timer(u32),
 }
 
-/// Whether the (so far only) thread can run.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ThreadState {
-    Running,
-    Sleeping,
-    Exited,
+/// Nanoseconds as ARM11 cycles, rounded down.
+pub fn cycles_of(nanoseconds: u64) -> u64 {
+    (nanoseconds as u128 * ARM11_HZ as u128 / 1_000_000_000) as u64
 }
 
 /// The process's memory and the bookkeeping of what it has asked for.
@@ -58,15 +63,35 @@ pub struct Process {
     pub linear_len: u32,
     /// How much ordinary heap is mapped from `HEAP_BASE`.
     pub heap_len: u32,
+    /// Thread-local storage areas handed out.
+    tls_used: u32,
+}
+
+impl Process {
+    /// Thread-local storage for one more thread.
+    pub fn allocate_tls(&mut self, mem: &mut PhysMem) -> Option<u32> {
+        if self.tls_used == MAX_THREADS {
+            return None;
+        }
+        let addr = TLS_BASE + self.tls_used * TLS_LEN;
+        if addr.is_multiple_of(PAGE) {
+            self.space.allocate(addr, PAGE, Perm::RW)?;
+        }
+        self.space.write_bytes(mem, addr, &[0; TLS_LEN as usize])?;
+        self.tls_used += 1;
+        Some(addr)
+    }
 }
 
 pub struct Horizon {
     pub mem: PhysMem,
     pub process: Process,
+    pub kernel: Kernel,
     pub cpu: Cpu,
     pub gpu: GpuExt,
     pub clock: Queue<HleEvent>,
-    pub thread: ThreadState,
+    /// The thread whose registers are in `cpu`.
+    loaded: Option<ThreadId>,
     bus_state: BusState,
     /// `HID_PAD` as the hardware has it: a clear bit is a pressed button.
     pad: u16,
@@ -101,34 +126,42 @@ impl Horizon {
         space
             .allocate(STACK_TOP - MAIN_STACK_LEN, MAIN_STACK_LEN, Perm::RW)
             .ok_or_else(out_of_memory)?;
-        space
-            .allocate(TLS_BASE, PAGE, Perm::RW)
-            .ok_or_else(out_of_memory)?;
+        let mut process = Process {
+            space,
+            linear_base: LINEAR_BASE_OLD,
+            linear_len: 0,
+            heap_len: 0,
+            tls_used: 0,
+        };
+        let tls = process.allocate_tls(&mut mem).ok_or_else(out_of_memory)?;
 
         let mut gpu = GpuExt::new();
         gpu.pdc[0].init_rgb8(DEFAULT_FRAMEBUFFERS[0], DEFAULT_FRAMEBUFFERS[0]);
         gpu.pdc[1].init_rgb8(DEFAULT_FRAMEBUFFERS[1], DEFAULT_FRAMEBUFFERS[1]);
 
+        let cpu = Cpu::new_user(Arch::V6k, placed.entry, STACK_TOP);
+        let mut kernel = Kernel::new();
+        kernel.create(Object::Process);
+        kernel.spawn(cpu.save_context(), DEFAULT_PRIORITY, 0, tls);
+
         let mut clock = Queue::new();
         clock.schedule(FRAME_CYCLES as u64, HleEvent::VBlank);
-        Ok(Horizon {
+        let mut console = Horizon {
             mem,
-            process: Process {
-                space,
-                linear_base: LINEAR_BASE_OLD,
-                linear_len: 0,
-                heap_len: 0,
-            },
-            cpu: Cpu::new_user(Arch::V6k, placed.entry, STACK_TOP),
+            process,
+            kernel,
+            cpu,
             gpu,
             clock,
-            thread: ThreadState::Running,
+            loaded: None,
             bus_state: BusState::default(),
             pad: 0x0FFF,
             title: String::new(),
             log: Vec::new(),
             fatal: None,
-        })
+        };
+        console.reschedule();
+        Ok(console)
     }
 
     /// The console as a frontend drives it.
@@ -147,31 +180,78 @@ impl Horizon {
     pub fn stop(&mut self, why: String) {
         self.note(format!("fatal: {why}"));
         self.fatal.get_or_insert(why);
-        self.thread = ThreadState::Exited;
+        for thread in &mut self.kernel.threads {
+            thread.state = crate::kernel::State::Dead;
+        }
     }
 
-    /// Put the thread to sleep for `nanoseconds` of emulated time.
-    pub fn sleep(&mut self, nanoseconds: u64) {
-        let cycles = (nanoseconds as u128 * ARM11_HZ as u128 / 1_000_000_000) as u64;
-        self.thread = ThreadState::Sleeping;
-        self.clock
-            .schedule(self.clock.now() + cycles.max(1), HleEvent::Wake);
+    /// Register `n` of the thread making a supervisor call.
+    pub fn reg(&self, n: usize) -> u32 {
+        self.cpu.reg(n)
+    }
+
+    /// Whether any thread is alive.
+    pub fn running(&self) -> bool {
+        !self.kernel.all_dead()
+    }
+
+    /// Let the kernel choose who runs, and move registers accordingly. The
+    /// outgoing thread's registers are saved even if it is about to block:
+    /// whatever ends its wait writes the results there.
+    fn reschedule(&mut self) {
+        self.arm_timeouts();
+        let next = self.kernel.pick();
+        if next == self.loaded {
+            return;
+        }
+        if let Some(out) = self.loaded {
+            self.kernel.threads[out].context = self.cpu.save_context();
+        }
+        self.kernel.switch_to(next);
+        if let Some(next) = next {
+            self.cpu.load_context(&self.kernel.threads[next].context);
+        }
+        self.loaded = next;
+    }
+
+    /// The kernel asks for timeouts; the clock is here.
+    fn arm_timeouts(&mut self) {
+        for (thread, timeout) in std::mem::take(&mut self.kernel.timeouts) {
+            let event = HleEvent::ThreadWake(thread as u32);
+            match timeout {
+                Some(ns) => self
+                    .clock
+                    .schedule(self.clock.now() + cycles_of(ns).max(1), event),
+                None => self.clock.cancel(event),
+            }
+        }
     }
 
     fn handle_trap(&mut self, trap: HostTrap) {
         match trap.kind {
-            HostTrapKind::Supervisor(number) => match svc::call(self, number) {
-                Outcome::Done => {}
-                Outcome::Unknown => {
-                    let regs: Vec<String> =
-                        (0..4).map(|r| format!("{:#x}", self.cpu.reg(r))).collect();
-                    self.stop(format!(
-                        "supervisor call {number:#04x} at {:#010x} is not implemented (r0-r3: {})",
-                        trap.pc,
-                        regs.join(", ")
-                    ));
+            HostTrapKind::Supervisor(number) => {
+                // The call's results go where a blocked thread's would: into
+                // the saved registers, which are loaded again below.
+                let Some(current) = self.loaded else {
+                    return;
+                };
+                self.kernel.threads[current].context = self.cpu.save_context();
+                match svc::call(self, number) {
+                    Outcome::Done => {}
+                    Outcome::Unknown => {
+                        let regs: Vec<String> =
+                            (0..4).map(|r| format!("{:#x}", self.cpu.reg(r))).collect();
+                        self.stop(format!(
+                            "supervisor call {number:#04x} at {:#010x} is not implemented \
+                             (r0-r3: {})",
+                            trap.pc,
+                            regs.join(", ")
+                        ));
+                    }
                 }
-            },
+                self.cpu.load_context(&self.kernel.threads[current].context);
+                self.reschedule();
+            }
             kind => {
                 let fault = self.bus_state.fault_address;
                 self.stop(format!(
@@ -179,20 +259,25 @@ impl Horizon {
                     trap.pc,
                     self.cpu.reg(14)
                 ));
+                self.reschedule();
             }
         }
     }
 
-    /// Run the thread for a quantum, or let the time pass if it cannot run.
+    /// Run the chosen thread for a quantum, or let the time pass if none can
+    /// run, then deliver what fell due.
     fn quantum(&mut self) {
         let end = self.clock.now() + QUANTUM;
-        while self.thread == ThreadState::Running && self.clock.now() < end {
+        while let Some(thread) = self.loaded {
+            if self.clock.now() >= end {
+                break;
+            }
             let mut bus = HleBus {
                 space: &self.process.space,
                 mem: &mut self.mem,
                 state: &mut self.bus_state,
                 core: 0,
-                tls: TLS_BASE,
+                tls: self.kernel.threads[thread].tls,
             };
             let cycles = self.cpu.step(&mut bus);
             self.clock.advance(cycles as u64);
@@ -203,20 +288,27 @@ impl Horizon {
         if self.clock.now() < end {
             self.clock.set_now(end);
         }
-        while let Some((_, event)) = self.clock.pop_due() {
+        while let Some((at, event)) = self.clock.pop_due() {
             match event {
                 HleEvent::VBlank => {
                     self.gpu.vblank();
-                    let next = self.clock.now() + FRAME_CYCLES as u64;
-                    self.clock.schedule(next, HleEvent::VBlank);
+                    self.clock
+                        .schedule(at + FRAME_CYCLES as u64, HleEvent::VBlank);
                 }
-                HleEvent::Wake => {
-                    if self.thread == ThreadState::Sleeping {
-                        self.thread = ThreadState::Running;
+                HleEvent::ThreadWake(thread) => self.kernel.timed_out(thread as usize),
+                HleEvent::Timer(object) => {
+                    let object = object as usize;
+                    self.kernel.signal(object);
+                    if let Some(Object::Timer { interval, .. }) = self.kernel.objects.get(object) {
+                        if *interval != 0 {
+                            self.clock
+                                .schedule(at + *interval, HleEvent::Timer(object as u32));
+                        }
                     }
                 }
             }
         }
+        self.reschedule();
     }
 
     fn pad_bit(button: Button) -> Option<u16> {
@@ -284,10 +376,11 @@ impl System for Horizon {
 
     fn step(&mut self) -> u32 {
         let start = self.clock.now();
-        if self.thread != ThreadState::Running {
+        if self.loaded.is_none() {
             // Nothing can run: go to the quantum that holds the next event,
-            // but never further than a frame, so the frontend keeps its pace.
-            let horizon = start + FRAME_CYCLES as u64;
+            // but never past the end of the frame, so the frontend keeps its
+            // pace.
+            let horizon = (start / FRAME_CYCLES as u64 + 1) * FRAME_CYCLES as u64;
             let wake = self
                 .clock
                 .next_due()
@@ -301,6 +394,16 @@ impl System for Horizon {
 
     fn frame_cycles(&self) -> u32 {
         FRAME_CYCLES
+    }
+
+    /// Run to the next frame boundary of the clock. Counting the cycles of
+    /// the steps instead would drift: a step ends on a quantum, not on the
+    /// boundary.
+    fn run_frame(&mut self) {
+        let end = (self.clock.now() / FRAME_CYCLES as u64 + 1) * FRAME_CYCLES as u64;
+        while self.clock.now() < end {
+            self.step();
+        }
     }
 
     fn frame(&self) -> Frame {
@@ -375,7 +478,7 @@ mod tests {
         let mut console = Horizon::from_3dsx(&hello()).unwrap();
         console.run_frame();
         assert_eq!(console.fatal, None, "{:?}", console.log);
-        assert_eq!(console.thread, ThreadState::Exited);
+        assert!(!console.running());
         assert_eq!(console.log, ["debug: hello", "the process exited"]);
 
         // The framebuffer runs up the first column, so its first pixel is
@@ -392,6 +495,48 @@ mod tests {
         // of the quantum that holds that moment.
         let tick = space.read32(&console.mem, HEAP_BASE + 4).unwrap() as u64;
         assert!((268_111..268_111 + 2 * QUANTUM).contains(&tick), "{tick}");
+    }
+
+    #[test]
+    fn a_second_thread_runs_when_the_first_waits_for_it() {
+        // The main thread starts a less urgent one and joins it; the child
+        // speaks first because the parent only then gets to go on.
+        let image = program(
+            &[
+                0xE3A0_0031, // mov  r0, #0x31         priority
+                0xE28F_102C, // adr  r1, child
+                0xE3A0_2000, // mov  r2, #0            argument
+                0xE59F_3034, // ldr  r3, =0x0FFFE000   its stack
+                0xE3E0_4001, // mvn  r4, #1            default processor
+                0xEF00_0008, // svc  0x08              CreateThread
+                0xE1A0_0001, // mov  r0, r1            the handle
+                0xE3E0_2000, // mvn  r2, #0            wait for ever
+                0xE3E0_3000, // mvn  r3, #0
+                0xEF00_0024, // svc  0x24              WaitSynchronization1
+                0xE28F_001C, // adr  r0, "main"
+                0xE3A0_1004, // mov  r1, #4
+                0xEF00_003D, // svc  0x3D
+                0xEF00_0003, // svc  0x03              ExitProcess
+                0xE28F_0010, // child: adr r0, "child"
+                0xE3A0_1005, // mov  r1, #5
+                0xEF00_003D, // svc  0x3D
+                0xEF00_0009, // svc  0x09              ExitThread
+                0x0FFF_E000,
+            ],
+            b"mainchild",
+        );
+        let mut console = Horizon::from_3dsx(&image).unwrap();
+        console.run_frame();
+        assert_eq!(console.fatal, None, "{:?}", console.log);
+        assert_eq!(
+            console.log,
+            ["debug: child", "debug: main", "the process exited"]
+        );
+        assert_eq!(console.kernel.threads.len(), 2);
+        assert_ne!(
+            console.kernel.threads[0].tls, console.kernel.threads[1].tls,
+            "each thread has its own thread-local storage"
+        );
     }
 
     #[test]
@@ -417,6 +562,7 @@ mod tests {
         console.run_frame();
         let why = console.fatal.clone().unwrap();
         assert!(why.contains("DataAbort at 0x00100004"), "{why}");
+        assert!(!console.running());
     }
 
     #[test]
