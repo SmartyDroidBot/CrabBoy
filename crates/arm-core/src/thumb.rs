@@ -178,7 +178,7 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
         // Conditional branch, undefined, and SWI.
         0b11010 | 0b11011 => match instr >> 8 & 0xF {
             0xE => Err(Trap::Undefined),
-            0xF => Err(Trap::Supervisor),
+            0xF => Err(Trap::Supervisor(instr & 0xFF)),
             cond => {
                 if cpu.condition(cond) {
                     let offset = ((instr & 0xFF) as i8 as i32 as u32) << 1;

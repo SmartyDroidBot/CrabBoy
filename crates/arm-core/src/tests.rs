@@ -3,6 +3,7 @@
 
 use crate::{mode, psr, Abort, Arch, Bus, CpEffect, CpReg, Cpu, Exception};
 
+mod hle;
 mod v6;
 mod vfp;
 
@@ -18,6 +19,7 @@ struct Flat {
     unaligned: bool,
     exclusive: Option<u32>,
     vfp: bool,
+    hle: bool,
 }
 
 impl Flat {
@@ -31,6 +33,7 @@ impl Flat {
             unaligned: false,
             exclusive: None,
             vfp: false,
+            hle: false,
         }
     }
 
@@ -129,6 +132,9 @@ impl Bus for Flat {
     }
     fn vfp_access(&self, _privileged: bool) -> bool {
         self.vfp
+    }
+    fn hle(&self) -> bool {
+        self.hle
     }
     fn exclusive_load(&mut self, addr: u32) {
         self.exclusive = Some(addr);

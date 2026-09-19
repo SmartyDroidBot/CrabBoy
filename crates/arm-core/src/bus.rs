@@ -58,6 +58,14 @@ pub trait Bus {
         false
     }
 
+    /// Whether the emulator is this processor's operating system. If so,
+    /// supervisor calls, undefined instructions and aborts are not vectored
+    /// into guest code: [`crate::Cpu::step`] parks them for the host to
+    /// collect with [`crate::Cpu::take_trap`].
+    fn hle(&self) -> bool {
+        false
+    }
+
     /// Whether the coprocessor access register lets this mode use the VFP.
     fn vfp_access(&self, _privileged: bool) -> bool {
         false

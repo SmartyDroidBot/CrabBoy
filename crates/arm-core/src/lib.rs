@@ -23,7 +23,7 @@ mod v6;
 mod vfp;
 
 pub use bus::{Abort, Bus, CpEffect, CpReg};
-pub use cpu::{mode, psr, Arch, Cpu, Exception};
+pub use cpu::{mode, psr, Arch, Context, Cpu, Exception, HostTrap, HostTrapKind};
 pub use vfp::Vfp;
 
 #[cfg(test)]

@@ -208,7 +208,7 @@ pub(crate) fn execute<B: Bus>(cpu: &mut Cpu, bus: &mut B, instr: u32) -> Exec {
         }
         Kind::CoprocReg => coproc_reg(cpu, bus, instr),
         Kind::CoprocLoadStore | Kind::CoprocDoubleReg | Kind::CoprocData => Err(Trap::Undefined),
-        Kind::Supervisor => Err(Trap::Supervisor),
+        Kind::Supervisor => Err(Trap::Supervisor(instr & 0x00FF_FFFF)),
         Kind::Undefined => Err(Trap::Undefined),
     }
 }

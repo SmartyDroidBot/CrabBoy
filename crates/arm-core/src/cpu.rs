@@ -84,9 +84,40 @@ impl Exception {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Trap {
     Undefined,
-    Supervisor,
+    /// With the comment field of the instruction.
+    Supervisor(u32),
     Breakpoint,
     DataAbort,
+}
+
+/// A trap handed to the host instead of the guest's vectors, for a machine
+/// whose operating system is the emulator itself (see [`Bus::hle`]). `pc` is
+/// the address of the instruction that trapped; the program counter has
+/// moved past it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HostTrap {
+    pub kind: HostTrapKind,
+    pub pc: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HostTrapKind {
+    /// A supervisor call with its comment field: 24 bits in ARM state, 8 in
+    /// Thumb state.
+    Supervisor(u32),
+    Undefined,
+    Breakpoint,
+    PrefetchAbort,
+    DataAbort,
+}
+
+/// What a thread switch saves and restores: the user-mode registers, the
+/// status register and the floating-point unit.
+#[derive(Clone)]
+pub struct Context {
+    pub r: [u32; 16],
+    pub cpsr: u32,
+    pub vfp: Vfp,
 }
 
 impl From<Abort> for Trap {
@@ -134,6 +165,8 @@ pub struct Cpu {
     returns: [u32; 7],
     /// The floating-point unit of an ARMv6K processor.
     pub(crate) vfp: Vfp,
+    /// A trap waiting for the host to collect (see [`Bus::hle`]).
+    host_trap: Option<HostTrap>,
 }
 
 impl Cpu {
@@ -154,9 +187,58 @@ impl Cpu {
             taken: [0; 7],
             returns: [0; 7],
             vfp: Vfp::default(),
+            host_trap: None,
         };
         cpu.r[15] = cpu.vector_base(bus);
         cpu
+    }
+
+    /// A processor in user mode with interrupts enabled, about to run `entry`
+    /// (bit 0 set for Thumb state) on the stack `sp`: how a process starts
+    /// when the emulator is its operating system.
+    pub fn new_user(arch: Arch, entry: u32, sp: u32) -> Self {
+        let mut r = [0; 16];
+        r[13] = sp;
+        r[15] = entry & !1;
+        Cpu {
+            arch,
+            r,
+            pc_read: 0,
+            cpsr: mode::USR | if entry & 1 != 0 { psr::T } else { 0 },
+            banked_sp_lr: [[0; 2]; 6],
+            banked_r8_r12: [[0; 5]; 2],
+            spsr: [0; 6],
+            irq_line: false,
+            fiq_line: false,
+            halted: false,
+            taken: [0; 7],
+            returns: [0; 7],
+            vfp: Vfp::default(),
+            host_trap: None,
+        }
+    }
+
+    /// The trap the last step parked for the host, if any.
+    pub fn take_trap(&mut self) -> Option<HostTrap> {
+        self.host_trap.take()
+    }
+
+    /// The state a thread switch saves.
+    pub fn save_context(&self) -> Context {
+        Context {
+            r: self.r,
+            cpsr: self.cpsr,
+            vfp: self.vfp.clone(),
+        }
+    }
+
+    /// Resume a saved thread. The mode in `context` is entered properly, so
+    /// banked registers stay consistent.
+    pub fn load_context(&mut self, context: &Context) {
+        self.set_cpsr(context.cpsr);
+        self.r = context.r;
+        self.vfp = context.vfp.clone();
+        self.halted = false;
     }
 
     pub fn arch(&self) -> Arch {
@@ -388,6 +470,10 @@ impl Cpu {
         self.halted = false;
     }
 
+    fn park(&mut self, kind: HostTrapKind, pc: u32) {
+        self.host_trap = Some(HostTrap { kind, pc });
+    }
+
     pub(crate) fn condition(&self, cond: u32) -> bool {
         let n = self.flag(psr::N);
         let z = self.flag(psr::Z);
@@ -441,7 +527,11 @@ impl Cpu {
                     thumb::execute(self, bus, instr as u32)
                 }
                 Err(Abort) => {
-                    self.enter(bus, Exception::PrefetchAbort, addr.wrapping_add(4));
+                    if bus.hle() {
+                        self.park(HostTrapKind::PrefetchAbort, addr);
+                    } else {
+                        self.enter(bus, Exception::PrefetchAbort, addr.wrapping_add(4));
+                    }
                     return 3;
                 }
             }
@@ -453,7 +543,11 @@ impl Cpu {
                     arm::execute(self, bus, instr)
                 }
                 Err(Abort) => {
-                    self.enter(bus, Exception::PrefetchAbort, addr.wrapping_add(4));
+                    if bus.hle() {
+                        self.park(HostTrapKind::PrefetchAbort, addr);
+                    } else {
+                        self.enter(bus, Exception::PrefetchAbort, addr.wrapping_add(4));
+                    }
                     return 3;
                 }
             }
@@ -466,10 +560,20 @@ impl Cpu {
                 // instruction for undefined and supervisor calls, the
                 // faulting one plus four for a prefetch abort, plus eight for
                 // a data abort.
+                if bus.hle() {
+                    let kind = match trap {
+                        Trap::Undefined => HostTrapKind::Undefined,
+                        Trap::Supervisor(comment) => HostTrapKind::Supervisor(comment),
+                        Trap::Breakpoint => HostTrapKind::Breakpoint,
+                        Trap::DataAbort => HostTrapKind::DataAbort,
+                    };
+                    self.park(kind, addr);
+                    return 3;
+                }
                 let next = self.r[15];
                 let (exception, lr) = match trap {
                     Trap::Undefined => (Exception::Undefined, next),
-                    Trap::Supervisor => (Exception::Supervisor, next),
+                    Trap::Supervisor(_) => (Exception::Supervisor, next),
                     Trap::Breakpoint => (Exception::PrefetchAbort, addr.wrapping_add(4)),
                     Trap::DataAbort => (Exception::DataAbort, addr.wrapping_add(8)),
                 };
