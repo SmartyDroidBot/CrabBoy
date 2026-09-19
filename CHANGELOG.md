@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format follows
   scheduler and display scan-out, and starts FIRM payloads the way a
   chainloader does (`docs/3ds/boot.md`). The ARM11, GPU and DSP do not exist
   yet.
+- 3DS ARM11: `arm-core` adds the ARMv6K integer instruction set; `ctr-core`
+  runs both cores behind the ARMv6 MMU with the MPCore interrupt controller
+  and private timers, PXI, I2C and the MCU, SPI and the CODEC, PSC fills,
+  VBlank interrupts and the SD/MMC controller with SD and eMMC cards. The
+  boot shim stands in for the boot ROM routines homebrew calls. GodMode9
+  boots to its splash screen. `ctr-fs` builds and reads FAT16 volumes, and
+  `ctr-diag` runs a FIRM headlessly and reports the processors, the I/O and
+  unmodelled registers.
 - `softfloat`: IEEE-754 single and double precision in integer arithmetic with
   the VFP rounding modes, flush-to-zero, default NaN and cumulative flags,
   bit-exact against the host in round-to-nearest.

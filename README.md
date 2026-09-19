@@ -32,7 +32,8 @@ the current test-suite results.
 
 A low-level **Nintendo 3DS** core is in development on the `3ds` branch
 (`crates/ctr-core` and friends, behind the `crab-systems/ctr` feature). It
-runs ARM9-only FIRM payloads so far (no ARM11, GPU or DSP yet), and it will need
+runs bare-metal FIRM payloads on the ARM9 and both ARM11 cores so far (GodMode9
+reaches its splash screen; no 3D engine, DSP or crypto engines yet), and it will need
 files dumped from your own console for anything beyond homebrew; see
 [`docs/3ds/overview.md`](docs/3ds/overview.md).
 

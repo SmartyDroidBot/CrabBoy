@@ -51,15 +51,22 @@ cargo run --release -p crab-cli --features crab-systems/ctr --bin crab -- info p
 ## Status
 
 - **M0: done.**
-- **M1: implemented, one exit criterion open.** `softfloat`, the ARMv5TE
+- **M3 (largely) and the storage half of M2: done ahead of order**, because
+  every open-source payload needs the ARM11. Both ARM11 cores run with the
+  ARMv6K integer instruction set, the MMU, the interrupt controller and
+  private timers; PXI, I2C with the MCU, SPI with the CODEC, PSC fills, the
+  display controllers with VBlank, and the SD/MMC controller with SD and eMMC
+  cards exist. GodMode9 v2.2.3 boots to its splash screen and initialises
+  both cards. Missing from M3: VFPv2 data processing, CDMA, the watchdog.
+  Missing from M2: the AES, SHA and RSA engines, NDMA, the OTP model.
+  `docs/3ds/arm11.md` and `docs/3ds/io.md` record the hardware facts.
+- **M1: implemented.** `softfloat`, the ARMv5TE
   interpreter, the ARM9 protection unit, TCMs, interrupt controller, timers,
   pad, display scan-out and the boot shim exist and are tested, including two
   hand-assembled end-to-end payloads. The independent references are the
   ARM7TDMI of `gba-core` (800,000 random instructions) and jsmolka's CPU
-  suites. Still open: running a third-party ARM9 payload such as `bmbt3ds`,
-  which publishes no binary and so needs an ARM toolchain (devkitARM) to
-  build.
-- Everything else: not started.
+  suites; GodMode9's ARM9 side is the third-party payload.
+- M4 onwards: not started.
 - **Ordering note.** fastboot3DS's ARM9 side waits for a PXI handshake from
   its ARM11 side (read in its source), and GodMode9 also ships ARM11 code, so
   the M2 exit test is unlikely to pass before the ARM11 of M3 exists. The M2
