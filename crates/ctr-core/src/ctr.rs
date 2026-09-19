@@ -108,6 +108,11 @@ impl Ctr {
         &self.io
     }
 
+    /// Put an SD card holding `image` in the slot.
+    pub fn insert_sd(&mut self, image: Vec<u8>) {
+        self.io.insert_sd(image);
+    }
+
     pub fn io_mut(&mut self) -> &mut Io {
         &mut self.io
     }

@@ -3,6 +3,7 @@
 //! Parsers only: nothing here decrypts, and nothing here knows about the
 //! machine. Layouts follow 3dbrew (`FIRM`, `NCSD`, `NCCH`, `3DSX Format`).
 
+pub mod fat;
 pub mod firm;
 
 pub use firm::{CopyMethod, Firm, FirmError, Section};

@@ -13,6 +13,7 @@
 pub mod i2c;
 pub mod pdc;
 pub mod pxi;
+pub mod sdmmc;
 pub mod spi;
 pub mod timer9;
 pub mod trace;
@@ -25,6 +26,7 @@ use crate::sched::{Event, Scheduler};
 use i2c::I2c;
 use pdc::Pdc;
 use pxi::{Pxi, Side};
+use sdmmc::{Card, CardKind, Sdmmc};
 use spi::Spi;
 use std::collections::BTreeMap;
 use timer9::Timers;
@@ -36,6 +38,7 @@ pub mod irq9 {
     pub const PXI_SYNC: u32 = 1 << 12;
     pub const PXI_SEND_EMPTY: u32 = 1 << 13;
     pub const PXI_RECV_NOT_EMPTY: u32 = 1 << 14;
+    pub const SDIO_1: u32 = 1 << 16;
 }
 
 /// The ARM9 interrupt controller at 0x10001000: an enable word and a pending
@@ -55,6 +58,9 @@ impl Irq9 {
 /// `CFG9_MPCORECFG` and `CFG11_SOCINFO` on an Old 3DS.
 const SOCINFO_OLD_3DS: u32 = 1;
 
+/// Sectors of an Old 3DS eMMC (943 MB).
+const NAND_SECTORS: u32 = 0x1D_7800;
+
 /// PDC status bit of the vertical blank, in the framebuffer select register.
 const PDC_STATUS_VBLANK: u32 = 1 << 17;
 /// PDC control: the vertical blank interrupt is masked.
@@ -71,6 +77,7 @@ pub struct Io {
     pub pxi: Pxi,
     pub i2c: I2c,
     pub spi: Spi,
+    pub sdmmc: Sdmmc,
     pub mpcore: Mpcore,
     sysprot9: u8,
     bootenv: u32,
@@ -115,6 +122,12 @@ impl Io {
             pxi: Pxi::new(),
             i2c: I2c::new(),
             spi: Spi::new(),
+            sdmmc: {
+                // A console always has its eMMC; this one is blank.
+                let mut sdmmc = Sdmmc::new();
+                sdmmc.cards[1] = Some(Card::new(CardKind::Mmc, Vec::new(), NAND_SECTORS));
+                sdmmc
+            },
             mpcore: Mpcore::new(),
             sysprot9: 0,
             bootenv: 0,
@@ -148,6 +161,19 @@ impl Io {
         if irqs.recv_not_empty[arm11] {
             self.mpcore.gic.raise(irq::PXI_RECV_NOT_EMPTY);
         }
+    }
+
+    fn sdmmc_irq(&mut self) {
+        if self.sdmmc.interrupting() {
+            self.irq9.pending |= irq9::SDIO_1;
+        }
+    }
+
+    /// Put an SD card holding `image` in the slot. The card is as large as
+    /// the image, rounded up to a whole number of 512 KB units.
+    pub fn insert_sd(&mut self, image: Vec<u8>) {
+        let sectors = (image.len().div_ceil(512 * 1024) * 1024) as u32;
+        self.sdmmc.cards[0] = Some(Card::new(CardKind::Sd, image, sectors.max(1024)));
     }
 
     fn read_pxi(&mut self, side: Side, offset: u32) -> u32 {
@@ -258,6 +284,16 @@ impl Io {
                 let control = self.timers9.read16(offset & 0xC | 2, sched.now()) as u32;
                 control << 16 | counter
             }
+            0x10006 => {
+                let value = if offset == 0x10C {
+                    self.sdmmc.read_fifo32()
+                } else {
+                    let low = self.sdmmc.read16(offset as usize) as u32;
+                    low | (self.sdmmc.read16(offset as usize + 2) as u32) << 16
+                };
+                self.sdmmc_irq();
+                value
+            }
             0x10008 => self.read_pxi(Side::Arm9, offset),
             0x10010 => match offset {
                 0x000 => self.bootenv,
@@ -301,6 +337,20 @@ impl Io {
                     self.timers9
                         .write16(offset & 0xC | 2, (value >> 16) as u16, sched);
                 }
+            }
+            0x10006 => {
+                if offset == 0x10C {
+                    self.sdmmc.write_fifo32(value);
+                } else {
+                    if mask & 0xFFFF != 0 {
+                        self.sdmmc.write16(offset as usize, value as u16);
+                    }
+                    if mask >> 16 != 0 {
+                        self.sdmmc
+                            .write16(offset as usize + 2, (value >> 16) as u16);
+                    }
+                }
+                self.sdmmc_irq();
             }
             0x10008 => self.write_pxi(Side::Arm9, offset, value, mask),
             0x10010 if offset == 0 => self.bootenv = self.bootenv & !mask | value & mask,

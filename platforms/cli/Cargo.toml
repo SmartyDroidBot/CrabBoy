@@ -45,6 +45,7 @@ crab-systems = { workspace = true }
 gb-core = { workspace = true }
 gba-core = { workspace = true, features = ["trace"] }
 ctr-core = { workspace = true, features = ["trace"] }
+ctr-fs = { workspace = true }
 ureq = "3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"

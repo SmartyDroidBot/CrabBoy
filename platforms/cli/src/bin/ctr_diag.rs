@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! ctr-diag <firm> <frames> [--dump=PREFIX] [--input=SCRIPT] [--every=N]
+//!          [--sd=IMAGE | --sd-fat]
 //! ```
 //!
 //! `--dump` writes `PREFIX-top.png` and `PREFIX-bottom.png` after the last
@@ -37,6 +38,14 @@ fn main() {
 
     let firm = std::fs::read(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
     let mut ctr = Ctr::from_firm(firm).unwrap_or_else(|e| fail(e));
+    if let Some(sd) = option("sd") {
+        ctr.insert_sd(std::fs::read(&sd).unwrap_or_else(|e| fail(format!("{sd}: {e}"))));
+    }
+    if args.iter().any(|a| a == "--sd-fat") {
+        // A 32 MB FAT16 card with one file, made on the spot.
+        let files: [(&str, &[u8]); 1] = [("HELLO.TXT", b"Hello from CrabBoy\n")];
+        ctr.insert_sd(ctr_fs::fat::build(&files, 65536).unwrap_or_else(|e| fail(e)));
+    }
     println!("{}", ctr.info());
 
     for frame in 0..frames {
