@@ -73,7 +73,10 @@ cargo run --release -p crab-cli --features crab-systems/ctr --bin crab -- info p
   hand-assembled end-to-end payloads. The independent references are the
   ARM7TDMI of `gba-core` (800,000 random instructions) and jsmolka's CPU
   suites; GodMode9's ARM9 side is the third-party payload.
-- M5 onwards: not started, except for the transfer engine in `pica`.
+- **M5: begun.** `pica` has the transfer engine and the shader unit
+  (`docs/3ds/gpu.md`); the command processor and everything after it are not
+  started.
+- M6 onwards: not started.
 - **Ordering note.** fastboot3DS's ARM9 side waits for a PXI handshake from
   its ARM11 side (read in its source), and GodMode9 also ships ARM11 code, so
   the M2 exit test is unlikely to pass before the ARM11 of M3 exists. The M2
