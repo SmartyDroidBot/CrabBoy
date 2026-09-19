@@ -19,6 +19,8 @@ pub enum Event {
     Arm11Timer(u8),
     /// The display controllers reach the end of a frame.
     VBlank,
+    /// A memory fill unit of the GPU finishes.
+    PscDone(u8),
 }
 
 #[derive(Default)]

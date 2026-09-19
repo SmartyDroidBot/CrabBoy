@@ -40,3 +40,10 @@ The DSP produces 32,728 Hz stereo (3dbrew, "Hardware").
 Latencies of GPU command lists, memory fills, display transfers, DMA, PXI and
 SDMMC are not publicly documented. They start as coarse constants recorded
 here and are refined from measurements when a console is available.
+
+Constants in use, none of them measured:
+
+| What | Cost | Why this value |
+|---|---|---|
+| GPU memory fill (PSC0, PSC1) | 1 ARM11 cycle per byte filled, at least one | Software starts a fill and only then arms its wait for the completion interrupt (fastboot3DS clears its event flag after the write), so completion has to come later than the starting write. The memory itself is written at once. |
+| ARM9 DMA (NDMA) | none: a block moves at once | No payload has needed more yet. |

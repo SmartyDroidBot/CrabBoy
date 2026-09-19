@@ -21,7 +21,7 @@ pub mod trace;
 
 use crate::arm11::{irq, Mpcore};
 use crate::bus::PhysMem;
-use crate::clock::FRAME_CYCLES;
+use crate::clock::{FRAME_CYCLES, PSC_FILL_CYCLES_PER_BYTE};
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
 use ctr_crypto::{AesEngine, ShaEngine};
@@ -481,7 +481,7 @@ impl Io {
         value: u32,
         mask: u32,
         mem: &mut PhysMem,
-        _sched: &mut Scheduler,
+        sched: &mut Scheduler,
     ) -> Option<()> {
         self.trace.touch(addr, Some(value));
         let offset = addr & 0xFFF;
@@ -496,7 +496,7 @@ impl Io {
                     _ => {}
                 }
             }
-            0x10400 => self.write_gpu(addr, value, mask, mem),
+            0x10400 => self.write_gpu(addr, value, mask, mem, sched),
             0x10200..=0x10203 | 0x1020F | 0x10401 => {
                 if latches(addr >> 12) {
                     self.latch(addr, value, mask);
@@ -511,7 +511,14 @@ impl Io {
 
     /// The GPU's external registers: memory fills, the display controllers
     /// and the transfer engine (3dbrew, "GPU/External Registers").
-    fn write_gpu(&mut self, addr: u32, value: u32, mask: u32, mem: &mut PhysMem) {
+    fn write_gpu(
+        &mut self,
+        addr: u32,
+        value: u32,
+        mask: u32,
+        mem: &mut PhysMem,
+        sched: &mut Scheduler,
+    ) {
         let offset = addr & 0xFFF;
         match offset {
             0x400..=0x5FF => {
@@ -538,14 +545,12 @@ impl Io {
                     let end = self.latched_or_zero(unit + 4) << 3;
                     let pattern = self.latched_or_zero(unit + 8);
                     fill(mem, start, end, pattern, control >> 8 & 3);
-                    // Done: busy clears, finished sets, the interrupt fires.
-                    self.latched.insert(addr, control & !1 | 2);
-                    let id = if offset == 0x01C {
-                        irq::PSC0
-                    } else {
-                        irq::PSC1
-                    };
-                    self.mpcore.gic.raise(id);
+                    // The memory is written at once; the unit stays busy for
+                    // the time the fill takes and then interrupts.
+                    self.latched.insert(addr, control & !2);
+                    let cost = end.saturating_sub(start) as u64 * PSC_FILL_CYCLES_PER_BYTE;
+                    let unit = (offset == 0x02C) as u8;
+                    sched.schedule(sched.now() + cost.max(1), Event::PscDone(unit));
                 }
             }
             // The transfer engine is not modelled: it reports completion and
@@ -581,6 +586,17 @@ impl Io {
                         .gic
                         .raise_private(core as usize, crate::arm11::gic::IRQ_TIMER);
                 }
+            }
+            Event::PscDone(unit) => {
+                // Busy clears, finished sets, the interrupt fires.
+                let (addr, id) = if unit == 0 {
+                    (0x1040_001C, irq::PSC0)
+                } else {
+                    (0x1040_002C, irq::PSC1)
+                };
+                let control = self.latched_or_zero(addr);
+                self.latched.insert(addr, control & !1 | 2);
+                self.mpcore.gic.raise(id);
             }
             Event::VBlank => {
                 for (n, id) in [irq::PDC0, irq::PDC1].into_iter().enumerate() {
@@ -764,6 +780,15 @@ mod tests {
             Some(&[0xCC, 0xBB, 0xAA, 0xCC, 0xBB, 0xAA][..])
         );
         assert_eq!(mem.slice(0x1830_0010, 1), Some(&[0u8][..]));
+        // Busy, and silent, for a cycle per byte.
+        assert_eq!(io.read11(0x1040_001C, &sched), Some(1 << 8 | 1));
+        assert_eq!(io.mpcore.gic.read_distributor(0, 0x204) & 1 << 8, 0);
+        sched.advance(15);
+        assert_eq!(sched.pop_due(), None);
+        sched.advance(1);
+        let (at, event) = sched.pop_due().unwrap();
+        assert_eq!(event, Event::PscDone(0));
+        io.fire(at, event, &mut sched);
         assert_eq!(io.read11(0x1040_001C, &sched), Some(1 << 8 | 2));
         assert_ne!(io.mpcore.gic.read_distributor(0, 0x204) & 1 << 8, 0);
     }

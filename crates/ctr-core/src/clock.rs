@@ -11,6 +11,10 @@ pub const ARM9_CYCLE: u32 = 2;
 /// at 67,027,964 Hz, half the ARM9 clock (3dbrew, "TIMER Registers").
 pub const ARM9_TIMER_CYCLES: u64 = 4;
 
+/// ARM11 cycles a GPU memory fill takes per byte. Not measured: a coarse
+/// constant that keeps completion after the write that starts the fill.
+pub const PSC_FILL_CYCLES_PER_BYTE: u64 = 1;
+
 /// ARM11 cycles per LCD pixel.
 pub const CYCLES_PER_PIXEL: u32 = 24;
 
