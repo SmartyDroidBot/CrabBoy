@@ -197,6 +197,71 @@ fn extract(archive: Vec<u8>, url: &str, member: &str) -> Result<Vec<u8>, String>
     Ok(data)
 }
 
+/// Linux for the 3DS (GPL-2.0): the loader FIRM, the kernel, its device tree,
+/// the ARM9 firmware that serves virtio over PXI, and a Buildroot root file
+/// system. The project publishes under a rolling `latest` tag, so the files
+/// are pinned by SHA-256 as a set: if any of them has been republished the
+/// set is not installed and the suite that needs it does not run.
+const CTR_LINUX: [(&str, &str, &str); 5] = [
+    (
+        "firm_linux_loader.firm",
+        "https://github.com/linux-3ds/firm_linux_loader/releases/download/latest/firm_linux_loader.firm",
+        "c89877ef88f44c109b661926f801a56cf420f6372a310fba53a4e130b8d582af",
+    ),
+    (
+        "zImage",
+        "https://github.com/linux-3ds/linux/releases/download/latest/zImage",
+        "84f8dc848f7a477414143bb3a4ad70385f58c2116fe9bd2b7dab30bac67c11b1",
+    ),
+    (
+        "nintendo3ds_ctr.dtb",
+        "https://github.com/linux-3ds/linux/releases/download/latest/nintendo3ds_ctr.dtb",
+        "bcf05702425c5fc1dd981105f7d1af0e6c589bec165836abba3fc6e35e25a081",
+    ),
+    (
+        "arm9linuxfw.bin",
+        "https://github.com/linux-3ds/arm9linuxfw/releases/download/latest/arm9linuxfw.bin",
+        "718d04881d730ace5e74c1d57f9dfcc57ce9f8e9ee592cd250b7ec3533363acf",
+    ),
+    (
+        "rootfs.cpio.gz",
+        "https://github.com/linux-3ds/buildroot/releases/download/latest/rootfs.cpio.gz",
+        "87b34e645bc1243d6740c17f323e59db1141faa6dffe3fd29a1a3f133a9cdc76",
+    ),
+];
+const CTR_LINUX_MARKER: &str = "linux-3ds-2025-01.ok";
+
+fn fetch_ctr_linux(dest: &Path, force: bool) -> Result<usize, String> {
+    let dir = dest.join("3ds").join("linux");
+    let marker = dir.join(CTR_LINUX_MARKER);
+    if marker.exists() && !force {
+        println!("3ds: linux already present in {}", dir.display());
+        return Ok(0);
+    }
+    let mut files = Vec::new();
+    for (name, url, sha256) in CTR_LINUX {
+        println!("3ds: downloading {url}");
+        let data = download(url)?;
+        let actual = sha256_hex(&data);
+        if actual != sha256 {
+            println!(
+                "3ds: {name} has been republished (SHA-256 {actual}); not installing the Linux set"
+            );
+            return Ok(0);
+        }
+        files.push((name, data));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    for (name, data) in &files {
+        let out = dir.join(name);
+        std::fs::write(&out, data).map_err(|e| format!("write {}: {e}", out.display()))?;
+    }
+    std::fs::write(&marker, "linux-3ds rolling releases, pinned by SHA-256\n")
+        .map_err(|e| format!("write {}: {e}", marker.display()))?;
+    println!("3ds: installed the Linux set in {}", dir.display());
+    Ok(files.len())
+}
+
 fn fetch_ctr(dest: &Path, force: bool) -> Result<usize, String> {
     let mut count = 0;
     for payload in &CTR_PAYLOADS {
@@ -285,5 +350,6 @@ fn main() {
     }
     if want("3ds") {
         fetch_ctr(&dest, force).unwrap_or_else(|e| fail(e));
+        fetch_ctr_linux(&dest, force).unwrap_or_else(|e| fail(e));
     }
 }

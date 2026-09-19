@@ -67,6 +67,8 @@ struct Suite {
     input: Option<String>,
     sd_fat: bool,
     both_screens: bool,
+    /// `ctr-frame`: files for the SD card as `path/on/card=path/under/roms`.
+    sd_files: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +87,8 @@ struct Case {
     input: Option<String>,
     sd_fat: bool,
     both_screens: bool,
+    /// Card path and host path of each file on the SD card.
+    sd_files: Vec<(String, PathBuf)>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +138,15 @@ fn load_suites(path: &Path) -> Vec<Suite> {
                     .get("both_screens")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                sd_files: s
+                    .get("sd_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -314,6 +327,16 @@ fn cases(suites: &[Suite], root: &Path, filter: Option<&str>) -> Vec<Case> {
                 input: s.input.clone(),
                 sd_fat: s.sd_fat,
                 both_screens: s.both_screens,
+                sd_files: s
+                    .sd_files
+                    .iter()
+                    .map(|entry| {
+                        let (card, host) = entry.split_once('=').unwrap_or_else(|| {
+                            fail(format!("sd_files entry {entry:?} has no '='"))
+                        });
+                        (card.to_string(), root.join(host))
+                    })
+                    .collect(),
             });
         }
     }
@@ -655,6 +678,21 @@ fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
     if case.sd_fat {
         let files: [(&str, &[u8]); 1] = [("HELLO.TXT", b"Hello from CrabBoy\n")];
         match ctr_fs::fat::build(&files, 65536) {
+            Ok(image) => ctr.insert_sd(image),
+            Err(e) => return crash(e.to_string()),
+        }
+    }
+    if !case.sd_files.is_empty() {
+        // A 64 MB card with the listed files, in the order listed.
+        let mut files = Vec::new();
+        for (card, host) in &case.sd_files {
+            match std::fs::read(host) {
+                Ok(data) => files.push((card.as_str(), data)),
+                Err(e) => return crash(format!("{}: {e}", host.display())),
+            }
+        }
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(n, d)| (*n, d.as_slice())).collect();
+        match ctr_fs::fat::build(&files, 131072) {
             Ok(image) => ctr.insert_sd(image),
             Err(e) => return crash(e.to_string()),
         }

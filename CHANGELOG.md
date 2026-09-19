@@ -45,6 +45,14 @@ All notable changes to this project are documented here. The format follows
   `fetch_test_roms --only 3ds` unpacks `.7z` releases; `ctr-diag` gains
   `--watch=LO-HI`, the ARM9 interrupt state, fault origins and a both-screens
   hash.
+- 3DS: Linux 5.11 (linux-3ds) boots on both ARM11 cores to Buildroot's login
+  prompt, with the ARM9 serving virtio over PXI; pinned as `linux-login`.
+  It needed: other cores' exclusive reservations cleared by any store (a
+  lost spinlock release hung SMP start-up), the GIC configuration
+  registers, the debug ID register on coprocessor 14, and the unused
+  identification registers reading as zero. `ctr_fs::fat` builds
+  directories and long file names and reads files by path; suites take
+  `sd_files`; `ctr-diag` gains `--sd-dir`, `--mem`, `--save` and `--regs`.
 - `emu_core::Layout` stacks a console's displays into one image. The desktop
   app, `crab run` and the wasm bindings draw through it, so a 3DS payload
   shows both screens; the pointer held on the bottom screen is the stylus,

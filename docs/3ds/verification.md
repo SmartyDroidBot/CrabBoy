@@ -60,6 +60,35 @@ NDMA on the controller's request (reads and the writes that create
 interrupt-driven PXI command loop. Its accesses to the DMA330 controllers
 (0x1000C000, 0x10200000) are still unmodelled; it only resets them.
 
+## Linux 5.11 (linux-3ds: `firm_linux_loader.firm`, `zImage`, `nintendo3ds_ctr.dtb`, `arm9linuxfw.bin`, `rootfs.cpio.gz`)
+
+```sh
+mkdir -p linux-sd/linux
+cp zImage nintendo3ds_ctr.dtb arm9linuxfw.bin linux-sd/linux/
+cp rootfs.cpio.gz linux-sd/linux/initramfs.cpio.gz
+target/release/ctr-diag firm_linux_loader.firm 900 --every=900 --sd-dir=linux-sd
+```
+
+| Run | Frame | Top hash | What is on screen |
+|---|---|---|---|
+| `--sd-dir=linux-sd` | 900 | 403d5a55 | The kernel log on the framebuffer console down to "Run /init as init process", then "Starting syslogd: OK", "Welcome to Buildroot" and `buildroot login:` |
+
+The loader reads the four files through long file names in a directory,
+starts the kernel on the ARM11 and the virtio firmware on the ARM9. The
+kernel log (read out of memory with `--save` and `scratchpad`-style string
+extraction) shows 133.12 BogoMIPS per core, both processors brought up, VFP
+found, the simple framebuffer, the initramfs unpacked, the card as `vda`
+through virtio over PXI, and the touch screen, GPIO and MCU real-time clock
+drivers bound. It exercises the MMU with user processes, both cores under
+spinlocks and inter-processor interrupts, the exclusive monitor, the private
+timers, and VFP context switching. Still failing in it, harmlessly: the
+DMA330 probe, the SPI flash ID, the gyroscope ID and the GPIO interrupt
+trigger mode.
+
+This is the `linux-login` suite (`sd_files`). Its files come from rolling
+releases pinned by SHA-256 as a set; if one is republished the fetch tool
+installs none and the suite does not run.
+
 These are the `fastboot3ds-*` and `open-agb-firm-browser` suites
 (`both_screens = true`). CI also diffs the frame-300 hashes of all three
 payloads across the native platforms.

@@ -3,11 +3,16 @@
 //!
 //! ```text
 //! ctr-diag <firm> <frames> [--dump=PREFIX] [--input=SCRIPT] [--every=N]
-//!          [--sd=IMAGE | --sd-fat] [--watch=LO-HI]
+//!          [--sd=IMAGE | --sd-fat | --sd-dir=DIR] [--watch=LO-HI]
+//!          [--mem=ADDR,WORDS] [--save=ADDR,BYTES,FILE] [--regs]
 //! ```
 //!
 //! `--dump` writes `PREFIX-top.png` and `PREFIX-bottom.png` after the last
-//! frame. `--input` takes the same script as `crab run`. `--watch` (hex, ends
+//! frame. `--sd-dir` makes a 64 MB FAT16 card holding the files under a
+//! directory. `--input` takes the same script as `crab run`. `--mem` (hex
+//! physical address, repeatable) prints words of memory, `--save` writes a
+//! stretch of it to a file, and `--regs` prints the registers of every
+//! processor, all after the last frame. `--watch` (hex, ends
 //! included, repeatable) prints the latest accesses to a register range in
 //! the order they happened.
 
@@ -18,6 +23,28 @@ use emu_core::{Layout, System, DMG_PALETTE};
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("ctr-diag: {message}");
     std::process::exit(1);
+}
+
+/// Every file under `dir` with its path relative to `base`, `/` between parts,
+/// in name order so that the card is the same on every host.
+fn collect(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+    let read = std::fs::read_dir(dir).unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+    let mut paths: Vec<_> = read.filter_map(|entry| Some(entry.ok()?.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect(base, &path, out);
+        } else {
+            let data =
+                std::fs::read(&path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+            let relative = path.strip_prefix(base).expect("found under the base");
+            let name: Vec<_> = relative
+                .iter()
+                .map(|part| part.to_string_lossy().into_owned())
+                .collect();
+            out.push((name.join("/"), data));
+        }
+    }
 }
 
 fn main() {
@@ -47,6 +74,16 @@ fn main() {
         // A 32 MB FAT16 card with one file, made on the spot.
         let files: [(&str, &[u8]); 1] = [("HELLO.TXT", b"Hello from CrabBoy\n")];
         ctr.insert_sd(ctr_fs::fat::build(&files, 65536).unwrap_or_else(|e| fail(e)));
+    }
+    if let Some(dir) = option("sd-dir") {
+        let mut files = Vec::new();
+        let base = std::path::Path::new(&dir);
+        collect(base, base, &mut files);
+        let files: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
+        ctr.insert_sd(ctr_fs::fat::build(&files, 131072).unwrap_or_else(|e| fail(e)));
     }
     for range in args.iter().filter_map(|a| a.strip_prefix("--watch=")) {
         let parse = |v: &str| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok();
@@ -117,6 +154,54 @@ fn main() {
             "  {addr:#010x}  reads {:8}  writes {:8}  last write {:#010x}",
             entry.reads, entry.writes, entry.last_write
         );
+    }
+
+    if args.iter().any(|a| a == "--regs") {
+        let cpus = [
+            ("arm9", ctr.cpu9()),
+            ("arm11/0", ctr.cpu11(0)),
+            ("arm11/1", ctr.cpu11(1)),
+        ];
+        for (name, cpu) in cpus {
+            let regs: Vec<String> = (0..16).map(|r| format!("{:08x}", cpu.reg(r))).collect();
+            println!("{name:8} {}", regs.join(" "));
+        }
+    }
+    for spec in args.iter().filter_map(|a| a.strip_prefix("--mem=")) {
+        let parsed = spec.split_once(',').and_then(|(addr, words)| {
+            let addr = u32::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?;
+            Some((addr, words.parse::<u32>().ok()?))
+        });
+        let Some((addr, words)) = parsed else {
+            fail(format!("--mem={spec}: expected ADDR,WORDS"));
+        };
+        for n in 0..words {
+            let at = addr.wrapping_add(n * 4);
+            match ctr.mem().slice(at, 4) {
+                Some(b) => println!(
+                    "  {at:08x}: {:08x}",
+                    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+                ),
+                None => println!("  {at:08x}: not memory"),
+            }
+        }
+    }
+
+    for spec in args.iter().filter_map(|a| a.strip_prefix("--save=")) {
+        let mut parts = spec.splitn(3, ',');
+        let hex = |v: Option<&str>| u32::from_str_radix(v?.trim_start_matches("0x"), 16).ok();
+        let (Some(addr), Some(len), Some(file)) =
+            (hex(parts.next()), hex(parts.next()), parts.next())
+        else {
+            fail(format!(
+                "--save={spec}: expected ADDR,BYTES,FILE with hex numbers"
+            ));
+        };
+        let Some(bytes) = ctr.mem().slice(addr, len as usize) else {
+            fail(format!("--save={spec}: not memory"));
+        };
+        std::fs::write(file, bytes).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+        println!("wrote {file}");
     }
 
     for access in ctr.io().trace.logged() {

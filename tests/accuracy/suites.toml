@@ -188,6 +188,22 @@ roms = ["../3ds/fastboot3ds/fastboot3DS.firm"]
 
 # open_agb_firm beta 2024-12-24 (GPL-3.0-or-later): with no GBA ROM on the
 # card it creates its directory there and opens its file browser.
+# Linux 5.11 for the 3DS (GPL-2.0) from the linux-3ds project: the loader
+# reads the kernel, device tree, root file system and ARM9 firmware from the
+# card, and the kernel boots on both cores to Buildroot's login prompt.
+[[suite]]
+name = "linux-login"
+kind = "ctr-frame"
+frames = 900
+sd_files = [
+    "linux/zImage=../3ds/linux/zImage",
+    "linux/initramfs.cpio.gz=../3ds/linux/rootfs.cpio.gz",
+    "linux/nintendo3ds_ctr.dtb=../3ds/linux/nintendo3ds_ctr.dtb",
+    "linux/arm9linuxfw.bin=../3ds/linux/arm9linuxfw.bin",
+]
+hash = "403d5a55"
+roms = ["../3ds/linux/firm_linux_loader.firm"]
+
 [[suite]]
 name = "open-agb-firm-browser"
 kind = "ctr-frame"

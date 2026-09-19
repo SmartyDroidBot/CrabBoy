@@ -94,6 +94,17 @@ jobs:
               | grep '^frame' | awk -v firm="$firm" '{print firm, $1, $2, $3, $4, $5, $6}'
           done | tee "ctr-hashes-${{ matrix.os }}.txt"
           test "$(wc -l < "ctr-hashes-${{ matrix.os }}.txt")" -eq 3
+          # Linux to its login prompt on both cores. Its files come from a
+          # rolling release and are absent if they have been republished.
+          linux=roms/test-suites/3ds/linux
+          if [ -f "$linux/firm_linux_loader.firm" ]; then
+            mkdir -p linux-sd/linux
+            cp "$linux/zImage" "$linux/nintendo3ds_ctr.dtb" "$linux/arm9linuxfw.bin" linux-sd/linux/
+            cp "$linux/rootfs.cpio.gz" linux-sd/linux/initramfs.cpio.gz
+            target/release/ctr-diag "$linux/firm_linux_loader.firm" 900 --every=900 --sd-dir=linux-sd \
+              | grep '^frame' | awk '{print "linux", $1, $2, $3, $4, $5, $6}' \
+              | tee -a "ctr-hashes-${{ matrix.os }}.txt"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
