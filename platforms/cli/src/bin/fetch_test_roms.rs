@@ -34,12 +34,43 @@ const GBA_FILES: &[&str] = &[
     "unsafe/unsafe.gba",
 ];
 
-/// GodMode9 (GPL-2.0-or-later): a bare-metal 3DS payload for both
-/// processors, used to pin frames of the 3DS core.
-const CTR_URL: &str =
-    "https://github.com/d0k3/GodMode9/releases/download/v2.2.3/GodMode9-v2.2.3-20260331144941.zip";
-const CTR_SHA256: &str = "3673b86240efa4b47769d2d22e1c9e234a906c40163ed54c821164143501beca";
-const CTR_MARKER: &str = "godmode9-v2.2.3";
+/// A bare-metal 3DS payload from a public release, used to pin frames of the
+/// 3DS core: an archive, its SHA-256, and the FIRM inside it.
+struct CtrPayload {
+    /// Directory under `3ds/`, and with the version the marker file's name.
+    dir: &'static str,
+    version: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    member: &'static str,
+}
+
+const CTR_PAYLOADS: [CtrPayload; 3] = [
+    // GPL-2.0-or-later.
+    CtrPayload {
+        dir: "godmode9",
+        version: "v2.2.3",
+        url: "https://github.com/d0k3/GodMode9/releases/download/v2.2.3/GodMode9-v2.2.3-20260331144941.zip",
+        sha256: "3673b86240efa4b47769d2d22e1c9e234a906c40163ed54c821164143501beca",
+        member: "GodMode9.firm",
+    },
+    // GPL-3.0-or-later.
+    CtrPayload {
+        dir: "fastboot3ds",
+        version: "v1.2",
+        url: "https://github.com/derrekr/fastboot3DS/releases/download/v1.2/fastboot3DSv1.2.7z",
+        sha256: "f4e82308627950cdbd9b4fb7910209d0593a58c7d30ec419063d34b6b4dcc53e",
+        member: "fastboot3DS.firm",
+    },
+    // GPL-3.0-or-later.
+    CtrPayload {
+        dir: "open_agb_firm",
+        version: "beta-2024-12-24",
+        url: "https://github.com/profi200/open_agb_firm/releases/download/beta_2024-12-24/open_agb_firm_beta_20241224.7z",
+        sha256: "d8105ed0ac877bac99618b2664a656f19ab7ce67a55a696e5598ceeae6fa0cd9",
+        member: "open_agb_firm.firm",
+    },
+];
 
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("fetch_test_roms: {msg}");
@@ -147,37 +178,68 @@ fn fetch_gba(dest: &Path, force: bool) -> Result<usize, String> {
     Ok(count)
 }
 
-fn fetch_ctr(dest: &Path, force: bool) -> Result<usize, String> {
-    let dir = dest.join("3ds").join("godmode9");
-    let marker = dir.join(format!("{CTR_MARKER}.ok"));
-    if marker.exists() && !force {
-        println!("3ds: {CTR_MARKER} already present in {}", dir.display());
-        return Ok(0);
+/// One file out of a `.zip` or `.7z` archive held in memory.
+fn extract(archive: Vec<u8>, url: &str, member: &str) -> Result<Vec<u8>, String> {
+    let cursor = std::io::Cursor::new(archive);
+    if url.ends_with(".7z") {
+        let mut reader = sevenz_rust2::ArchiveReader::new(cursor, sevenz_rust2::Password::empty())
+            .map_err(|e| format!("opening 7z: {e}"))?;
+        return reader
+            .read_file(member)
+            .map_err(|e| format!("extracting {member}: {e}"));
     }
-    println!("3ds: downloading {CTR_URL}");
-    let zip_bytes = download(CTR_URL)?;
-    let actual = sha256_hex(&zip_bytes);
-    if actual != CTR_SHA256 {
-        return Err(format!(
-            "SHA-256 mismatch for {CTR_URL}\n  expected {CTR_SHA256}\n  actual   {actual}"
-        ));
-    }
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
-        .map_err(|e| format!("opening zip: {e}"))?;
-    let mut entry = archive
-        .by_name("GodMode9.firm")
-        .map_err(|e| format!("GodMode9.firm: {e}"))?;
+    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("opening zip: {e}"))?;
+    let mut entry = zip.by_name(member).map_err(|e| format!("{member}: {e}"))?;
     let mut data = Vec::with_capacity(entry.size() as usize);
     entry
         .read_to_end(&mut data)
-        .map_err(|e| format!("extracting GodMode9.firm: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let out = dir.join("GodMode9.firm");
-    std::fs::write(&out, data).map_err(|e| format!("write {}: {e}", out.display()))?;
-    std::fs::write(&marker, format!("{CTR_URL}\n{CTR_SHA256}\n"))
+        .map_err(|e| format!("extracting {member}: {e}"))?;
+    Ok(data)
+}
+
+fn fetch_ctr(dest: &Path, force: bool) -> Result<usize, String> {
+    let mut count = 0;
+    for payload in &CTR_PAYLOADS {
+        let CtrPayload {
+            dir: name,
+            version,
+            url,
+            sha256,
+            member,
+        } = *payload;
+        let dir = dest.join("3ds").join(name);
+        let marker = dir.join(format!("{name}-{version}.ok"));
+        if marker.exists() && !force {
+            println!("3ds: {name} {version} already present in {}", dir.display());
+            continue;
+        }
+        println!("3ds: downloading {url}");
+        let archive = download(url)?;
+        let actual = sha256_hex(&archive);
+        if actual != sha256 {
+            return Err(format!(
+                "SHA-256 mismatch for {url}
+  expected {sha256}
+  actual   {actual}"
+            ));
+        }
+        let data = extract(archive, url, member)?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        let out = dir.join(member);
+        std::fs::write(&out, data).map_err(|e| format!("write {}: {e}", out.display()))?;
+        std::fs::write(
+            &marker,
+            format!(
+                "{url}
+{sha256}
+"
+            ),
+        )
         .map_err(|e| format!("write {}: {e}", marker.display()))?;
-    println!("3ds: extracted GodMode9.firm to {}", dir.display());
-    Ok(1)
+        println!("3ds: extracted {member} to {}", dir.display());
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn main() {

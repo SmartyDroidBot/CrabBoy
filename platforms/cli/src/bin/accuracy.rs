@@ -60,11 +60,13 @@ struct Suite {
     glob: Option<String>,
     reference: Option<String>,
     reference_alt: Option<String>,
-    /// `ctr-frame`: the expected top-screen hash, an input script, and
-    /// whether a FAT16 SD card is inserted.
+    /// `ctr-frame`: the expected frame hash, an input script, whether a
+    /// FAT16 SD card is inserted, and whether the hash covers both screens
+    /// (stacked as the frontends draw them) instead of the top one.
     hash: Option<String>,
     input: Option<String>,
     sd_fat: bool,
+    both_screens: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +84,7 @@ struct Case {
     hash: Option<String>,
     input: Option<String>,
     sd_fat: bool,
+    both_screens: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +130,10 @@ fn load_suites(path: &Path) -> Vec<Suite> {
                 hash: str_field("hash"),
                 input: str_field("input"),
                 sd_fat: s.get("sd_fat").and_then(|v| v.as_bool()).unwrap_or(false),
+                both_screens: s
+                    .get("both_screens")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         })
         .collect()
@@ -306,6 +313,7 @@ fn cases(suites: &[Suite], root: &Path, filter: Option<&str>) -> Vec<Case> {
                 hash: s.hash.clone(),
                 input: s.input.clone(),
                 sd_fat: s.sd_fat,
+                both_screens: s.both_screens,
             });
         }
     }
@@ -632,7 +640,8 @@ fn run_jsmolka(rom: &[u8], frames: u64) -> Result_ {
 }
 
 /// A 3DS payload: run it for the frame budget, with an optional SD card and
-/// input script, and compare the hash of the top screen with the pinned one.
+/// input script, and compare the hash of the top screen, or of both, with
+/// the pinned one.
 fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
     use emu_core::System;
     let crash = |detail: String| Result_ {
@@ -665,7 +674,12 @@ fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
         }
         ctr.run_frame();
     }
-    let hash = crab_cli::fnv1a32(&ctr.frame().to_rgba(&emu_core::DMG_PALETTE));
+    let frame = if case.both_screens {
+        emu_core::Layout::of(&ctr).compose(&ctr, &emu_core::DMG_PALETTE)
+    } else {
+        ctr.frame()
+    };
+    let hash = crab_cli::fnv1a32(&frame.to_rgba(&emu_core::DMG_PALETTE));
     let expected = case.hash.as_deref().unwrap_or("");
     if format!("{hash:08x}") == expected {
         Result_ {

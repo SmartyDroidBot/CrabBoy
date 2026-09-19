@@ -316,3 +316,6 @@ godmode9-splash/../3ds/godmode9/GodMode9.firm PASS
 godmode9-no-card/../3ds/godmode9/GodMode9.firm PASS
 godmode9-root/../3ds/godmode9/GodMode9.firm PASS
 godmode9-sd-listing/../3ds/godmode9/GodMode9.firm PASS
+fastboot3ds-menu/../3ds/fastboot3ds/fastboot3DS.firm PASS
+fastboot3ds-file-browser/../3ds/fastboot3ds/fastboot3DS.firm PASS
+open-agb-firm-browser/../3ds/open_agb_firm/open_agb_firm.firm PASS

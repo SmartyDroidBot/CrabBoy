@@ -34,6 +34,17 @@ All notable changes to this project are documented here. The format follows
   `set_motion` with defaults that leave existing cores unchanged, `Button`
   gains `ZL` and `ZR`, and `emu_core::{mem, state}` share the heap region
   type and the save-state reader and writer.
+- 3DS: fastboot3DS v1.2 and open_agb_firm run to their menus and are pinned
+  beside GodMode9 (`fastboot3ds-*`, `open-agb-firm-browser`; suites can hash
+  both screens). Behind them: the ARM9's DMA controller with requests from
+  the SD/MMC controllers, the second SD/MMC controller and the slot routing
+  of `CFG9_SDMMCCTL`, the MPCore watchdog as a timer, the GPU's transfer
+  engine in the new `pica::transfer` (display transfers between the five
+  framebuffer formats, texture copies), GPU fills and transfers that take
+  time before they interrupt, and an SD interrupt that latches on the edge.
+  `fetch_test_roms --only 3ds` unpacks `.7z` releases; `ctr-diag` gains
+  `--watch=LO-HI`, the ARM9 interrupt state, fault origins and a both-screens
+  hash.
 - `emu_core::Layout` stacks a console's displays into one image. The desktop
   app, `crab run` and the wasm bindings draw through it, so a 3DS payload
   shows both screens; the pointer held on the bottom screen is the stylus,

@@ -3,15 +3,17 @@
 //!
 //! ```text
 //! ctr-diag <firm> <frames> [--dump=PREFIX] [--input=SCRIPT] [--every=N]
-//!          [--sd=IMAGE | --sd-fat]
+//!          [--sd=IMAGE | --sd-fat] [--watch=LO-HI]
 //! ```
 //!
 //! `--dump` writes `PREFIX-top.png` and `PREFIX-bottom.png` after the last
-//! frame. `--input` takes the same script as `crab run`.
+//! frame. `--input` takes the same script as `crab run`. `--watch` (hex, ends
+//! included, repeatable) prints the latest accesses to a register range in
+//! the order they happened.
 
 use crab_cli::{encode_png, fnv1a32, parse_input_script};
 use ctr_core::Ctr;
-use emu_core::{System, DMG_PALETTE};
+use emu_core::{Layout, System, DMG_PALETTE};
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("ctr-diag: {message}");
@@ -46,6 +48,13 @@ fn main() {
         let files: [(&str, &[u8]); 1] = [("HELLO.TXT", b"Hello from CrabBoy\n")];
         ctr.insert_sd(ctr_fs::fat::build(&files, 65536).unwrap_or_else(|e| fail(e)));
     }
+    for range in args.iter().filter_map(|a| a.strip_prefix("--watch=")) {
+        let parse = |v: &str| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok();
+        match range.split_once('-').map(|(lo, hi)| (parse(lo), parse(hi))) {
+            Some((Some(lo), Some(hi))) => ctr.io_mut().trace.watch(lo, hi),
+            _ => fail(format!("--watch={range}: expected LO-HI in hex")),
+        }
+    }
     println!("{}", ctr.info());
 
     for frame in 0..frames {
@@ -59,10 +68,14 @@ fn main() {
         ctr.run_frame();
         if (frame + 1) % every == 0 || frame + 1 == frames {
             let top = ctr.frame().to_rgba(&DMG_PALETTE);
+            let both = Layout::of(&ctr)
+                .compose(&ctr, &DMG_PALETTE)
+                .to_rgba(&DMG_PALETTE);
             println!(
-                "frame {:5}  top {:08x}  {}",
+                "frame {:5}  top {:08x}  both {:08x}  {}",
                 frame + 1,
                 fnv1a32(&top),
+                fnv1a32(&both),
                 ctr.describe()
             );
         }
@@ -103,6 +116,15 @@ fn main() {
         println!(
             "  {addr:#010x}  reads {:8}  writes {:8}  last write {:#010x}",
             entry.reads, entry.writes, entry.last_write
+        );
+    }
+
+    for access in ctr.io().trace.logged() {
+        println!(
+            "  {} {:#010x} {:#010x}",
+            if access.write { "w" } else { "r" },
+            access.addr,
+            access.value
         );
     }
 
