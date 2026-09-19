@@ -29,6 +29,10 @@ iwram_dump.bin
 **/*.cxi
 **/*.cia
 **/*.3dsx
+**/*.cro
+**/*.cfa
+**/*.app
+**/*.bcfnt
 **/*.cdc
 **/*.sed
 **/*.img

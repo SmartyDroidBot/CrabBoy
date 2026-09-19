@@ -30,11 +30,12 @@ See [`ROADMAP.md`](ROADMAP.md) for the milestones, [`CHANGELOG.md`](CHANGELOG.md
 for what each release contains and [`docs/accuracy.md`](docs/accuracy.md) for
 the current test-suite results.
 
-A low-level **Nintendo 3DS** core is in development on the `3ds` branch
-(`crates/ctr-core` and friends, behind the `crab-systems/ctr` feature). It
-runs bare-metal FIRM payloads on the ARM9 and both ARM11 cores so far (GodMode9
-reaches its splash screen; no 3D engine, DSP or crypto engines yet), and it will need
-files dumped from your own console for anything beyond homebrew; see
+A **Nintendo 3DS** core is in development on the `3ds` branch (behind the
+`crab-systems/ctr` feature). Its hardware models run bare-metal software on
+the ARM9 and both ARM11 cores: GodMode9, fastboot3DS, open_agb_firm, and Linux
+to a login prompt. A high-level mode that implements the console's operating
+system, so that decrypted game images you own run without anything dumped
+from a console, is being built on top; it does not play games yet. See
 [`docs/3ds/overview.md`](docs/3ds/overview.md).
 
 ## Status

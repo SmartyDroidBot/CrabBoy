@@ -47,7 +47,9 @@ DIV-clocked frame sequencer with integer mixing in the APU.
 
 ## Nintendo 3DS (branch `3ds`)
 
-A low-level 3DS core is developed on the `3ds` branch and merges only when a
-commercial game runs with both screens, audio and saves on every frontend.
-The strategy, the milestones M0 to M11 and the merge bar are in
-`docs/3ds/overview.md`. It does not change the release milestones above.
+A 3DS core is developed on the `3ds` branch and merges only when a commercial
+game runs with both screens and saves on every frontend. The hardware models
+(milestones M0 to M4) are done; a high-level mode that stands in for the
+console's operating system (milestones H0 to H10) is in progress, and booting
+Nintendo's own firmware is parked until console dumps are available. The
+strategy, the milestones and the merge bar are in `docs/3ds/overview.md`. It does not change the release milestones above.

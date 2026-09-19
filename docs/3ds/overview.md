@@ -6,11 +6,25 @@ other cores: hardware-equivalent emulation in pure Rust.
 
 ## Approach
 
-- **Low-level emulation first.** Both processors, the physical bus and the
-  memory-mapped units are emulated, and firmware runs as it does on a console.
-  Nothing of Nintendo's operating system is reimplemented. A high-level kernel
-  may be added later as a convenience for users without a NAND dump; it will
-  never be the accuracy reference.
+- **Two ways to run the console, one set of hardware models.**
+  - *Low level* (`ctr-core`): both processors, the physical bus and the
+    memory-mapped units, with firmware running as it does on a console. It
+    boots open-source payloads and Linux today. Running Nintendo's own
+    firmware this way needs the boot ROMs, OTP and NAND of a console, which
+    the project does not have, so that part (M7 and M8 below) is parked, not
+    dropped. It stays built and tested, and it remains the reference for how
+    the hardware behaves.
+  - *High level* (`ctr-hle`, in progress since 2026-09-19): the emulator is
+    the operating system. It implements the Horizon kernel's supervisor
+    calls and the system services, loads a game or homebrew image directly,
+    and needs nothing dumped from a console. This is the path that plays
+    games, and the work of the H milestones below. It guesses at what
+    Nintendo's software does, so it is never the accuracy reference for the
+    operating system; the processor, GPU and DSP underneath are the same
+    models either way.
+- **Decrypted images only.** The high-level path opens images whose NCCH
+  says it is not encrypted and refuses the rest with a message. It derives no
+  keys and ships none.
 - **What "1:1" means here.** Architecturally exact processors (MMU and TLB,
   MPU, exclusive monitors, VFPv2 rounding and NaN rules, interrupt priority),
   bit-exact GPU and DSP output, and correct ordering of DMA, GPU, DSP and
@@ -122,9 +136,32 @@ DDI0201 for the ARM946E-S), Corgi3DS (the public low-level emulator), Mikage,
 dynarmic (0BSD) for ARMv6K semantics, and Azahar's software rasteriser.
 Teakra is MIT-licensed and is ported with attribution.
 
+## High-level milestones
+
+| # | Deliverable | Exit test |
+|---|---|---|
+| H0 | Host-trap hook in `arm-core`, generic event queue, `GpuExt` shared by both modes, `emu_core::Storage` and `load_media` | Every pinned frame unchanged |
+| H1 | 3DSX loader; process, one thread, the supervisor calls of libctru's start-up, `srv:`, minimal APT, gsp and hid | A libctru console program shows its text |
+| H2 | Threads and synchronisation objects, IPC translation, fs:USER with SD card, RomFS and save archives, cfg, ptm, ndm, ac, generic stub | devkitPro examples reach their screens |
+| H3 | GX command queue; vertex loading to rasteriser, textures, combiners, tests, blending | citro3d examples and the public GPU test programs |
+| H4 | Fragment lighting, fog, stencil, ETC1 and the other texture formats | citro3d lighting, fog and stencil examples |
+| H5 | NCSD, NCCH, ExeFS, RomFS streamed from the image; null DSP; configuration and shared pages | A commercial title presents a first frame |
+| H6 | `ldr:ro` (CRO modules), extra save data, synthesised system data, the remaining stubs | Its title screen, and input moves past it |
+| H7 | First performance pass; software keyboard; y2r | In game; speed measured and reported |
+| H8 | Save persistence | A save survives quitting |
+| H9 | The Teakra port, running the DSP firmware the game supplies | Music |
+| H10 | Tile-parallel rasteriser, the JIT decision, CIA, streaming on wasm | Speed against the 30 fps target |
+
+The commercial test title is a cartridge image the user owns. It is never
+committed, nor are screenshots of it; its suites are skipped where the file
+is absent. Citra, Azahar and Panda3DS are read for behaviour and nothing is
+copied from them (they are GPL); Teakra is MIT and is ported with its notice.
+System data a game expects (shared font, country list, bad-word list) is
+generated in the repository from openly licensed sources.
+
 ## Ready to merge
 
-M8 is complete; every 3DS suite is in `tests/accuracy/baseline.txt`; frame
+H8 is complete for a commercial game (M8 no longer gates the merge); every 3DS suite is in `tests/accuracy/baseline.txt`; frame
 hashes agree on x86_64, aarch64 and wasm; the GB and GBA baseline and hashes
 are untouched; the desktop, CLI and wasm frontends show both screens and feed
 touch and the circle pad; `README.md`, `ROADMAP.md`, `CHANGELOG.md` and
