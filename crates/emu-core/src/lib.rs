@@ -22,6 +22,7 @@ pub mod input;
 pub mod layout;
 pub mod mem;
 pub mod state;
+pub mod storage;
 pub mod system;
 pub mod video;
 
@@ -32,6 +33,7 @@ pub use host::Host;
 pub use input::{Axis, Button, Motion};
 pub use layout::Layout;
 pub use mem::Mem;
+pub use storage::{Storage, StorageError, Window};
 pub use system::System;
 pub use video::{Frame, DMG_PALETTE};
 

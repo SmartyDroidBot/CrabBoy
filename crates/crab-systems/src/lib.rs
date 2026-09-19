@@ -2,9 +2,14 @@
 //!
 //! Frontends depend on this crate alone: [`detect`] identifies a ROM from its
 //! header bytes (the file extension is never consulted) and [`load`] /
-//! [`load_with`] build the matching `Box<dyn System>`.
+//! [`load_with`] build the matching `Box<dyn System>`. [`load_media`] does the
+//! same for an image that is read in pieces, which is how a 3DS cartridge of
+//! several gigabytes is opened.
 
-use emu_core::System;
+use emu_core::{Storage, System};
+
+/// Enough of an image to identify it: the 3DS magics sit at 0x100.
+const HEADER_LEN: u64 = 0x200;
 
 /// A supported console.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,6 +90,40 @@ pub fn load(rom: Vec<u8>) -> Result<Box<dyn System>, String> {
     load_with(rom, &LoadOptions::default())
 }
 
+/// Build the console for an image that is read where it lies. Images of the
+/// cartridge consoles, and 3DS firmware payloads, are small and are read
+/// whole; a 3DS game keeps the medium and reads it as the game asks.
+pub fn load_media(
+    mut media: Box<dyn Storage>,
+    opts: &LoadOptions,
+) -> Result<Box<dyn System>, String> {
+    let mut header = vec![0u8; media.len().min(HEADER_LEN) as usize];
+    media.read_at(0, &mut header).map_err(|e| e.to_string())?;
+    #[cfg(feature = "ctr")]
+    if matches!(
+        ctr_fs::ImageKind::detect(&header),
+        Some(kind) if kind != ctr_fs::ImageKind::Firm
+    ) {
+        return Err(HLE_PENDING.to_string());
+    }
+    // Anything else is small enough to hold.
+    const LIMIT: u64 = 1 << 30;
+    if media.len() > LIMIT {
+        return Err(format!(
+            "an image of {} bytes is not one of a supported console",
+            media.len()
+        ));
+    }
+    let mut rom = vec![0u8; media.len() as usize];
+    media.read_at(0, &mut rom).map_err(|e| e.to_string())?;
+    load_with(rom, opts)
+}
+
+/// Until the high-level 3DS mode can start a process.
+#[cfg(feature = "ctr")]
+const HLE_PENDING: &str = "3DS games and homebrew need the high-level mode, which cannot start \
+                           a process yet; only FIRM payloads load";
+
 /// Build the console for `rom`.
 pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, String> {
     match detect(&rom) {
@@ -107,10 +146,7 @@ pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, St
         #[cfg(feature = "ctr")]
         Some(Kind::Ctr) => match ctr_fs::ImageKind::detect(&rom) {
             Some(ctr_fs::ImageKind::Firm) => ctr_core::Ctr::system(rom),
-            _ => Err(
-                "3DS game and homebrew images need the firmware boot path, which is not                  implemented yet; only FIRM payloads load"
-                    .to_string(),
-            ),
+            _ => Err(HLE_PENDING.to_string()),
         },
         None => Err("not a Game Boy, Game Boy Color or Game Boy Advance ROM".to_string()),
     }
@@ -180,6 +216,63 @@ mod tests {
         ncsd[0x100..0x104].copy_from_slice(b"NCSD");
         assert_eq!(detect(&ncsd), Some(Kind::Ctr));
         assert!(load(ncsd).is_err());
+    }
+
+    /// A medium that says it is huge and counts what is read from it.
+    struct Huge {
+        header: Vec<u8>,
+        bytes_read: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Storage for Huge {
+        fn len(&self) -> u64 {
+            4 << 30
+        }
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), emu_core::StorageError> {
+            self.bytes_read
+                .set(self.bytes_read.get() + buf.len() as u64);
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = self.header.get(offset as usize + i).copied().unwrap_or(0);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn media_are_identified_from_their_header_alone() {
+        let system = load_media(Box::new(gb_rom(0x00)), &LoadOptions::default()).unwrap();
+        assert_eq!(system.name(), "gb");
+
+        // Four gigabytes of nothing known: refused after reading the header.
+        let bytes_read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let huge = Huge {
+            header: vec![0; 0x200],
+            bytes_read: bytes_read.clone(),
+        };
+        assert!(load_media(Box::new(huge), &LoadOptions::default()).is_err());
+        assert_eq!(bytes_read.get(), HEADER_LEN);
+    }
+
+    #[cfg(feature = "ctr")]
+    #[test]
+    fn a_cartridge_image_is_not_read_whole() {
+        let mut header = vec![0u8; 0x200];
+        header[0x100..0x104].copy_from_slice(b"NCSD");
+        let bytes_read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let huge = Huge {
+            header,
+            bytes_read: bytes_read.clone(),
+        };
+        // Not startable yet, but recognised, and without reading the image.
+        let error = load_media(Box::new(huge), &LoadOptions::default())
+            .err()
+            .unwrap();
+        assert!(error.contains("high-level"), "{error}");
+        assert_eq!(bytes_read.get(), HEADER_LEN);
+
+        let firm = ctr_fs::firm::build(0, 0x0800_6000, &[(0x0800_6000, &[0; 4])]);
+        let system = load_media(Box::new(firm), &LoadOptions::default()).unwrap();
+        assert_eq!(system.name(), "3ds");
     }
 
     #[test]
