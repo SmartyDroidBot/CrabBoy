@@ -78,6 +78,5 @@ registers. Every other register only holds its value so far.
 
 ## Not started
 
-Vertex
-loading, primitive assembly, clipping, the rasteriser, texture units and
-combiners, fragment lighting, the framebuffer and the geometry stage.
+Vertex loading, primitive assembly, clipping, the rasteriser, texture units
+and combiners, fragment lighting, the framebuffer and the geometry stage.
