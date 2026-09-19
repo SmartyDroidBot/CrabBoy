@@ -32,6 +32,10 @@ name = "gba-diag"
 path = "src/bin/gba_diag.rs"
 
 [[bin]]
+name = "ctr-diag"
+path = "src/bin/ctr_diag.rs"
+
+[[bin]]
 name = "gba-disasm"
 path = "src/bin/gba_disasm.rs"
 
@@ -40,6 +44,7 @@ emu-core = { workspace = true }
 crab-systems = { workspace = true }
 gb-core = { workspace = true }
 gba-core = { workspace = true, features = ["trace"] }
+ctr-core = { workspace = true, features = ["trace"] }
 ureq = "3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"

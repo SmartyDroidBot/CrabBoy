@@ -118,6 +118,8 @@ pub struct Cpu {
     /// Level of the FIQ input.
     pub fiq_line: bool,
     halted: bool,
+    /// Exceptions taken so far, in vector order, for diagnostics.
+    taken: [u64; 7],
 }
 
 impl Cpu {
@@ -135,6 +137,7 @@ impl Cpu {
             irq_line: false,
             fiq_line: false,
             halted: false,
+            taken: [0; 7],
         };
         cpu.r[15] = cpu.vector_base(bus);
         cpu
@@ -158,6 +161,12 @@ impl Cpu {
 
     pub fn halted(&self) -> bool {
         self.halted
+    }
+
+    /// How many times each exception was taken, in vector order: reset,
+    /// undefined, supervisor call, prefetch abort, data abort, IRQ, FIQ.
+    pub fn exceptions_taken(&self) -> [u64; 7] {
+        self.taken
     }
 
     /// Stop executing until an interrupt line is raised.
@@ -306,6 +315,7 @@ impl Cpu {
     /// Enter `exception`. `return_addr` goes to the link register of the new
     /// mode, already adjusted the way that exception's handler expects.
     pub fn enter<B: Bus>(&mut self, bus: &B, exception: Exception, return_addr: u32) {
+        self.taken[exception as usize] += 1;
         let old = self.cpsr;
         let mut new = old & !(psr::MODE | psr::T) | exception.mode() | psr::I;
         if matches!(exception, Exception::Reset | Exception::Fiq) {

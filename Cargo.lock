@@ -1021,6 +1021,7 @@ name = "crab-cli"
 version = "0.3.0"
 dependencies = [
  "crab-systems",
+ "ctr-core",
  "emu-core",
  "gb-core",
  "gba-core",

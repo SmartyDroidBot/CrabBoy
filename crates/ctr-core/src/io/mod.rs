@@ -7,6 +7,7 @@
 
 pub mod pdc;
 pub mod timer9;
+pub mod trace;
 
 use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::sched::{Event, Scheduler};
@@ -45,6 +46,8 @@ pub struct Io {
     pub pdc: [Pdc; 2],
     sysprot9: u8,
     bootenv: u32,
+    /// Accesses to registers that are not modelled.
+    pub trace: trace::Trace,
 }
 
 impl Default for Io {
@@ -62,6 +65,7 @@ impl Io {
             pdc: [Pdc::new(TOP_SCREEN), Pdc::new(BOTTOM_SCREEN)],
             sysprot9: 0,
             bootenv: 0,
+            trace: trace::Trace::default(),
         }
     }
 
@@ -74,12 +78,12 @@ impl Io {
             0x10000 => match offset {
                 0x000 => self.sysprot9 as u32,
                 0xFFC => CFG9_SOCINFO_OLD_3DS,
-                _ => 0,
+                _ => self.trace.read(addr),
             },
             0x10001 => match offset {
                 0x000 => self.irq9.enable,
                 0x004 => self.irq9.pending,
-                _ => 0,
+                _ => self.trace.read(addr),
             },
             0x10003 => {
                 let counter = self.timers9.read16(offset & 0xC, sched.now()) as u32;
@@ -88,13 +92,13 @@ impl Io {
             }
             0x10010 => match offset {
                 0x000 => self.bootenv,
-                _ => 0,
+                _ => self.trace.read(addr),
             },
             0x10146 => match offset {
                 0x000 => self.pad as u32,
-                _ => 0,
+                _ => self.trace.read(addr),
             },
-            block if self.mapped9(block) => 0,
+            block if self.mapped9(block) => self.trace.read(addr),
             _ => return None,
         })
     }
@@ -135,7 +139,7 @@ impl Io {
                     self.bootenv = self.bootenv & !mask | value & mask;
                 }
             }
-            block if self.mapped9(block) => {}
+            block if self.mapped9(block) => self.trace.write(addr, value, mask),
             _ => return None,
         }
         Some(())

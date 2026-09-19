@@ -74,6 +74,21 @@ impl Ctr {
         &self.cpu9
     }
 
+    pub fn io(&self) -> &Io {
+        &self.io
+    }
+
+    /// One line on where the processors are, for diagnostics.
+    pub fn describe(&self) -> String {
+        let [_, und, svc, pabt, dabt, irq, fiq] = self.cpu9.exceptions_taken();
+        format!(
+            "arm9 pc {:#010x} cpsr {:#010x}{} und {und} svc {svc} pabt {pabt} dabt {dabt} irq {irq} fiq {fiq}",
+            self.cpu9.reg(15),
+            self.cpu9.cpsr(),
+            if self.cpu9.halted() { " halted" } else { "" },
+        )
+    }
+
     /// ARM11 cycles since power-on.
     pub fn cycles(&self) -> u64 {
         self.sched.now()
