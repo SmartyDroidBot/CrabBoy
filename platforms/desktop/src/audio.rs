@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Rate of the source handed to rodio, which resamples it to the device.
-/// The GBA is native at this rate; the Game Boy's 8192/16384 Hz output is
-/// upsampled by linear interpolation.
+/// The GBA is native at this rate; the Game Boy's 8192/16384 Hz output and
+/// the 3DS's 32728 Hz are converted by linear interpolation.
 pub const OUTPUT_RATE: u32 = 32768;
 const CHANNELS: u16 = 2;
 /// Upper bound on queued audio; older samples are dropped past this.
@@ -75,6 +75,9 @@ struct RingWriter {
     ring: Ring,
     /// The previous core stereo pair, so interpolation continues across pushes.
     last: [f32; 2],
+    /// Where the next output sample falls after `last`, in units where an
+    /// input sample is `OUTPUT_RATE` long and an output sample `rate` long.
+    phase: u32,
 }
 
 impl RingWriter {
@@ -82,15 +85,22 @@ impl RingWriter {
         RingWriter {
             ring: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_QUEUED))),
             last: [0.0; 2],
+            phase: 0,
         }
     }
 
+    /// Convert any input rate to `OUTPUT_RATE`: every output sample that
+    /// falls between two input samples is interpolated between them. The
+    /// phase carries the remainder across pushes, so a rate that does not
+    /// divide the output rate (the 3DS's 32728 Hz) neither drifts nor clicks.
     fn push(&mut self, samples: &[f32], rate: u32) {
-        let ratio = (OUTPUT_RATE / rate.max(1)).max(1) as usize;
+        let rate = rate.clamp(1, OUTPUT_RATE * 16);
         let mut q = self.ring.lock().unwrap();
         for pair in samples.as_chunks::<2>().0 {
-            for k in 1..=ratio {
-                let t = k as f32 / ratio as f32;
+            self.phase += OUTPUT_RATE;
+            while self.phase >= rate {
+                self.phase -= rate;
+                let t = 1.0 - self.phase as f32 / OUTPUT_RATE as f32;
                 q.push_back(self.last[0] + (pair[0] - self.last[0]) * t);
                 q.push_back(self.last[1] + (pair[1] - self.last[1]) * t);
             }
@@ -105,6 +115,7 @@ impl RingWriter {
     fn clear(&mut self) {
         self.ring.lock().unwrap().clear();
         self.last = [0.0; 2];
+        self.phase = 0;
     }
 
     fn queued_ms(&self) -> u32 {
@@ -180,6 +191,20 @@ mod tests {
         assert_eq!(q, [0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0]);
         out.push(&[1.0, -1.0], 32768);
         assert_eq!(ring.lock().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn a_rate_that_does_not_divide_the_output_keeps_its_pace() {
+        // One second of the 3DS's output makes one second of output, to the
+        // sample, however it is split into pushes.
+        let (mut out, ring) = writer();
+        let mut made = 0;
+        for _ in 0..32728 / 8 {
+            out.push(&[0.5; 16], 32728);
+            made += ring.lock().unwrap().len() / 2;
+            ring.lock().unwrap().clear();
+        }
+        assert_eq!(made, 32768);
     }
 
     #[test]

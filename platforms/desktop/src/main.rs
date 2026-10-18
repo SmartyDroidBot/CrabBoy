@@ -52,6 +52,54 @@ fn state_path_for(sav: &str, suffix: &str) -> Option<String> {
 /// File suffixes for the four state slots plus the quicksave slot.
 const STATE_SLOTS: [&str; 5] = [".state0", ".state1", ".state2", ".state3", ".stateq"];
 
+/// Hand the console the save file `sav`, if there is one. A 3DS program's
+/// saves (save data, extra data and its SD card) are one file, read even
+/// when the program has not asked for save data: homebrew has saves once it
+/// writes to the card.
+fn restore_save(system: &mut dyn System, sav: &str) -> bool {
+    if !system.battery_backed() && system.name() != "3ds" {
+        return false;
+    }
+    let Ok(data) = std::fs::read(sav) else {
+        return false;
+    };
+    system.load_data(&data);
+    true
+}
+
+/// Write the console's saves to `sav`. Nothing is written for a console
+/// without saves or before the game saved anything.
+fn persist_save(system: &dyn System, sav: &str) -> std::io::Result<bool> {
+    if !system.battery_backed() {
+        return Ok(false);
+    }
+    let data = system.save_data();
+    if data.is_empty() {
+        return Ok(false);
+    }
+    std::fs::write(sav, &data)?;
+    Ok(true)
+}
+
+/// File-picker filters: every supported image, then one per console.
+fn rom_filters() -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut all: Vec<&str> = Vec::new();
+    let mut each = Vec::new();
+    for kind in crab_systems::Kind::ALL {
+        let label = match kind.name() {
+            "gb" => "Game Boy",
+            "gbc" => "Game Boy Color",
+            "gba" => "Game Boy Advance",
+            _ => "Nintendo 3DS (decrypted image, 3DSX or FIRM)",
+        };
+        all.extend(kind.extensions());
+        each.push((label, kind.extensions().to_vec()));
+    }
+    let mut filters = vec![("All supported images", all)];
+    filters.extend(each);
+    filters
+}
+
 /// Locate a GBA BIOS image: an explicit `--bios` path, else `gba_bios.bin`
 /// next to the ROM, else next to the executable. Returns `None` when no
 /// image is found; the GBA then boots with high-level BIOS emulation.
@@ -126,6 +174,8 @@ const PALETTES: [(&str, Palette); 4] = [
 
 struct CrabBoyApp {
     system: Option<Box<dyn System>>,
+    /// The image the console runs, to start it again on a 3DS reset.
+    rom_path: Option<String>,
     sav_path: Option<String>,
     bios_path: Option<String>,
     keymap: HashMap<Button, egui::Key>,
@@ -170,6 +220,7 @@ impl CrabBoyApp {
         }
         let mut app = CrabBoyApp {
             system: None,
+            rom_path: None,
             sav_path: None,
             bios_path,
             keymap,
@@ -201,17 +252,16 @@ impl CrabBoyApp {
     }
 
     fn load_rom(&mut self, path: &str, ctx: &egui::Context) {
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
-            Err(e) => {
-                self.status = format!("Failed to read ROM '{}': {e}", path);
+        // Only the header is read here; the image is read where it lies, so
+        // a 3DS card image of gigabytes opens at once.
+        let kind = match crab_systems::detect_file(path) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                self.status = format!("'{}' is not an image of a supported console", path);
                 return;
             }
-        };
-        let kind = match crab_systems::detect(&data) {
-            Some(k) => k,
-            None => {
-                self.status = format!("'{}' is not a Game Boy or GBA ROM", path);
+            Err(e) => {
+                self.status = format!("Failed to read ROM '{}': {e}", path);
                 return;
             }
         };
@@ -228,7 +278,9 @@ impl CrabBoyApp {
         } else {
             ""
         };
-        let mut system = match crab_systems::load_with(data, &opts) {
+        // Leaving a game: its saves go to disk before the next one starts.
+        self.flush_save();
+        let mut system = match crab_systems::load_file(path, &opts) {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("Failed to load cartridge: {e}");
@@ -241,13 +293,11 @@ impl CrabBoyApp {
             self.rom_title = kind.name().to_ascii_uppercase();
         }
         self.status = format!("Loaded '{}'{bios_note}", system.info());
-        if system.battery_backed() {
-            if let Some(sav) = &sav_path {
-                if let Ok(d) = std::fs::read(sav) {
-                    system.load_data(&d);
-                    self.status =
-                        format!("Loaded '{}'{bios_note} (battery save found)", system.info());
-                }
+        if let Some(sav) = &sav_path {
+            if restore_save(system.as_mut(), sav) {
+                self.status = format!("Loaded '{}'{bios_note} (battery save found)", system.info());
+            }
+            if system.battery_backed() {
                 if let Some(rtc) = rtc_path_for(sav) {
                     if let Ok(d) = std::fs::read(&rtc) {
                         system.load_rtc(&d);
@@ -257,6 +307,7 @@ impl CrabBoyApp {
         }
 
         self.system = Some(system);
+        self.rom_path = Some(path.to_string());
         self.sav_path = sav_path;
         self.frame_count = 0;
         self.paused = false;
@@ -264,7 +315,15 @@ impl CrabBoyApp {
         ctx.request_repaint();
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, ctx: &egui::Context) {
+        if self.system.as_ref().is_some_and(|s| s.name() == "3ds") {
+            // The high-level mode has no power button: start the program
+            // afresh from its image, with its saves as they are on disk.
+            if let Some(path) = self.rom_path.clone() {
+                self.load_rom(&path, ctx);
+                return;
+            }
+        }
         if let Some(system) = &mut self.system {
             system.reset();
             self.frame_count = 0;
@@ -299,12 +358,9 @@ impl CrabBoyApp {
         if !system.battery_backed() {
             return;
         }
-        let data = system.save_data();
         if let Some(sav) = &self.sav_path {
-            if !data.is_empty() {
-                if let Err(e) = std::fs::write(sav, &data) {
-                    eprintln!("failed to write save {sav}: {e}");
-                }
+            if let Err(e) = persist_save(system.as_ref(), sav) {
+                eprintln!("failed to write save {sav}: {e}");
             }
         }
         let rtc = system.rtc_data();
@@ -490,7 +546,7 @@ impl CrabBoyApp {
         for &k in &newly {
             match k {
                 egui::Key::P => self.paused = !self.paused,
-                egui::Key::R => self.reset(),
+                egui::Key::R => self.reset(ctx),
                 egui::Key::F => self.fast_forward = !self.fast_forward,
                 egui::Key::F1 => self.state_key(0, shift),
                 egui::Key::F2 => self.state_key(1, shift),
@@ -507,8 +563,12 @@ impl CrabBoyApp {
 
     fn draw_screen(&mut self, ui: &mut egui::Ui) {
         let Some(system) = &self.system else {
-            ui.label("No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file.");
-            // 3DS payloads (.firm) load as well when built with the `ctr` feature.
+            ui.label(if cfg!(feature = "ctr") {
+                "No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file, \
+                 a decrypted .3ds/.cci/.cxi image, a .3dsx or a .firm."
+            } else {
+                "No ROM loaded. Use the file picker or drag & drop a .gb/.gbc/.gba file."
+            });
             return;
         };
         let layout = Layout::of(system.as_ref());
@@ -621,18 +681,18 @@ impl eframe::App for CrabBoyApp {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open ROM...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Game Boy / GBA ROM", &["gb", "gbc", "gba"])
-                            .add_filter("3DS firmware payload", &["firm"])
-                            .pick_file()
-                        {
+                        let mut dialog = rfd::FileDialog::new();
+                        for (label, extensions) in rom_filters() {
+                            dialog = dialog.add_filter(label, &extensions);
+                        }
+                        if let Some(path) = dialog.pick_file() {
                             let p = path.to_string_lossy().to_string();
                             self.load_rom(&p, ctx);
                         }
                         ui.close_menu();
                     }
                     if ui.button("Reset").clicked() {
-                        self.reset();
+                        self.reset(ctx);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -679,7 +739,9 @@ impl eframe::App for CrabBoyApp {
                     ui.label("Arrows: D-pad");
                     ui.label("Z: A    X: B");
                     ui.label("Enter: Start    Backspace: Select");
-                    ui.label("A: L (GBA)    S: R (GBA)");
+                    ui.label("A: L    S: R");
+                    ui.label("C: X    V: Y    Q: ZL    W: ZR (3DS)");
+                    ui.label("I/J/K/L: circle pad    mouse: touch screen (3DS)");
                     ui.label("P: Pause    R: Reset    F: Fast-forward");
                     ui.label("F1-F4: Save state    Shift+F1-F4: Load state");
                     ui.label("F5: Quick save    F9: Quick load");
@@ -760,4 +822,59 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(CrabBoyApp::new(cc, rom_path, bios_path, audio)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An MBC1 cartridge with 8 KB of battery-backed RAM.
+    fn battery_cart() -> Box<dyn System> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x104..0x10C].copy_from_slice(&[0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B]);
+        rom[0x147] = 0x03;
+        rom[0x149] = 0x02;
+        crab_systems::load(rom).unwrap()
+    }
+
+    #[test]
+    fn a_save_survives_quit_and_reload() {
+        let dir = std::env::temp_dir().join(format!("crab-desktop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom = dir.join("game.gb").to_string_lossy().into_owned();
+        let sav = sav_path_for(&rom).unwrap();
+        assert!(sav.ends_with("game.sav"));
+
+        let mut first = battery_cart();
+        let mut data = first.save_data();
+        data[0] = 0x42;
+        first.load_data(&data);
+        assert!(persist_save(first.as_ref(), &sav).unwrap());
+
+        let mut second = battery_cart();
+        assert!(restore_save(second.as_mut(), &sav));
+        assert_eq!(second.save_data()[0], 0x42);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_console_without_saves_writes_nothing() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x104..0x10C].copy_from_slice(&[0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B]);
+        let mut system = crab_systems::load(rom).unwrap();
+        let sav = std::env::temp_dir()
+            .join("crab-desktop-never-written.sav")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!persist_save(system.as_ref(), &sav).unwrap());
+        assert!(!restore_save(system.as_mut(), &sav));
+        assert!(!std::path::Path::new(&sav).exists());
+    }
+
+    #[test]
+    fn the_file_picker_offers_every_console() {
+        let filters = rom_filters();
+        assert!(filters[0].1.contains(&"gba"));
+        assert_eq!(filters.len(), crab_systems::Kind::ALL.len() + 1);
+    }
 }
