@@ -123,6 +123,15 @@ pub fn event_handle(h: &mut Horizon, slot: &mut Option<ObjId>) -> Handle {
     h.kernel.open(id)
 }
 
+/// Signal the event a client handed over as `handle`, if it is one.
+pub fn signal_handle(h: &mut Horizon, handle: Handle) {
+    if let Some(id) = h.kernel.resolve(handle) {
+        if matches!(h.kernel.objects[id], Object::Event { .. }) {
+            h.kernel.signal(id);
+        }
+    }
+}
+
 /// Copy `bytes` to the client's static buffer `id`, cut to its room, and
 /// add the descriptor that tells it so.
 pub fn to_static(h: &mut Horizon, reply: Reply, id: u32, bytes: &[u8]) -> Reply {

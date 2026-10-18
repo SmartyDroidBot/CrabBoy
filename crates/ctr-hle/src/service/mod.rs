@@ -10,14 +10,21 @@
 //! with success and zeros and logs each command once, or stops the process
 //! when the console is strict.
 
+pub mod ac;
+pub mod act;
+pub mod am;
 pub mod apt;
+pub mod boss;
+pub mod cecd;
 pub mod cfg;
 pub mod dsp;
+pub mod frd;
 pub mod fs;
 pub mod gsp;
 pub mod hid;
 pub mod ldr_ro;
 pub mod ndm;
+pub mod ptm;
 pub mod simple;
 pub mod table;
 #[cfg(test)]
@@ -176,6 +183,10 @@ pub fn canonical(name: &str) -> &str {
         "cfg:u" | "cfg:s" | "cfg:i" => "cfg",
         "hid:USER" | "hid:SPVR" => "hid",
         "qtm:u" | "qtm:s" | "qtm:sp" => "qtm",
+        "ac:u" | "ac:i" => "ac:u",
+        "act:u" | "act:a" => "act:u",
+        "frd:u" | "frd:a" => "frd:u",
+        "boss:U" | "boss:P" => "boss:U",
         other => other,
     }
 }
@@ -193,6 +204,13 @@ pub fn standard(name: &str) -> Option<Box<dyn Service>> {
         "ldr:ro" => ldr_ro::service(),
         "hid" => Box::new(hid::Hid::default()),
         "ndm:u" => Box::new(ndm::Ndm::default()),
+        "ptm:u" => Box::new(ptm::Ptm::default()),
+        "ac:u" => Box::new(ac::Ac::default()),
+        "act:u" => Box::new(act::Act::default()),
+        "am:app" => Box::new(am::Am),
+        "boss:U" => Box::new(boss::Boss::default()),
+        "cecd:u" => Box::new(cecd::Cecd::default()),
+        "frd:u" => Box::new(frd::Frd::default()),
         "news:u" => simple::news(),
         "nim:aoc" => simple::nim_aoc(),
         "dlp:SRVR" => simple::dlp_server(),
