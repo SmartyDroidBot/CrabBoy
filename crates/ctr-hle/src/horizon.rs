@@ -6,11 +6,14 @@
 //! delivered; when no thread can run, time jumps to the next event. Nothing
 //! depends on the host, so a run repeats exactly.
 
-use crate::kernel::{Kernel, Object, ThreadId};
+use crate::ipc::{self, Reply, Request};
+use crate::kernel::{Handle, Kernel, Object, ThreadId, INVALID_HANDLE};
 use crate::memory::{
     AddressSpace, BusState, HleBus, Perm, CODE_BASE, LINEAR_BASE_OLD, PAGE, STACK_TOP, TLS_BASE,
     TLS_LEN,
 };
+use crate::result::{self, ResultCode};
+use crate::service::{self, Service, Stub, Vacant};
 use crate::svc::{self, Outcome};
 use arm_core::{Arch, Cpu, HostTrap, HostTrapKind};
 use ctr_core::bus::PhysMem;
@@ -21,6 +24,7 @@ use ctr_core::sched::Queue;
 use ctr_fs::ThreeDsx;
 use emu_core::video::Frame;
 use emu_core::{Button, Screen, System};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// ARM11 cycles a thread runs before due events are delivered. Coarser than
 /// the low-level machine's, which has three processors to keep in step.
@@ -37,6 +41,8 @@ const DEFAULT_FRAMEBUFFERS: [u32; 2] = [0x1830_0000, 0x1834_6500];
 const LOG_LINES: usize = 1000;
 /// Threads whose thread-local storage fits the pages set aside for it.
 const MAX_THREADS: u32 = 8 * (PAGE / TLS_LEN);
+/// Where the kernel puts shared memory a process maps without saying where.
+const SHARED_BASE: u32 = 0x1000_0000;
 
 /// What the clock delivers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -65,6 +71,8 @@ pub struct Process {
     pub heap_len: u32,
     /// Thread-local storage areas handed out.
     tls_used: u32,
+    /// The next address for shared memory mapped where the kernel likes.
+    next_shared: u32,
 }
 
 impl Process {
@@ -80,6 +88,14 @@ impl Process {
         self.space.write_bytes(mem, addr, &[0; TLS_LEN as usize])?;
         self.tls_used += 1;
         Some(addr)
+    }
+
+    /// An address for `len` bytes of shared memory the process did not place.
+    pub fn place_shared(&mut self, len: u32) -> u32 {
+        let addr = self.next_shared;
+        // A page of nothing between blocks.
+        self.next_shared += len.div_ceil(PAGE) * PAGE + PAGE;
+        addr
     }
 }
 
@@ -100,6 +116,14 @@ pub struct Horizon {
     pub log: Vec<String>,
     /// Why the process was stopped, if the kernel had to stop it.
     pub fatal: Option<String>,
+    /// The services, by the index a session names.
+    pub services: Vec<Box<dyn Service>>,
+    registry: BTreeMap<String, usize>,
+    /// Requests no service could answer, each reported once.
+    reported: BTreeSet<(String, u16)>,
+    /// Stop the process at the first request no service can answer, rather
+    /// than answering it with success and zeros.
+    pub strict: bool,
 }
 
 impl Horizon {
@@ -132,6 +156,7 @@ impl Horizon {
             linear_len: 0,
             heap_len: 0,
             tls_used: 0,
+            next_shared: SHARED_BASE,
         };
         let tls = process.allocate_tls(&mut mem).ok_or_else(out_of_memory)?;
 
@@ -159,6 +184,10 @@ impl Horizon {
             title: String::new(),
             log: Vec::new(),
             fatal: None,
+            services: Vec::new(),
+            registry: BTreeMap::new(),
+            reported: BTreeSet::new(),
+            strict: false,
         };
         console.reschedule();
         Ok(console)
@@ -183,6 +212,106 @@ impl Horizon {
         for thread in &mut self.kernel.threads {
             thread.state = crate::kernel::State::Dead;
         }
+    }
+
+    fn register(&mut self, name: &str, service: Box<dyn Service>) -> usize {
+        self.services.push(service);
+        let index = self.services.len() - 1;
+        self.registry.insert(name.to_string(), index);
+        index
+    }
+
+    fn session(&mut self, service: usize, object: u32) -> Handle {
+        self.kernel
+            .create_handle(Object::Session { service, object })
+    }
+
+    /// A session with the service called `name`, what `srv:GetServiceHandle`
+    /// hands out. A service nobody has written is a stub.
+    pub fn connect_service(&mut self, name: &str) -> Handle {
+        let index = match self.registry.get(name) {
+            Some(&index) => index,
+            None => {
+                let service = service::standard(name).unwrap_or_else(|| {
+                    Box::new(Stub {
+                        name: name.to_string(),
+                    })
+                });
+                self.register(name, service)
+            }
+        };
+        self.session(index, 0)
+    }
+
+    /// A session with a named port: `srv:` or `err:f`.
+    pub fn connect_port(&mut self, name: &str) -> Option<Handle> {
+        let key = format!("port {name}");
+        let index = match self.registry.get(&key) {
+            Some(&index) => index,
+            None => {
+                let port = service::port(name)?;
+                self.register(&key, port)
+            }
+        };
+        Some(self.session(index, 0))
+    }
+
+    /// A new session leading to `object` of the service answering now, for
+    /// a service that hands out sessions of its own.
+    pub fn sub_session(&mut self, service: &str, object: u32) -> Handle {
+        let index = self.registry[service];
+        self.session(index, object)
+    }
+
+    /// The answer to a request no service can give: success and zeros, once
+    /// noted; or, on a strict console, the end of the process.
+    pub fn unhandled(&mut self, service: &str, request: &Request) -> Reply {
+        let key = (service.to_string(), request.command());
+        if self.reported.insert(key) {
+            let words: Vec<String> = request.words.iter().map(|w| format!("{w:#x}")).collect();
+            self.note(format!(
+                "{service} command {:#06x} is not implemented ({})",
+                request.command(),
+                words.join(" ")
+            ));
+        }
+        if self.strict {
+            self.stop(format!(
+                "{service} command {:#06x} is not implemented",
+                request.command()
+            ));
+        }
+        Reply::new(request.command(), result::SUCCESS).words(&[0; 8])
+    }
+
+    /// `SendSyncRequest`: the calling thread's command buffer goes to the
+    /// service behind `handle` and the reply comes back in its place.
+    pub fn send_request(&mut self, handle: Handle) -> ResultCode {
+        let Some(&Object::Session { service, object }) = self.kernel.object(handle) else {
+            return INVALID_HANDLE;
+        };
+        let Some(current) = self.kernel.current else {
+            return INVALID_HANDLE;
+        };
+        let buffer = self.kernel.threads[current].tls + ipc::COMMAND_BUFFER;
+        let space = &self.process.space;
+        let header = space.read32(&self.mem, buffer).unwrap_or(0);
+        let len = Request::len_of(header).min(ipc::MAX_WORDS);
+        let words = (0..len as u32)
+            .map(|n| space.read32(&self.mem, buffer + n * 4).unwrap_or(0))
+            .collect();
+        let request = Request { words };
+
+        let mut answering = std::mem::replace(&mut self.services[service], Box::new(Vacant));
+        let reply = answering.call(self, object, &request);
+        self.services[service] = answering;
+
+        for (n, word) in reply.encode().into_iter().enumerate() {
+            self.process
+                .space
+                .write32(&mut self.mem, buffer + n as u32 * 4, word);
+        }
+        result::SUCCESS
     }
 
     /// Register `n` of the thread making a supervisor call.

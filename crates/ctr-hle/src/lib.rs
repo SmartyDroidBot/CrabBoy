@@ -16,9 +16,11 @@
 //! images only and contains no keys.
 
 pub mod horizon;
+pub mod ipc;
 pub mod kernel;
 pub mod memory;
 pub mod result;
+pub mod service;
 pub mod svc;
 
 pub use horizon::Horizon;

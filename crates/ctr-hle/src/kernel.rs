@@ -72,14 +72,17 @@ pub enum Object {
         interval: u64,
     },
     Arbiter,
-    /// Physical memory a process can map: `pa`, `len`.
+    /// Memory a process can map more than once, or share with a service:
+    /// its physical pages, and the permissions its creator allows others.
     SharedMemory {
-        pa: u32,
-        len: u32,
+        pages: Vec<u32>,
+        other_perm: u8,
     },
-    /// The client end of a session with the service of that index.
+    /// The client end of a session with the service of that index, leading
+    /// to one of its objects (0 for the service itself).
     Session {
         service: usize,
+        object: u32,
     },
 }
 

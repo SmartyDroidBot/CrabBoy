@@ -8,8 +8,9 @@
 
 use crate::horizon::{cycles_of, HleEvent, Horizon};
 use crate::kernel::{Object, Reset, INVALID_HANDLE, OUT_OF_RANGE, TIMEOUT};
-use crate::memory::{Perm, HEAP_BASE, PAGE};
+use crate::memory::{MemState, Perm, HEAP_BASE, PAGE};
 use crate::result::{self, ResultCode};
+use crate::service::PORT_NOT_FOUND;
 use arm_core::{Arch, Cpu};
 
 /// What became of a call.
@@ -66,6 +67,16 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
             let (code, addr) = control_memory(h);
             h.ret_code(code);
             h.ret(1, addr);
+        }
+        0x02 => {
+            let info = h.process.space.query(h.reg(2));
+            h.ret_code(result::SUCCESS);
+            h.ret(1, info.base);
+            h.ret(2, info.size);
+            h.ret(3, info.perm.0 as u32);
+            h.ret(4, info.state as u32);
+            // Page flags: none locked or changed.
+            h.ret(5, 0);
         }
         0x03 => {
             h.note("the process exited".to_string());
@@ -166,6 +177,19 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
             h.ret(1, handle);
         }
         0x1B..=0x1D => timer(h, number),
+        0x1E => create_memory_block(h),
+        0x1F => map_memory_block(h),
+        0x20 => {
+            let code = match h.kernel.object(h.reg(0)) {
+                Some(Object::SharedMemory { pages, .. }) => {
+                    let len = pages.len() as u32 * PAGE;
+                    h.process.space.unmap(h.reg(1), len);
+                    result::SUCCESS
+                }
+                _ => INVALID_HANDLE,
+            };
+            h.ret_code(code);
+        }
         0x21 => {
             let handle = h.kernel.create_handle(Object::Arbiter);
             h.ret_code(result::SUCCESS);
@@ -200,6 +224,31 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
             h.ret(0, now as u32);
             h.ret(1, (now >> 32) as u32);
         }
+        0x2D => {
+            let name = h
+                .process
+                .space
+                .read_bytes(&h.mem, h.reg(1), 12)
+                .map(|bytes| {
+                    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                    String::from_utf8_lossy(&bytes[..end]).into_owned()
+                })
+                .unwrap_or_default();
+            match h.connect_port(&name) {
+                Some(handle) => {
+                    h.ret_code(result::SUCCESS);
+                    h.ret(1, handle);
+                }
+                None => {
+                    h.note(format!("no port is called {name:?}"));
+                    h.ret_code(PORT_NOT_FOUND);
+                }
+            }
+        }
+        0x32 => {
+            let code = h.send_request(h.reg(0));
+            h.ret_code(code);
+        }
         0x35 => {
             // One process, and this is its number.
             h.ret_code(result::SUCCESS);
@@ -232,6 +281,74 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
         _ => return Outcome::Unknown,
     }
     Outcome::Done
+}
+
+/// `CreateMemoryBlock(other permissions, address, size, own permissions)`,
+/// as the veneer leaves the registers: memory the process already has, or
+/// fresh memory if the address is zero.
+fn create_memory_block(h: &mut Horizon) {
+    let (other_perm, addr, size) = (h.reg(0), h.reg(1), h.reg(2));
+    if size == 0 || !size.is_multiple_of(PAGE) || !addr.is_multiple_of(PAGE) {
+        return h.ret_code(result::MISALIGNED_SIZE);
+    }
+    let pages: Option<Vec<u32>> = if addr == 0 {
+        h.process.space.fcram.take(size).map(|pa| {
+            if let Some(bytes) = h.mem.slice_mut(pa, size as usize) {
+                bytes.fill(0);
+            }
+            (0..size / PAGE).map(|n| pa + n * PAGE).collect()
+        })
+    } else {
+        (0..size / PAGE)
+            .map(|n| h.process.space.v2p(addr + n * PAGE))
+            .collect()
+    };
+    let Some(pages) = pages else {
+        return h.ret_code(if addr == 0 {
+            result::OUT_OF_MEMORY
+        } else {
+            result::INVALID_ADDRESS
+        });
+    };
+    let handle = h.kernel.create_handle(Object::SharedMemory {
+        pages,
+        other_perm: other_perm as u8 & 3,
+    });
+    h.ret_code(result::SUCCESS);
+    h.ret(1, handle);
+}
+
+/// `MapMemoryBlock(handle, address, own permissions, other permissions)`.
+/// Address zero lets the kernel choose; the address chosen comes back in r1.
+fn map_memory_block(h: &mut Horizon) {
+    let (addr, perm) = (h.reg(1), h.reg(2));
+    let Some(Object::SharedMemory { pages, other_perm }) = h.kernel.object(h.reg(0)).cloned()
+    else {
+        return h.ret_code(INVALID_HANDLE);
+    };
+    let len = pages.len() as u32 * PAGE;
+    let addr = if addr == 0 {
+        h.process.place_shared(len)
+    } else {
+        addr
+    };
+    // "Don't care" leaves it to what the creator allows.
+    let perm = if perm & 0x1000_0000 != 0 {
+        other_perm
+    } else {
+        perm as u8 & 3
+    };
+    for (n, pa) in pages.into_iter().enumerate() {
+        h.process.space.map_as(
+            addr + n as u32 * PAGE,
+            pa,
+            PAGE,
+            Perm(perm),
+            MemState::Shared,
+        );
+    }
+    h.ret_code(result::SUCCESS);
+    h.ret(1, addr);
 }
 
 /// `CreateThread(priority, entry, argument, stack top, processor)`: r0 and r4
@@ -369,7 +486,9 @@ fn control_memory(h: &mut Horizon) -> (ResultCode, u32) {
             }
             match process.space.fcram.take_linear(size) {
                 Some(pa) => {
-                    process.space.map(addr, pa, size, perm);
+                    process
+                        .space
+                        .map_as(addr, pa, size, perm, MemState::Continuous);
                     process.linear_len += size;
                     (result::SUCCESS, addr)
                 }
@@ -399,11 +518,7 @@ fn control_memory(h: &mut Horizon) -> (ResultCode, u32) {
         }
         mem_op::PROTECT => match process.space.v2p(addr0) {
             Some(_) => {
-                for page in (addr0..addr0 + size).step_by(PAGE as usize) {
-                    if let Some(pa) = process.space.v2p(page) {
-                        process.space.map(page, pa, PAGE, perm);
-                    }
-                }
+                process.space.protect(addr0, size, perm);
                 (result::SUCCESS, addr0)
             }
             None => (result::INVALID_ADDRESS, 0),
@@ -414,5 +529,161 @@ fn control_memory(h: &mut Horizon) -> (ResultCode, u32) {
             ));
             (result::NOT_IMPLEMENTED, 0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::COMMAND_BUFFER;
+    use ctr_fs::threedsx::build;
+
+    /// A console whose program has not run: its one thread is current.
+    fn console() -> Horizon {
+        let code = 0xEF00_0003u32.to_le_bytes();
+        Horizon::from_3dsx(&build([&code, &[], &[]], 0, &Default::default())).unwrap()
+    }
+
+    /// Make supervisor call `number` with `regs` in r0 up, as the trap path
+    /// does, and return the caller's registers afterwards.
+    fn call(h: &mut Horizon, number: u32, regs: &[u32]) -> [u32; 6] {
+        for (n, &value) in regs.iter().enumerate() {
+            h.cpu.set_reg(n, value);
+        }
+        let current = h.kernel.current.unwrap();
+        h.kernel.threads[current].context = h.cpu.save_context();
+        assert_eq!(super::call(h, number), Outcome::Done);
+        let r = &h.kernel.threads[current].context.r;
+        [r[0], r[1], r[2], r[3], r[4], r[5]]
+    }
+
+    fn command_buffer(h: &Horizon) -> u32 {
+        h.kernel.threads[h.kernel.current.unwrap()].tls + COMMAND_BUFFER
+    }
+
+    fn write_words(h: &mut Horizon, addr: u32, words: &[u32]) {
+        for (n, &word) in words.iter().enumerate() {
+            h.process
+                .space
+                .write32(&mut h.mem, addr + n as u32 * 4, word);
+        }
+    }
+
+    fn read_words(h: &Horizon, addr: u32, len: u32) -> Vec<u32> {
+        (0..len)
+            .map(|n| h.process.space.read32(&h.mem, addr + n * 4).unwrap())
+            .collect()
+    }
+
+    /// Connect to a port whose name is put in the heap.
+    fn port(h: &mut Horizon, name: &[u8; 8]) -> [u32; 6] {
+        if h.process.space.v2p(HEAP_BASE).is_none() {
+            call(h, 0x01, &[3, HEAP_BASE, 0, PAGE, 3]);
+        }
+        let words = [
+            u32::from_le_bytes(name[..4].try_into().unwrap()),
+            u32::from_le_bytes(name[4..].try_into().unwrap()),
+            0,
+        ];
+        write_words(h, HEAP_BASE, &words);
+        call(h, 0x2D, &[0, HEAP_BASE])
+    }
+
+    #[test]
+    fn a_service_handle_comes_from_srv_and_an_unwritten_service_is_a_stub() {
+        let mut h = console();
+        let srv = port(&mut h, b"srv:\0\0\0\0")[1];
+        let buffer = command_buffer(&h);
+        write_words(&mut h, buffer, &[0x0001_0002, 0x20, 0]);
+        assert_eq!(call(&mut h, 0x32, &[srv])[0], 0);
+        assert_eq!(read_words(&h, buffer, 2), [0x0001_0040, 0]);
+
+        let name = [u32::from_le_bytes(*b"hid:"), u32::from_le_bytes(*b"USER")];
+        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 8, 0]);
+        call(&mut h, 0x32, &[srv]);
+        let reply = read_words(&h, buffer, 4);
+        assert_eq!(reply[..3], [0x0005_0042, 0, 0x10]);
+        let hid = reply[3];
+        assert!(matches!(h.kernel.object(hid), Some(Object::Session { .. })));
+
+        // The stub answers with success and zeros, and says so once.
+        for _ in 0..2 {
+            write_words(&mut h, buffer, &[0x000A_0000, 0x1234]);
+            assert_eq!(call(&mut h, 0x32, &[hid])[0], 0);
+        }
+        assert_eq!(read_words(&h, buffer, 3), [0x000A_0240, 0, 0]);
+        let notes: Vec<_> = h.log.iter().filter(|l| l.contains("hid:USER")).collect();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+
+        // A second handle reaches the same service.
+        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 8, 0]);
+        call(&mut h, 0x32, &[srv]);
+        let again = read_words(&h, buffer, 4)[3];
+        assert_ne!(again, hid);
+        assert_eq!(h.kernel.object(again), h.kernel.object(hid));
+
+        // Strict, the stub stops the process instead.
+        h.strict = true;
+        write_words(&mut h, buffer, &[0x000B_0000]);
+        call(&mut h, 0x32, &[hid]);
+        let why = h.fatal.clone().unwrap();
+        assert!(why.contains("hid:USER command 0x000b"), "{why}");
+    }
+
+    #[test]
+    fn requests_need_a_session_and_ports_need_a_name_that_exists() {
+        let mut h = console();
+        assert_eq!(call(&mut h, 0x32, &[0x1234])[0], INVALID_HANDLE.0);
+        assert_eq!(port(&mut h, b"nope\0\0\0\0")[0], PORT_NOT_FOUND.0);
+    }
+
+    #[test]
+    fn a_fatal_error_report_stops_the_process() {
+        let mut h = console();
+        let errf = port(&mut h, b"err:f\0\0\0")[1];
+        let buffer = command_buffer(&h);
+        let mut message = [0u32; 33];
+        message[0] = 0x0001_0800;
+        message[1] = 4;
+        message[2] = 0xC8A0_4554;
+        message[3] = 0x0010_0040;
+        message[9] = u32::from_le_bytes(*b"oops");
+        write_words(&mut h, buffer, &message);
+        call(&mut h, 0x32, &[errf]);
+        let why = h.fatal.clone().unwrap();
+        assert!(
+            why.contains("result 0xc8a04554, pc 0x00100040, \"oops\""),
+            "{why}"
+        );
+        assert!(!h.running());
+    }
+
+    #[test]
+    fn a_memory_block_maps_the_same_pages_twice() {
+        let mut h = console();
+        let r = call(&mut h, 0x1E, &[1, 0, 2 * PAGE, 3]);
+        assert_eq!(r[0], 0);
+        let block = r[1];
+        let first = call(&mut h, 0x1F, &[block, 0, 3, 1]);
+        assert_eq!(first[..2], [0, 0x1000_0000]);
+        let second = call(&mut h, 0x1F, &[block, 0x1100_0000, 0x1000_0000, 0]);
+        assert_eq!(second[1], 0x1100_0000);
+
+        h.process.space.write32(&mut h.mem, 0x1000_1FFC, 0xCAFE);
+        assert_eq!(h.process.space.read32(&h.mem, 0x1100_1FFC), Some(0xCAFE));
+        let info = call(&mut h, 0x02, &[0, 0, 0x1100_0010]);
+        assert_eq!(
+            info[1..5],
+            [0x1100_0000, 2 * PAGE, 1, MemState::Shared as u32]
+        );
+        assert_eq!(
+            h.process.space.resolve(0x1100_0000, Perm::W),
+            None,
+            "the creator allowed others to read only"
+        );
+
+        assert_eq!(call(&mut h, 0x20, &[block, 0x1000_0000])[0], 0);
+        assert_eq!(h.process.space.v2p(0x1000_0000), None);
+        assert_eq!(h.process.space.read32(&h.mem, 0x1100_1FFC), Some(0xCAFE));
     }
 }

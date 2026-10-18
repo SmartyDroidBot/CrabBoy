@@ -78,6 +78,39 @@ the decrementing kinds store the word minus one before blocking.
 Timers and timeouts are events on the shared clock, so they take effect at
 the end of the quantum in which they fall due.
 
+## Shared memory
+
+A memory block is a list of physical pages: fresh, zeroed memory when it is
+created at address zero, or the pages behind the address the creator gives.
+Mapping it again maps the same pages, with the permissions asked for, or
+with what the creator allows others when the caller does not care
+(0x10000000). Address zero lets the kernel choose; it places blocks from
+0x10000000 up with a free page between them. `QueryMemory` reports runs of
+pages with the same permissions and state (free, static, code, private,
+shared, continuous for the linear heap).
+
+## IPC and services (`ipc.rs`, `service/`; 3dbrew, "IPC", "Services")
+
+Services are host code that share the process's handle table and memory,
+so a request needs no translation: a handle in it is the client's own, and a
+buffer descriptor is followed by the client's own address, which a service
+reads or writes in place. `SendSyncRequest` reads the message from the
+command buffer (thread-local storage + 0x80), the service answers, and the
+reply is written back with its own header. A session handle names a service
+and, for services that hand out sessions of their own, one of its objects.
+
+Two ports can be connected to by name: `srv:`, the service manager, and
+`err:f`. `srv:` answers RegisterClient, EnableNotification (a semaphore
+nothing signals), GetServiceHandle, the subscription commands (nothing is
+published), ReceiveNotification (none) and IsServiceRegistered (always).
+GetServiceHandle hands every name a session, without checking the
+process's access list. A fatal error sent to `err:f` stops the process with
+its type, result code, address and, for a failure, its message.
+
+A service that is not written yet is a stub: every command gets success and
+zeros, and the first call of each command is logged with its words. A
+strict console (`Horizon::strict`) stops the process there instead.
+
 ## Supervisor calls (`svc.rs`; 3dbrew, "SVC")
 
 Arguments arrive in r0-r4 as libctru's veneers leave them; the result code
@@ -85,6 +118,7 @@ goes back in r0 and further results from r1.
 
 | Number | Call | Behaviour |
 |---|---|---|
+| 0x02 | QueryMemory | Base, size, permissions and state of the run around an address; no page flags |
 | 0x01 | ControlMemory | Commit (ordinary at the address asked, within the heap range; linear at the end of the linear heap, the kernel choosing the address), free (unmaps), protect. Sizes and addresses are whole pages |
 | 0x03 | ExitProcess | The process ends |
 | 0x08 | CreateThread | Priority, entry, argument, stack top, processor |
@@ -95,10 +129,13 @@ goes back in r0 and further results from r1.
 | 0x15, 0x16 | CreateSemaphore, ReleaseSemaphore | Returns the count before; past the maximum is an error |
 | 0x17-0x19 | CreateEvent, SignalEvent, ClearEvent | Reset types one-shot, sticky, pulse |
 | 0x1A-0x1D | CreateTimer, SetTimer, CancelTimer, ClearTimer | Initial delay and interval in nanoseconds |
+| 0x1E-0x20 | CreateMemoryBlock, MapMemoryBlock, UnmapMemoryBlock | See "Shared memory" |
 | 0x21, 0x22 | CreateAddressArbiter, ArbitrateAddress | All five types |
 | 0x23, 0x27 | CloseHandle, DuplicateHandle | |
 | 0x24, 0x25 | WaitSynchronization1, WaitSynchronizationN | Any or all, with a timeout; negative waits for ever, zero polls |
 | 0x28 | GetSystemTick | The clock: a tick is an ARM11 cycle |
+| 0x2D | ConnectToPort | `srv:` and `err:f` |
+| 0x32 | SendSyncRequest | See "IPC and services" |
 | 0x35, 0x37 | GetProcessId, GetThreadId | The process is number 1 |
 | 0x3C | Break | Stops the process with the reason |
 | 0x3D | OutputDebugString | Into `Horizon::log` |
@@ -119,5 +156,5 @@ change.
 
 ## Not yet
 
-The second application core, shared memory blocks, IPC and the services, game images, the
-GX command queue, saves, the DSP. See the H milestones in `overview.md`.
+The second application core, the services themselves, game images, the GX
+command queue, saves, the DSP. See the H milestones in `overview.md`.

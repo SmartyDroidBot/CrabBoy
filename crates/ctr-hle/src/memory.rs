@@ -53,16 +53,65 @@ impl Perm {
     }
 }
 
+/// What a page is used for, as `QueryMemory` reports it (3dbrew, "SVC",
+/// `MemoryState`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum MemState {
+    Free = 0,
+    Io = 2,
+    Static = 3,
+    Code = 4,
+    Private = 5,
+    Shared = 6,
+    Continuous = 7,
+}
+
+impl MemState {
+    fn from_bits(bits: u32) -> Self {
+        match bits {
+            2 => MemState::Io,
+            3 => MemState::Static,
+            4 => MemState::Code,
+            6 => MemState::Shared,
+            7 => MemState::Continuous,
+            0 => MemState::Free,
+            _ => MemState::Private,
+        }
+    }
+}
+
+/// A run of pages that look alike, as `QueryMemory` reports it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MemInfo {
+    pub base: u32,
+    pub size: u32,
+    pub perm: Perm,
+    pub state: MemState,
+}
+
 /// A page table entry: the physical page address, with the permissions in
-/// the low bits and bit 3 marking it present.
-#[derive(Clone, Copy, Default)]
+/// bits 0-2, bit 3 marking it present and the state in bits 4-7.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Entry(u32);
 
 impl Entry {
     const PRESENT: u32 = 8;
 
-    fn new(pa: u32, perm: Perm) -> Self {
-        Entry(pa & !(PAGE - 1) | Entry::PRESENT | perm.0 as u32)
+    fn new(pa: u32, perm: Perm, state: MemState) -> Self {
+        Entry(pa & !(PAGE - 1) | (state as u32) << 4 | Entry::PRESENT | perm.0 as u32)
+    }
+
+    /// What `QueryMemory` compares: permissions and state.
+    fn kind(self) -> (Perm, MemState) {
+        if self.0 & Entry::PRESENT == 0 {
+            (Perm::NONE, MemState::Free)
+        } else {
+            (
+                Perm(self.0 as u8 & 7),
+                MemState::from_bits(self.0 >> 4 & 0xF),
+            )
+        }
     }
 
     fn resolve(self, va: u32, wanted: Perm) -> Option<u32> {
@@ -120,18 +169,59 @@ impl AddressSpace {
             pages: vec![Entry::default(); PAGES],
             fcram: FcramAllocator::new(app_len),
         };
-        space.map(VRAM_VADDR, VRAM_BASE, VRAM_LEN as u32, Perm::RW);
+        space.map_as(
+            VRAM_VADDR,
+            VRAM_BASE,
+            VRAM_LEN as u32,
+            Perm::RW,
+            MemState::Static,
+        );
         space
     }
 
-    /// Map `len` bytes at `va` onto physical memory at `pa`. All three are
-    /// whole pages; whatever was mapped there is replaced.
+    /// Map `len` bytes at `va` onto physical memory at `pa` as private
+    /// memory. All three are whole pages; whatever was mapped there is
+    /// replaced.
     pub fn map(&mut self, va: u32, pa: u32, len: u32, perm: Perm) {
+        self.map_as(va, pa, len, perm, MemState::Private);
+    }
+
+    pub fn map_as(&mut self, va: u32, pa: u32, len: u32, perm: Perm, state: MemState) {
         for n in 0..len.div_ceil(PAGE) {
             let index = (va / PAGE + n) as usize;
             if let Some(entry) = self.pages.get_mut(index) {
-                *entry = Entry::new(pa + n * PAGE, perm);
+                *entry = Entry::new(pa + n * PAGE, perm, state);
             }
+        }
+    }
+
+    /// Change the permissions of mapped pages, keeping where they lie.
+    pub fn protect(&mut self, va: u32, len: u32, perm: Perm) {
+        for n in 0..len.div_ceil(PAGE) {
+            if let Some(entry) = self.pages.get_mut((va / PAGE + n) as usize) {
+                if entry.0 & Entry::PRESENT != 0 {
+                    entry.0 = entry.0 & !7 | perm.0 as u32;
+                }
+            }
+        }
+    }
+
+    /// The run of pages around `va` with the same permissions and state.
+    pub fn query(&self, va: u32) -> MemInfo {
+        let page = (va / PAGE) as usize;
+        let kind = self.pages[page].kind();
+        let first = (0..page)
+            .rev()
+            .find(|&p| self.pages[p].kind() != kind)
+            .map_or(0, |p| p + 1);
+        let end = (page + 1..self.pages.len())
+            .find(|&p| self.pages[p].kind() != kind)
+            .unwrap_or(self.pages.len());
+        MemInfo {
+            base: first as u32 * PAGE,
+            size: (end - first) as u32 * PAGE,
+            perm: kind.0,
+            state: kind.1,
         }
     }
 
@@ -379,6 +469,29 @@ mod tests {
         space.unmap(CODE_BASE, 0x1000);
         assert_eq!(space.v2p(CODE_BASE), None);
         assert!(space.v2p(CODE_BASE + 0x1000).is_some());
+    }
+
+    #[test]
+    fn query_reports_runs_of_alike_pages() {
+        let mut space = AddressSpace::new(64 << 20);
+        space.allocate(CODE_BASE, 0x3000, Perm::RX);
+        space.protect(CODE_BASE + 0x2000, 0x1000, Perm::R);
+        let code = space.query(CODE_BASE + 0x1800);
+        assert_eq!(
+            code,
+            MemInfo {
+                base: CODE_BASE,
+                size: 0x2000,
+                perm: Perm::RX,
+                state: MemState::Private
+            }
+        );
+        let free = space.query(CODE_BASE - 1);
+        assert_eq!(
+            (free.base, free.size, free.state),
+            (0, CODE_BASE, MemState::Free)
+        );
+        assert_eq!(space.query(VRAM_VADDR).state, MemState::Static);
     }
 
     #[test]
