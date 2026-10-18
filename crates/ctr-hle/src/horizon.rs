@@ -388,6 +388,16 @@ impl Horizon {
 
         let mut answering = std::mem::replace(&mut self.services[service], Box::new(Vacant));
         let reply = answering.call(self, object, &request);
+        if self.trace & crate::trace::IPC != 0 {
+            let words: Vec<String> = request.words.iter().map(|w| format!("{w:x}")).collect();
+            let line = format!(
+                "ipc: thread {current} {} [{}] -> {:#x}",
+                answering.name(),
+                words.join(" "),
+                reply.result()
+            );
+            self.note(line);
+        }
         self.services[service] = answering;
 
         for (n, word) in reply.encode().into_iter().enumerate() {
@@ -517,6 +527,11 @@ impl Horizon {
                     return;
                 };
                 self.kernel.threads[current].context = self.cpu.save_context();
+                // GetSystemTick, SleepThread and the waits are left out of
+                // the trace: programs poll with them.
+                let traced = self.trace & crate::trace::SVC != 0
+                    && !matches!(number, 0x0A | 0x22 | 0x24 | 0x25 | 0x28 | 0x32);
+                let args: [u32; 5] = std::array::from_fn(|n| self.cpu.reg(n));
                 match svc::call(self, number) {
                     Outcome::Done => {}
                     Outcome::Unknown => {
@@ -529,6 +544,15 @@ impl Horizon {
                             regs.join(", ")
                         ));
                     }
+                }
+                if traced {
+                    let out = &self.kernel.threads[current].context.r;
+                    let line = format!(
+                        "svc {number:#04x} at {:#010x}, thread {current}: {args:x?} -> {:x?}",
+                        trap.pc,
+                        &out[..3]
+                    );
+                    self.note(line);
                 }
                 self.cpu.load_context(&self.kernel.threads[current].context);
                 self.reschedule();
@@ -833,6 +857,26 @@ mod tests {
         // of the quantum that holds that moment.
         let tick = space.read32(&console.mem, HEAP_BASE + 4).unwrap() as u64;
         assert!((268_111..268_111 + 2 * QUANTUM).contains(&tick), "{tick}");
+    }
+
+    #[test]
+    fn a_traced_console_notes_its_supervisor_calls() {
+        let mut console = Horizon::from_3dsx(&hello()).unwrap();
+        console.trace = crate::trace::SVC;
+        console.run_frame();
+        let calls: Vec<&String> = console
+            .log
+            .iter()
+            .filter(|l| l.starts_with("svc"))
+            .collect();
+        // ControlMemory, OutputDebugString and ExitProcess; the sleep and
+        // the tick are left out.
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert!(
+            calls[0].contains("svc 0x01") && calls[0].contains("-> [0, 8000000"),
+            "{}",
+            calls[0]
+        );
     }
 
     #[test]
