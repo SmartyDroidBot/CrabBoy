@@ -15,7 +15,7 @@
 //! | 0x1FF00000 | 0x1FF00000 | DSP memory |
 
 use arm_core::{Abort, Bus, CpEffect, CpReg};
-use ctr_core::bus::phys::{FCRAM_BASE, VRAM_BASE, VRAM_LEN};
+use ctr_core::bus::phys::{DSP_RAM_BASE, DSP_RAM_LEN, FCRAM_BASE, VRAM_BASE, VRAM_LEN};
 use ctr_core::bus::PhysMem;
 
 pub const PAGE: u32 = 0x1000;
@@ -128,12 +128,18 @@ pub struct FcramAllocator {
     low: u32,
     /// First page given to ordinary memory; everything below is free.
     high: u32,
+    /// The size of the region.
+    len: u32,
 }
 
 impl FcramAllocator {
     /// An application region of `len` bytes at the start of FCRAM.
     pub fn new(len: u32) -> Self {
-        FcramAllocator { low: 0, high: len }
+        FcramAllocator {
+            low: 0,
+            high: len,
+            len,
+        }
     }
 
     /// `len` bytes (a whole number of pages) of ordinary memory.
@@ -154,6 +160,10 @@ impl FcramAllocator {
     pub fn free_bytes(&self) -> u32 {
         self.high - self.low
     }
+
+    pub fn used_bytes(&self) -> u32 {
+        self.len - self.free_bytes()
+    }
 }
 
 pub struct AddressSpace {
@@ -173,6 +183,14 @@ impl AddressSpace {
             VRAM_VADDR,
             VRAM_BASE,
             VRAM_LEN as u32,
+            Perm::RW,
+            MemState::Static,
+        );
+        // DSP memory, where a game and the DSP share their structures.
+        space.map_as(
+            DSP_RAM_BASE,
+            DSP_RAM_BASE,
+            DSP_RAM_LEN as u32,
             Perm::RW,
             MemState::Static,
         );
@@ -295,6 +313,15 @@ impl AddressSpace {
 pub struct BusState {
     exclusive: [Option<u32>; 2],
     pub fault_address: u32,
+}
+
+impl BusState {
+    /// What `CLREX` does: the kernel clears a core's exclusive access on
+    /// every thread switch, so a thread preempted between `LDREX` and `STREX`
+    /// always starts over.
+    pub fn clear_exclusive(&mut self, core: usize) {
+        self.exclusive[core] = None;
+    }
 }
 
 /// What a thread sees for the duration of a step.

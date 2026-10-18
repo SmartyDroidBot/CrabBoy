@@ -38,6 +38,31 @@ c7, which do nothing.
 Until a program sets its own, the display controllers show RGB8 framebuffers
 at the VRAM addresses a chainloader uses (0x18300000 and 0x18346500).
 
+## Loading (`loader.rs`; 3dbrew, "NCSD", "NCCH", "ExeFS", "RomFS")
+
+A 3DSX is placed as homebrew expects. A card image (NCSD) or a bare NCCH
+must carry the NoCrypto flag; anything encrypted is refused. The exheader
+gives the three code segments, the stack size, the main thread's priority,
+the memory mode and the kernel version the title was built for; `.code` is
+reverse-LZSS-decompressed if the exheader says so. Titles built for kernel
+2.44 or later get the linear heap at 0x30000000. The image is not copied:
+the RomFS (level 3 of its hash tree) and ExeFS are windows on the medium,
+read through `emu_core::Storage` as files are opened, so a 4 GB card image
+costs nothing to load.
+
+Configuration memory (0x1FF80000) and the shared page (0x1FF81000) are mapped
+read-only. They say kernel and firmware 2.52 (SDK version 0xF297), a retail
+unit, the memory region sizes for the title's mode (the three regions adding
+up to 128 MB), no wireless network, the 3D slider down and the battery light
+on. The shared page's clock is the date
+2020-01-01 at the start, then moved only by emulated time, at each VBlank,
+so a run is the same whatever the host's clock says.
+
+New threads start with the VFP enabled (FPEXC.EN) and an FPSCR of
+0x03C00000 (round to nearest, flush to zero, default NaN), which is what the
+SDK's start-up code expects. Each thread switch clears the exclusive monitor,
+as Horizon does with CLREX.
+
 ## Traps
 
 `arm_core::Bus::hle()` makes the processor park supervisor calls, undefined
@@ -107,6 +132,23 @@ GetServiceHandle hands every name a session, without checking the
 process's access list. A fatal error sent to `err:f` stops the process with
 its type, result code, address and, for a failure, its message.
 
+Services written so far:
+
+| Service | What it answers |
+|---|---|
+| `APT:U` (and `:A`, `:S`) | The lock (a mutex), the notification and resume events, Enable queuing a Wakeup parameter from the home menu and signalling resume, Receive/GlanceParameter, startup argument (none), the CPU time limit, applet utility calls |
+| `fs:USER` | The title's own archive (SelfNCCH): the RomFS and ExeFS files by name, read in place from the medium; save data and the SD card answer "not formatted" or "not found" for now |
+| `cfg:u` (and `:s`, `:i`) | Blocks of a console bought in the United States: English, USA, stereo, EULA agreed, no parental controls, an Old 3DS; a block not written out reads as zeros and is noted |
+| `dsp::DSP` | A null DSP, below |
+
+The null DSP runs no firmware. `LoadComponent` says the firmware is loaded;
+the audio pipe's Initialize command is answered with the fifteen shared
+structures' addresses (16-bit words from 0x8000, laid out with room for what
+3dbrew lists for each); then every 160 samples at 32,728 Hz (1,310,739
+cycles) the next frame count is written to the shared region of its parity
+(0x1FF50000 or 0x1FF70000) and the audio pipe's interrupt event is signalled.
+It produces silence. DSP memory (0x1FF00000, 512 KB) is mapped read/write.
+
 A service that is not written yet is a stub: every command gets success and
 zeros, and the first call of each command is logged with its words. A
 strict console (`Horizon::strict`) stops the process there instead.
@@ -134,9 +176,12 @@ goes back in r0 and further results from r1.
 | 0x23, 0x27 | CloseHandle, DuplicateHandle | |
 | 0x24, 0x25 | WaitSynchronization1, WaitSynchronizationN | Any or all, with a timeout; negative waits for ever, zero polls |
 | 0x28 | GetSystemTick | The clock: a tick is an ARM11 cycle |
+| 0x2A | GetSystemInfo | Memory in use (type 0), 0 for type 2, 5 processes for type 26 |
+| 0x2B | GetProcessInfo | Memory in use (0, 2), handles (4, 5), threads (7), the linear heap's offset from FCRAM (20); other types are "not available", 0xD8E007ED |
 | 0x2D | ConnectToPort | `srv:` and `err:f` |
 | 0x32 | SendSyncRequest | See "IPC and services" |
 | 0x35, 0x37 | GetProcessId, GetThreadId | The process is number 1 |
+| 0x38-0x3A | GetResourceLimit, its limits and current values | An application's limits: priority 0x18, its memory, 32 threads, events and mutexes, 8 semaphores and timers, 16 shared memory blocks, 2 arbiters |
 | 0x3C | Break | Stops the process with the reason |
 | 0x3D | OutputDebugString | Into `Horizon::log` |
 
@@ -156,5 +201,5 @@ change.
 
 ## Not yet
 
-The second application core, the services themselves, game images, the GX
-command queue, saves, the DSP. See the H milestones in `overview.md`.
+The second application core, `gsp::Gpu` and the GX command queue, `hid`,
+`ldr:ro` (CRO modules), saves, the DSP running its firmware. See the H milestones in `overview.md`.

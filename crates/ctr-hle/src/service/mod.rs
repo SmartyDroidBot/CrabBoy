@@ -10,6 +10,11 @@
 //! with success and zeros and logs each command once, or stops the process
 //! when the console is strict.
 
+pub mod apt;
+pub mod cfg;
+pub mod dsp;
+pub mod fs;
+
 use crate::horizon::Horizon;
 use crate::ipc::{Reply, Request};
 use crate::kernel::Object;
@@ -21,6 +26,9 @@ pub trait Service {
     /// Answer `request`, sent on a session to `object` of this service (0
     /// for the service itself).
     fn call(&mut self, h: &mut Horizon, object: u32, request: &Request) -> Reply;
+
+    /// A clock event the service scheduled with `Horizon::schedule_service`.
+    fn event(&mut self, _h: &mut Horizon, _tag: u32) {}
 }
 
 /// The place a service occupies while it is answering a request.
@@ -149,7 +157,23 @@ pub fn port(name: &str) -> Option<Box<dyn Service>> {
     }
 }
 
-/// The service registered under `name`, if one is written.
-pub fn standard(_name: &str) -> Option<Box<dyn Service>> {
-    None
+/// The one service behind names that are only different doors to it.
+pub fn canonical(name: &str) -> &str {
+    match name {
+        "APT:A" | "APT:S" | "APT:U" => "APT",
+        "cfg:u" | "cfg:s" | "cfg:i" => "cfg",
+        other => other,
+    }
+}
+
+/// The service registered under `name` (a canonical name), if one is
+/// written.
+pub fn standard(name: &str) -> Option<Box<dyn Service>> {
+    Some(match name {
+        "APT" => Box::new(apt::Apt::default()),
+        "fs:USER" => Box::new(fs::Fs::default()),
+        "cfg" => Box::new(cfg::Cfg),
+        "dsp::DSP" => Box::new(dsp::Dsp::default()),
+        _ => return None,
+    })
 }

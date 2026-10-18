@@ -6,12 +6,11 @@
 //! A call that blocks leaves the thread waiting; its results are written to
 //! its saved registers by whatever ends the wait.
 
-use crate::horizon::{cycles_of, HleEvent, Horizon};
+use crate::horizon::{cycles_of, thread_cpu, HleEvent, Horizon};
 use crate::kernel::{Object, Reset, INVALID_HANDLE, OUT_OF_RANGE, TIMEOUT};
 use crate::memory::{MemState, Perm, HEAP_BASE, PAGE};
 use crate::result::{self, ResultCode};
 use crate::service::PORT_NOT_FOUND;
-use arm_core::{Arch, Cpu};
 
 /// What became of a call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -224,6 +223,26 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
             h.ret(0, now as u32);
             h.ret(1, (now >> 32) as u32);
         }
+        0x2A => {
+            // GetSystemInfo(type, parameter). Only the application's
+            // region is in use: services take no memory here.
+            let used = h.process.space.fcram.used_bytes();
+            let value = match (h.reg(1), h.reg(2)) {
+                (0, 0 | 1) => used,
+                // System and base regions; memory the kernel took.
+                (0, _) | (2, _) => 0,
+                // Processes the kernel starts by itself: fs, sm, pm, pxi, loader.
+                (26, _) => 5,
+                (kind, param) => {
+                    h.note(format!("GetSystemInfo({kind}, {param}) is not implemented"));
+                    0
+                }
+            };
+            h.ret_code(result::SUCCESS);
+            h.ret(1, value);
+            h.ret(2, 0);
+        }
+        0x2B => get_process_info(h),
         0x2D => {
             let name = h
                 .process
@@ -261,6 +280,18 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
             }
             _ => h.ret_code(INVALID_HANDLE),
         },
+        0x38 => {
+            if !matches!(h.kernel.object(h.reg(1)), Some(Object::Process)) {
+                return {
+                    h.ret_code(INVALID_HANDLE);
+                    Outcome::Done
+                };
+            }
+            let handle = h.kernel.create_handle(Object::ResourceLimit);
+            h.ret_code(result::SUCCESS);
+            h.ret(1, handle);
+        }
+        0x39 | 0x3A => resource_limit_values(h, number == 0x39),
         0x3C => {
             let reason = h.reg(0);
             h.stop(format!("the program called Break (reason {reason})"));
@@ -282,6 +313,77 @@ pub fn call(h: &mut Horizon, number: u32) -> Outcome {
     }
     Outcome::Done
 }
+
+/// `GetProcessInfo(process, type)`, for the calling process.
+fn get_process_info(h: &mut Horizon) {
+    if !matches!(h.kernel.object(h.reg(1)), Some(Object::Process)) {
+        return h.ret_code(INVALID_HANDLE);
+    }
+    let value = match h.reg(2) {
+        // Memory used, with and without shared memory: the same here.
+        0 | 2 => h.process.space.fcram.used_bytes(),
+        1 | 3 => 0,
+        4 | 5 => h.kernel.open_handles() as u32,
+        7 => h.kernel.threads.len() as u32,
+        // What turns a linear heap address into a physical one.
+        20 => ctr_core::bus::phys::FCRAM_BASE.wrapping_sub(h.process.linear_base),
+        _ => return h.ret_code(NOT_AVAILABLE),
+    };
+    h.ret_code(result::SUCCESS);
+    h.ret(1, value);
+    h.ret(2, 0);
+}
+
+/// `GetResourceLimitLimitValues` and `...CurrentValues(values, limit, names,
+/// count)`: one 64-bit value per category named. The limits are those of
+/// the application category as Citra sets them; the current values count
+/// what the process has.
+fn resource_limit_values(h: &mut Horizon, limits: bool) {
+    let (out, names, count) = (h.reg(0), h.reg(2), h.reg(3));
+    if !matches!(h.kernel.object(h.reg(1)), Some(Object::ResourceLimit)) {
+        return h.ret_code(INVALID_HANDLE);
+    }
+    for n in 0..count.min(32) {
+        let Some(name) = h.process.space.read32(&h.mem, names + n * 4) else {
+            return h.ret_code(result::INVALID_ADDRESS);
+        };
+        let count_of =
+            |kind: fn(&Object) -> bool| h.kernel.objects.iter().filter(|o| kind(o)).count() as u64;
+        let value: u64 = match (name, limits) {
+            // The most urgent priority a thread may have.
+            (0, _) => 0x18,
+            (1, true) => {
+                h.process.space.fcram.used_bytes() as u64
+                    + h.process.space.fcram.free_bytes() as u64
+            }
+            (1, false) => h.process.space.fcram.used_bytes() as u64,
+            (2, true) => 32,
+            (2, false) => h.kernel.threads.len() as u64,
+            (3, true) => 32,
+            (3, false) => count_of(|o| matches!(o, Object::Event { .. })),
+            (4, true) => 32,
+            (4, false) => count_of(|o| matches!(o, Object::Mutex { .. })),
+            (5, true) => 8,
+            (5, false) => count_of(|o| matches!(o, Object::Semaphore { .. })),
+            (6, true) => 8,
+            (6, false) => count_of(|o| matches!(o, Object::Timer { .. })),
+            (7, true) => 16,
+            (7, false) => count_of(|o| matches!(o, Object::SharedMemory { .. })),
+            (8, true) => 2,
+            (8, false) => count_of(|o| matches!(o, Object::Arbiter)),
+            _ => 0,
+        };
+        let addr = out + n * 8;
+        h.process.space.write32(&mut h.mem, addr, value as u32);
+        h.process
+            .space
+            .write32(&mut h.mem, addr + 4, (value >> 32) as u32);
+    }
+    h.ret_code(result::SUCCESS);
+}
+
+/// What the kernel answers for an information type it does not provide.
+const NOT_AVAILABLE: ResultCode = ResultCode(0xD8E0_07ED);
 
 /// `CreateMemoryBlock(other permissions, address, size, own permissions)`,
 /// as the veneer leaves the registers: memory the process already has, or
@@ -362,7 +464,7 @@ fn create_thread(h: &mut Horizon) {
     let Some(tls) = h.process.allocate_tls(&mut h.mem) else {
         return h.ret_code(result::OUT_OF_MEMORY);
     };
-    let mut context = Cpu::new_user(Arch::V6k, entry, stack & !3).save_context();
+    let mut context = thread_cpu(entry, stack & !3).save_context();
     context.r[0] = argument;
     // Returning from the entry function without ExitThread is a fault.
     context.r[14] = 0;

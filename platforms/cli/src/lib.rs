@@ -169,6 +169,43 @@ pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     w
 }
 
+/// A file read where it lies, for images too large to hold in memory.
+pub struct FileStorage {
+    file: std::fs::File,
+    len: u64,
+}
+
+impl FileStorage {
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(FileStorage { file, len })
+    }
+}
+
+impl emu_core::Storage for FileStorage {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), emu_core::StorageError> {
+        use std::io::{Read, Seek, SeekFrom};
+        if offset
+            .checked_add(buf.len() as u64)
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(emu_core::StorageError::OutOfRange {
+                offset,
+                len: buf.len(),
+            });
+        }
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| self.file.read_exact(buf))
+            .map_err(|e| emu_core::StorageError::Host(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1023,6 +1023,7 @@ dependencies = [
  "crab-systems",
  "ctr-core",
  "ctr-fs",
+ "ctr-hle",
  "emu-core",
  "gb-core",
  "gba-core",

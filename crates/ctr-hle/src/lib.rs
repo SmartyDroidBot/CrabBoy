@@ -15,9 +15,11 @@
 //! This crate has no GUI, OS or WebAssembly dependencies. It opens decrypted
 //! images only and contains no keys.
 
+pub mod config;
 pub mod horizon;
 pub mod ipc;
 pub mod kernel;
+pub mod loader;
 pub mod memory;
 pub mod result;
 pub mod service;

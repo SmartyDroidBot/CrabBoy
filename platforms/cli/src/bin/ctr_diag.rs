@@ -47,6 +47,143 @@ fn collect(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
     }
 }
 
+/// The high-level mode: the program's log as it runs, its threads, and why
+/// it stopped.
+fn run_hle(
+    path: &str,
+    media: crab_cli::FileStorage,
+    frames: u64,
+    every: u64,
+    script: &[crab_cli::InputEvent],
+    args: &[String],
+) {
+    use ctr_hle::kernel::State;
+    use ctr_hle::Horizon;
+    let option = |name: &str| {
+        args.iter()
+            .find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_string))
+    };
+    let homebrew = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("3dsx"));
+    let console = if homebrew {
+        let image = std::fs::read(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
+        Horizon::from_3dsx(&image)
+    } else {
+        Horizon::from_media(Box::new(media))
+    };
+    let mut h = console.unwrap_or_else(|e| fail(e));
+    h.strict = args.iter().any(|a| a == "--strict");
+    if let Some(addr) =
+        option("watch").and_then(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok())
+    {
+        let now = h.process.space.read32(&h.mem, addr).unwrap_or(0);
+        h.watch = Some((addr, now));
+    }
+    println!("{}", h.info());
+    let started = std::time::Instant::now();
+    for frame in 0..frames {
+        for event in script.iter().filter(|e| e.frame == frame) {
+            if event.pressed {
+                h.press(event.button);
+            } else {
+                h.release(event.button);
+            }
+        }
+        h.run_frame();
+        for line in h.log.drain(..) {
+            println!("  [{:5}] {line}", frame + 1);
+        }
+        let last = frame + 1 == frames || !h.running();
+        if (frame + 1) % every == 0 || last {
+            let top = h.frame().to_rgba(&DMG_PALETTE);
+            let both = Layout::of(&h)
+                .compose(&h, &DMG_PALETTE)
+                .to_rgba(&DMG_PALETTE);
+            let ready = h
+                .kernel
+                .threads
+                .iter()
+                .filter(|t| t.state == State::Ready)
+                .count();
+            let waiting = h
+                .kernel
+                .threads
+                .iter()
+                .filter(|t| matches!(t.state, State::Waiting(_)))
+                .count();
+            println!(
+                "frame {:5}  top {:08x}  both {:08x}  threads {} ({ready} ready, {waiting} waiting)  {:.1}s",
+                frame + 1,
+                fnv1a32(&top),
+                fnv1a32(&both),
+                h.kernel.threads.len(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+        if !h.running() {
+            break;
+        }
+    }
+    if let Some(why) = &h.fatal {
+        println!("stopped: {why}");
+    }
+    println!("threads:");
+    for (id, thread) in h.kernel.threads.iter().enumerate() {
+        let regs = if h.kernel.current == Some(id) {
+            h.cpu.save_context().r
+        } else {
+            thread.context.r
+        };
+        println!(
+            "  {id:2}  priority {:2}  core {:2}  pc {:#010x}  lr {:#010x}  sp {:#010x}  {:?}",
+            thread.priority, thread.processor, regs[15], regs[14], regs[13], thread.state
+        );
+    }
+    println!("services: {}", h.service_names().join(", "));
+    if args.iter().any(|a| a == "--regs") {
+        for (id, thread) in h.kernel.threads.iter().enumerate() {
+            let regs = if h.kernel.current == Some(id) {
+                h.cpu.save_context().r
+            } else {
+                thread.context.r
+            };
+            let regs: Vec<String> = regs.iter().map(|r| format!("{r:08x}")).collect();
+            println!("  {id:2}  {}", regs.join(" "));
+        }
+    }
+    // Words of the process's memory, by virtual address.
+    for spec in args.iter().filter_map(|a| a.strip_prefix("--mem=")) {
+        let parsed = spec.split_once(',').and_then(|(addr, words)| {
+            let addr = u32::from_str_radix(addr.trim_start_matches("0x"), 16).ok()?;
+            Some((addr, words.parse::<u32>().ok()?))
+        });
+        let Some((addr, words)) = parsed else {
+            fail(format!("--mem={spec}: expected ADDR,WORDS"));
+        };
+        for n in 0..words {
+            let at = addr.wrapping_add(n * 4);
+            match h.process.space.read32(&h.mem, at) {
+                Some(word) => println!("  {at:08x}: {word:08x}"),
+                None => println!("  {at:08x}: not mapped"),
+            }
+        }
+    }
+    if let Some(prefix) = option("dump") {
+        for (index, name) in ["top", "bottom"].iter().enumerate() {
+            let frame = h.frame_at(index);
+            let png = encode_png(
+                frame.width as u32,
+                frame.height as u32,
+                &frame.to_rgba(&DMG_PALETTE),
+            );
+            let file = format!("{prefix}-{name}.png");
+            std::fs::write(&file, png).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+            println!("wrote {file}");
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut positional = args.iter().filter(|a| !a.starts_with("--"));
@@ -64,6 +201,16 @@ fn main() {
     let script = option("input")
         .map(|s| parse_input_script(&s).unwrap_or_else(|e| fail(e)))
         .unwrap_or_default();
+
+    // Firmware runs on the low-level machine; games and homebrew in the
+    // high-level mode.
+    let mut media =
+        crab_cli::FileStorage::open(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
+    let mut header = vec![0u8; emu_core::Storage::len(&media).min(0x200) as usize];
+    emu_core::Storage::read_at(&mut media, 0, &mut header).unwrap_or_else(|e| fail(e));
+    if ctr_fs::ImageKind::detect(&header) != Some(ctr_fs::ImageKind::Firm) {
+        return run_hle(path, media, frames, every, &script, &args);
+    }
 
     let firm = std::fs::read(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
     let mut ctr = Ctr::from_firm(firm).unwrap_or_else(|e| fail(e));

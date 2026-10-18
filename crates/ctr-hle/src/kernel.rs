@@ -78,6 +78,8 @@ pub enum Object {
         pages: Vec<u32>,
         other_perm: u8,
     },
+    /// The limits on what the process may create.
+    ResourceLimit,
     /// The client end of a session with the service of that index, leading
     /// to one of its objects (0 for the service itself).
     Session {
@@ -196,6 +198,11 @@ impl Kernel {
             return self.objects.iter().position(|o| *o == Object::Process);
         }
         *self.handles.get((handle as usize).checked_sub(1)?)?
+    }
+
+    /// How many handles are open.
+    pub fn open_handles(&self) -> usize {
+        self.handles.iter().filter(|h| h.is_some()).count()
     }
 
     pub fn object(&self, handle: Handle) -> Option<&Object> {

@@ -6,12 +6,11 @@
 //! delivered; when no thread can run, time jumps to the next event. Nothing
 //! depends on the host, so a run repeats exactly.
 
+use crate::config;
 use crate::ipc::{self, Reply, Request};
 use crate::kernel::{Handle, Kernel, Object, ThreadId, INVALID_HANDLE};
-use crate::memory::{
-    AddressSpace, BusState, HleBus, Perm, CODE_BASE, LINEAR_BASE_OLD, PAGE, STACK_TOP, TLS_BASE,
-    TLS_LEN,
-};
+use crate::loader::{self, Program};
+use crate::memory::{AddressSpace, BusState, HleBus, Perm, PAGE, STACK_TOP, TLS_BASE, TLS_LEN};
 use crate::result::{self, ResultCode};
 use crate::service::{self, Service, Stub, Vacant};
 use crate::svc::{self, Outcome};
@@ -21,19 +20,13 @@ use ctr_core::clock::{ARM11_HZ, FRAME_CYCLES};
 use ctr_core::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use ctr_core::gpu::GpuExt;
 use ctr_core::sched::Queue;
-use ctr_fs::ThreeDsx;
 use emu_core::video::Frame;
-use emu_core::{Button, Screen, System};
+use emu_core::{Button, Screen, Storage, System, Window};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// ARM11 cycles a thread runs before due events are delivered. Coarser than
 /// the low-level machine's, which has three processors to keep in step.
 pub const QUANTUM: u64 = 1024;
-/// The application's part of FCRAM on an Old 3DS in its default mode.
-const APPLICATION_MEMORY: u32 = 64 << 20;
-const MAIN_STACK_LEN: u32 = 0x4000;
-/// The main thread's priority when the image does not say (3DSX).
-const DEFAULT_PRIORITY: u8 = 0x30;
 /// Where the framebuffers lie in VRAM until a program sets its own: the
 /// addresses a chainloader uses (see `ctr_core::boot`).
 const DEFAULT_FRAMEBUFFERS: [u32; 2] = [0x1830_0000, 0x1834_6500];
@@ -53,6 +46,20 @@ pub enum HleEvent {
     ThreadWake(u32),
     /// A timer object fires.
     Timer(u32),
+    /// A service's own event: its index and a tag of its choosing.
+    Service(u32, u32),
+}
+
+/// A thread's processor state as the kernel starts it: user mode at `entry`
+/// on the stack `sp`, with the VFP enabled (the kernel switches VFP state
+/// lazily, so to a thread it is always there) and FPSCR at flush-to-zero,
+/// default NaN and rounding towards zero, as Citra sets it.
+pub fn thread_cpu(entry: u32, sp: u32) -> Cpu {
+    let mut cpu = Cpu::new_user(Arch::V6k, entry, sp);
+    let vfp = cpu.vfp_mut();
+    vfp.fpexc = 1 << 30;
+    vfp.fpscr = 0x03C0_0000;
+    cpu
 }
 
 /// Nanoseconds as ARM11 cycles, rounded down.
@@ -112,6 +119,14 @@ pub struct Horizon {
     /// `HID_PAD` as the hardware has it: a clear bit is a pressed button.
     pad: u16,
     title: String,
+    info: String,
+    pub program_id: u64,
+    /// The image the program came from, read as it asks.
+    pub media: Box<dyn Storage>,
+    /// Its RomFS on `media`: IVFC level 3, the file system proper.
+    pub romfs: Option<Window>,
+    /// Its ExeFS on `media`.
+    pub exefs: Option<Window>,
     /// Debug output of the program and the kernel's own remarks.
     pub log: Vec<String>,
     /// Why the process was stopped, if the kernel had to stop it.
@@ -124,35 +139,63 @@ pub struct Horizon {
     /// Stop the process at the first request no service can answer, rather
     /// than answering it with success and zeros.
     pub strict: bool,
+    /// A word to watch while debugging: each change is logged with the
+    /// instruction and thread that made it. Costs a read per instruction.
+    pub watch: Option<(u32, u32)>,
 }
 
 impl Horizon {
     /// A console running the 3DSX executable in `image`.
     pub fn from_3dsx(image: &[u8]) -> Result<Self, String> {
-        let file = ThreeDsx::parse(image).map_err(|e| e.to_string())?;
-        let placed = file.place(CODE_BASE).map_err(|e| e.to_string())?;
+        let program = loader::from_3dsx(image)?;
+        Horizon::boot(program, Box::new(image.to_vec()))
+    }
 
+    /// A console running the game in `media`: a card image or a program
+    /// content, read where it lies as the game asks.
+    pub fn from_media(mut media: Box<dyn Storage>) -> Result<Self, String> {
+        let program = loader::from_media(&mut *media)?;
+        Horizon::boot(program, media)
+    }
+
+    fn boot(program: Program, media: Box<dyn Storage>) -> Result<Self, String> {
         let mut mem = PhysMem::new();
-        let mut space = AddressSpace::new(APPLICATION_MEMORY);
+        let mut space = AddressSpace::new(program.app_memory);
         let out_of_memory = || "the program does not fit in memory".to_string();
-        let perms = [Perm::RX, Perm::R, Perm::RW];
-        for ((addr, bytes), perm) in placed.segments.iter().zip(perms) {
+        for (addr, bytes, perm) in &program.segments {
             if bytes.is_empty() {
                 continue;
             }
             space
-                .allocate(*addr, bytes.len() as u32, perm)
+                .allocate(*addr, bytes.len() as u32, *perm)
                 .ok_or_else(out_of_memory)?;
             space
                 .write_bytes(&mut mem, *addr, bytes)
                 .ok_or_else(out_of_memory)?;
         }
+        let stack = program.stack_size.div_ceil(PAGE) * PAGE;
         space
-            .allocate(STACK_TOP - MAIN_STACK_LEN, MAIN_STACK_LEN, Perm::RW)
+            .allocate(STACK_TOP - stack, stack, Perm::RW)
             .ok_or_else(out_of_memory)?;
+        // The two pages every process can read.
+        let pages = [
+            (
+                config::CONFIG_MEMORY,
+                config::config_memory(program.system_mode, program.app_memory),
+            ),
+            (config::SHARED_PAGE, config::shared_page(0)),
+        ];
+        for (va, page) in pages {
+            let pa = space
+                .allocate(va, PAGE, Perm::R)
+                .ok_or_else(out_of_memory)?;
+            mem.slice_mut(pa, PAGE as usize)
+                .ok_or_else(out_of_memory)?
+                .copy_from_slice(&page);
+        }
         let mut process = Process {
             space,
-            linear_base: LINEAR_BASE_OLD,
+            linear_base: program.linear_base,
             linear_len: 0,
             heap_len: 0,
             tls_used: 0,
@@ -164,10 +207,10 @@ impl Horizon {
         gpu.pdc[0].init_rgb8(DEFAULT_FRAMEBUFFERS[0], DEFAULT_FRAMEBUFFERS[0]);
         gpu.pdc[1].init_rgb8(DEFAULT_FRAMEBUFFERS[1], DEFAULT_FRAMEBUFFERS[1]);
 
-        let cpu = Cpu::new_user(Arch::V6k, placed.entry, STACK_TOP);
+        let cpu = thread_cpu(program.entry, STACK_TOP);
         let mut kernel = Kernel::new();
         kernel.create(Object::Process);
-        kernel.spawn(cpu.save_context(), DEFAULT_PRIORITY, 0, tls);
+        kernel.spawn(cpu.save_context(), program.priority, 0, tls);
 
         let mut clock = Queue::new();
         clock.schedule(FRAME_CYCLES as u64, HleEvent::VBlank);
@@ -181,21 +224,35 @@ impl Horizon {
             loaded: None,
             bus_state: BusState::default(),
             pad: 0x0FFF,
-            title: String::new(),
+            title: program.title,
+            info: program.info,
+            program_id: program.program_id,
+            media,
+            romfs: program.romfs,
+            exefs: program.exefs,
             log: Vec::new(),
             fatal: None,
             services: Vec::new(),
             registry: BTreeMap::new(),
             reported: BTreeSet::new(),
             strict: false,
+            watch: None,
         };
         console.reschedule();
         Ok(console)
     }
 
-    /// The console as a frontend drives it.
+    /// The console as a frontend drives it, for an image held in memory.
     pub fn system(image: Vec<u8>) -> Result<Box<dyn System>, String> {
-        Ok(Box::new(Horizon::from_3dsx(&image)?))
+        Ok(Box::new(match ctr_fs::ImageKind::detect(&image) {
+            Some(ctr_fs::ImageKind::ThreeDsx) => Horizon::from_3dsx(&image)?,
+            _ => Horizon::from_media(Box::new(image))?,
+        }))
+    }
+
+    /// The console for a game image read where it lies.
+    pub fn system_from_media(media: Box<dyn Storage>) -> Result<Box<dyn System>, String> {
+        Ok(Box::new(Horizon::from_media(media)?))
     }
 
     pub fn note(&mut self, line: String) {
@@ -229,15 +286,16 @@ impl Horizon {
     /// A session with the service called `name`, what `srv:GetServiceHandle`
     /// hands out. A service nobody has written is a stub.
     pub fn connect_service(&mut self, name: &str) -> Handle {
-        let index = match self.registry.get(name) {
+        let key = service::canonical(name);
+        let index = match self.registry.get(key) {
             Some(&index) => index,
             None => {
-                let service = service::standard(name).unwrap_or_else(|| {
+                let service = service::standard(key).unwrap_or_else(|| {
                     Box::new(Stub {
                         name: name.to_string(),
                     })
                 });
-                self.register(name, service)
+                self.register(key, service)
             }
         };
         self.session(index, 0)
@@ -314,6 +372,47 @@ impl Horizon {
         result::SUCCESS
     }
 
+    /// The ExeFS file called `name`, on the medium.
+    pub fn exefs_file(&mut self, name: &str) -> Option<Window> {
+        let exefs = self.exefs?;
+        let header = exefs
+            .read_vec(&mut *self.media, 0, ctr_fs::ncch::HEADER_LEN)
+            .ok()?;
+        let file = ctr_fs::ncch::exefs_files(&header)
+            .ok()?
+            .into_iter()
+            .find(|f| f.name == name)?;
+        exefs.sub(file.offset as u64, file.size as u64)
+    }
+
+    /// Deliver `tag` to the service registered as `name` after `delay`
+    /// cycles, through its `event`.
+    pub fn schedule_service(&mut self, name: &str, delay: u64, tag: u32) {
+        if let Some(&index) = self.registry.get(name) {
+            let at = self.clock.now() + delay;
+            self.clock
+                .schedule(at, HleEvent::Service(index as u32, tag));
+        }
+    }
+
+    /// Static buffer `id` of the calling thread, as it described it at
+    /// thread-local storage + 0x180: its address and length.
+    pub fn static_buffer(&self, id: u32) -> (u32, u32) {
+        let Some(current) = self.kernel.current else {
+            return (0, 0);
+        };
+        let at = self.kernel.threads[current].tls + ipc::STATIC_BUFFERS + id * 8;
+        let space = &self.process.space;
+        let descriptor = space.read32(&self.mem, at).unwrap_or(0);
+        let addr = space.read32(&self.mem, at + 4).unwrap_or(0);
+        (addr, ipc::static_buffer(descriptor).unwrap_or(0))
+    }
+
+    /// The names of the services and ports sessions have been opened to.
+    pub fn service_names(&self) -> Vec<String> {
+        self.registry.keys().cloned().collect()
+    }
+
     /// Register `n` of the thread making a supervisor call.
     pub fn reg(&self, n: usize) -> u32 {
         self.cpu.reg(n)
@@ -336,6 +435,7 @@ impl Horizon {
         if let Some(out) = self.loaded {
             self.kernel.threads[out].context = self.cpu.save_context();
         }
+        self.bus_state.clear_exclusive(0);
         self.kernel.switch_to(next);
         if let Some(next) = next {
             self.cpu.load_context(&self.kernel.threads[next].context);
@@ -408,10 +508,21 @@ impl Horizon {
                 core: 0,
                 tls: self.kernel.threads[thread].tls,
             };
+            let pc = self.cpu.reg(15);
             let cycles = self.cpu.step(&mut bus);
             self.clock.advance(cycles as u64);
             if let Some(trap) = self.cpu.take_trap() {
                 self.handle_trap(trap);
+            }
+            if let Some((addr, old)) = self.watch {
+                let now = self.process.space.read32(&self.mem, addr).unwrap_or(old);
+                if now != old {
+                    self.watch = Some((addr, now));
+                    self.note(format!(
+                        "watch {addr:#010x}: {old:#x} -> {now:#x} at pc {pc:#010x}, thread {thread}, lr {:#010x}",
+                        self.cpu.reg(14)
+                    ));
+                }
             }
         }
         if self.clock.now() < end {
@@ -421,10 +532,25 @@ impl Horizon {
             match event {
                 HleEvent::VBlank => {
                     self.gpu.vblank();
+                    if let Some(page) = self
+                        .process
+                        .space
+                        .v2p(config::SHARED_PAGE)
+                        .and_then(|pa| self.mem.slice_mut(pa, PAGE as usize))
+                    {
+                        config::update_clock(page, at);
+                    }
                     self.clock
                         .schedule(at + FRAME_CYCLES as u64, HleEvent::VBlank);
                 }
                 HleEvent::ThreadWake(thread) => self.kernel.timed_out(thread as usize),
+                HleEvent::Service(index, tag) => {
+                    let index = index as usize;
+                    let mut service =
+                        std::mem::replace(&mut self.services[index], Box::new(Vacant));
+                    service.event(self, tag);
+                    self.services[index] = service;
+                }
                 HleEvent::Timer(object) => {
                     let object = object as usize;
                     self.kernel.signal(object);
@@ -470,7 +596,7 @@ impl System for Horizon {
     }
 
     fn info(&self) -> String {
-        "3DS homebrew (3DSX), high-level mode".to_string()
+        self.info.clone()
     }
 
     fn title(&self) -> String {
