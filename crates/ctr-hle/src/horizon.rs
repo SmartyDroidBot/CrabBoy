@@ -27,6 +27,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// ARM11 cycles a thread runs before due events are delivered. Coarser than
 /// the low-level machine's, which has three processors to keep in step.
 pub const QUANTUM: u64 = 1024;
+/// The circle pad's reach in the HID module's units (3dbrew, "HID Shared
+/// Memory").
+const CIRCLE_PAD_RANGE: i32 = 0x9C;
+
 /// Where the framebuffers lie in VRAM until a program sets its own: the
 /// addresses a chainloader uses (see `ctr_core::boot`).
 const DEFAULT_FRAMEBUFFERS: [u32; 2] = [0x1830_0000, 0x1834_6500];
@@ -117,10 +121,21 @@ pub struct Horizon {
     loaded: Option<ThreadId>,
     bus_state: BusState,
     /// `HID_PAD` as the hardware has it: a clear bit is a pressed button.
-    pad: u16,
+    pub pad: u16,
+    /// The circle pad as the HID module reports it, about -0x9C to 0x9C on
+    /// each axis, right and up positive.
+    pub circle_pad: (i16, i16),
+    /// The touched point of the bottom screen, in pixels.
+    pub touch: Option<(u16, u16)>,
+    /// The motion sensors' raw readings.
+    pub motion: emu_core::Motion,
     title: String,
     info: String,
     pub program_id: u64,
+    /// The size of the program's save data, from its exheader.
+    pub save_size: u64,
+    /// Its saved files: save data, extra data, the SD card.
+    pub saves: crate::memfs::Store,
     /// The image the program came from, read as it asks.
     pub media: Box<dyn Storage>,
     /// Its RomFS on `media`: IVFC level 3, the file system proper.
@@ -224,9 +239,14 @@ impl Horizon {
             loaded: None,
             bus_state: BusState::default(),
             pad: 0x0FFF,
+            circle_pad: (0, 0),
+            touch: None,
+            motion: emu_core::Motion::default(),
             title: program.title,
             info: program.info,
             program_id: program.program_id,
+            save_size: program.save_size,
+            saves: crate::memfs::Store::default(),
             media,
             romfs: program.romfs,
             exefs: program.exefs,
@@ -395,6 +415,32 @@ impl Horizon {
         }
     }
 
+    /// Deliver `tag` to the service registered as `name` now, if it is.
+    pub fn notify_service(&mut self, name: &str, tag: u32) {
+        if let Some(&index) = self.registry.get(name) {
+            self.deliver(index, tag);
+        }
+    }
+
+    fn deliver(&mut self, index: usize, tag: u32) {
+        let mut service = std::mem::replace(&mut self.services[index], Box::new(Vacant));
+        service.event(self, tag);
+        self.services[index] = service;
+    }
+
+    /// A zeroed block of `len` bytes of the system region that a service
+    /// shares with the application, which may map it read/write: its handle
+    /// and physical address.
+    pub fn system_block(&mut self, len: u32) -> Option<(Handle, u32)> {
+        let pa = self.process.space.fcram.take_system(len)?;
+        self.mem.slice_mut(pa, len as usize)?.fill(0);
+        let handle = self.kernel.create_handle(Object::SharedMemory {
+            pages: (0..len / PAGE).map(|n| pa + n * PAGE).collect(),
+            other_perm: 3,
+        });
+        Some((handle, pa))
+    }
+
     /// Static buffer `id` of the calling thread, as it described it at
     /// thread-local storage + 0x180: its address and length.
     pub fn static_buffer(&self, id: u32) -> (u32, u32) {
@@ -532,6 +578,7 @@ impl Horizon {
             match event {
                 HleEvent::VBlank => {
                     self.gpu.vblank();
+                    self.notify_service("gsp::Gpu", service::gsp::VBLANK);
                     if let Some(page) = self
                         .process
                         .space
@@ -544,13 +591,7 @@ impl Horizon {
                         .schedule(at + FRAME_CYCLES as u64, HleEvent::VBlank);
                 }
                 HleEvent::ThreadWake(thread) => self.kernel.timed_out(thread as usize),
-                HleEvent::Service(index, tag) => {
-                    let index = index as usize;
-                    let mut service =
-                        std::mem::replace(&mut self.services[index], Box::new(Vacant));
-                    service.event(self, tag);
-                    self.services[index] = service;
-                }
+                HleEvent::Service(index, tag) => self.deliver(index as usize, tag),
                 HleEvent::Timer(object) => {
                     let object = object as usize;
                     self.kernel.signal(object);
@@ -629,6 +670,21 @@ impl System for Horizon {
         }
     }
 
+    fn set_axis(&mut self, axis: emu_core::Axis, x: i16, y: i16) {
+        if axis == emu_core::Axis::CirclePad {
+            let scale = |v: i16| (v as i32 * CIRCLE_PAD_RANGE / i16::MAX as i32) as i16;
+            self.circle_pad = (scale(x), scale(y));
+        }
+    }
+
+    fn set_motion(&mut self, motion: emu_core::Motion) {
+        self.motion = motion;
+    }
+
+    fn set_touch(&mut self, point: Option<(u16, u16)>) {
+        self.touch = point.map(|(x, y)| (x.min(319), y.min(239)));
+    }
+
     fn step(&mut self) -> u32 {
         let start = self.clock.now();
         if self.loaded.is_none() {
@@ -677,11 +733,23 @@ impl System for Horizon {
         false
     }
 
+    /// The saved files, or nothing if the program never saved.
     fn save_data(&self) -> Vec<u8> {
-        Vec::new()
+        if self.saves.is_empty() {
+            return Vec::new();
+        }
+        self.saves.encode()
     }
 
-    fn load_data(&mut self, _data: &[u8]) {}
+    fn load_data(&mut self, data: &[u8]) {
+        if let Some(store) = crate::memfs::Store::decode(data) {
+            self.saves = store;
+        }
+    }
+
+    fn sram_changed(&mut self) -> bool {
+        self.saves.take_dirty()
+    }
 }
 
 #[cfg(test)]

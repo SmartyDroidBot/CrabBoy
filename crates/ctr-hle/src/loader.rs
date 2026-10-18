@@ -33,6 +33,8 @@ pub struct Program {
     pub app_memory: u32,
     pub linear_base: u32,
     pub program_id: u64,
+    /// The size of its save data, from the exheader; 0 for homebrew.
+    pub save_size: u64,
     pub title: String,
     pub info: String,
     /// IVFC level 3 of the RomFS, on the medium.
@@ -65,6 +67,7 @@ pub fn from_3dsx(image: &[u8]) -> Result<Program, String> {
         app_memory: 64 << 20,
         linear_base: LINEAR_BASE_OLD,
         program_id: 0,
+        save_size: 0,
         title: String::new(),
         info: "3DS homebrew (3DSX), high-level mode".to_string(),
         romfs,
@@ -174,6 +177,7 @@ pub fn from_media(media: &mut dyn Storage) -> Result<Program, String> {
             LINEAR_BASE_OLD
         },
         program_id: exheader.program_id,
+        save_size: exheader.save_data_size,
         title: exheader.title.clone(),
         info: format!(
             "3DS game {} (program {:016X}{}), high-level mode",

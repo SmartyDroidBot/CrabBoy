@@ -14,6 +14,8 @@ pub mod apt;
 pub mod cfg;
 pub mod dsp;
 pub mod fs;
+pub mod gsp;
+pub mod hid;
 
 use crate::horizon::Horizon;
 use crate::ipc::{Reply, Request};
@@ -162,6 +164,7 @@ pub fn canonical(name: &str) -> &str {
     match name {
         "APT:A" | "APT:S" | "APT:U" => "APT",
         "cfg:u" | "cfg:s" | "cfg:i" => "cfg",
+        "hid:USER" | "hid:SPVR" => "hid",
         other => other,
     }
 }
@@ -174,6 +177,8 @@ pub fn standard(name: &str) -> Option<Box<dyn Service>> {
         "fs:USER" => Box::new(fs::Fs::default()),
         "cfg" => Box::new(cfg::Cfg),
         "dsp::DSP" => Box::new(dsp::Dsp::default()),
+        "gsp::Gpu" => Box::new(gsp::Gsp::default()),
+        "hid" => Box::new(hid::Hid::default()),
         _ => return None,
     })
 }

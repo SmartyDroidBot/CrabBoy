@@ -123,6 +123,10 @@ impl Entry {
 /// Physical pages of the application's part of FCRAM, handed out in order:
 /// ordinary memory from the top down, the linear heap from the bottom up, so
 /// that the linear heap stays one run of physical memory.
+/// The end of the system region: FCRAM is 128 MB and the base region takes
+/// its last 20 MB (see `config.rs`).
+const SYSTEM_END: u32 = 0x0800_0000 - 0x0140_0000;
+
 pub struct FcramAllocator {
     /// First page not yet given to the linear heap, as an offset into FCRAM.
     low: u32,
@@ -130,6 +134,9 @@ pub struct FcramAllocator {
     high: u32,
     /// The size of the region.
     len: u32,
+    /// First page of the system region (above the application's) not yet
+    /// given to a service.
+    system: u32,
 }
 
 impl FcramAllocator {
@@ -139,7 +146,18 @@ impl FcramAllocator {
             low: 0,
             high: len,
             len,
+            system: len,
         }
+    }
+
+    /// `len` bytes of the system region, for memory a service shares with
+    /// the application: on hardware it belongs to the service's process, so
+    /// it does not count against the application's region.
+    pub fn take_system(&mut self, len: u32) -> Option<u32> {
+        let end = self.system.checked_add(len).filter(|&e| e <= SYSTEM_END)?;
+        let start = self.system;
+        self.system = end;
+        Some(FCRAM_BASE + start)
     }
 
     /// `len` bytes (a whole number of pages) of ordinary memory.

@@ -137,9 +137,24 @@ Services written so far:
 | Service | What it answers |
 |---|---|
 | `APT:U` (and `:A`, `:S`) | The lock (a mutex), the notification and resume events, Enable queuing a Wakeup parameter from the home menu and signalling resume, Receive/GlanceParameter, startup argument (none), the CPU time limit, applet utility calls |
-| `fs:USER` | The title's own archive (SelfNCCH): the RomFS and ExeFS files by name, read in place from the medium; save data and the SD card answer "not formatted" or "not found" for now |
+| `fs:USER` | The title's own archive (SelfNCCH): the RomFS and ExeFS files by name, read in place from the medium. Save data (4), extra data (6, 7) and the SD card (9, 10) are volumes of the save store, below |
+| `gsp::Gpu` | The shared page (interrupt queue, framebuffer information, GX command queue), the GX commands carried out as writes to the GPU's registers, register reads and writes, buffer swaps, LCD black fill; completions relayed as interrupts after each job's cost; VBlank relayed to the queue |
+| `hid:USER` (and `:SPVR`) | The shared page: buttons, circle pad and touch screen at 234 Hz, accelerometer at 104 Hz and gyroscope at 101 Hz when enabled (rates other emulators use, not measured), with the five events; gyroscope coefficient and calibration |
 | `cfg:u` (and `:s`, `:i`) | Blocks of a console bought in the United States: English, USA, stereo, EULA agreed, no parental controls, an Old 3DS; a block not written out reads as zeros and is noted |
 | `dsp::DSP` | A null DSP, below |
+
+Memory a service shares with the application (GSP's and HID's pages) comes
+from the system region of FCRAM, above the application's, so it does not
+count against the application's memory.
+
+The save store (`memfs.rs`) holds every volume a title writes: its save data
+(once formatted with FormatSaveData), extra data (once created with
+CreateExtSaveData) and the SD card (always there), each a tree of
+directories and files, plus the secure values by slot. Until formatted, save
+data answers "not formatted" (0xC8A04554) and missing extra data on the SD
+card "not found" (0xC8A04478), as on a console that never held them. Writes
+take effect at once. The store is `save_data()`'s bytes (magic `CRAB3DSF`,
+version 1, little-endian), so frontends persist it as they persist any save.
 
 The null DSP runs no firmware. `LoadComponent` says the firmware is loaded;
 the audio pipe's Initialize command is answered with the fifteen shared
@@ -201,5 +216,6 @@ change.
 
 ## Not yet
 
-The second application core, `gsp::Gpu` and the GX command queue, `hid`,
-`ldr:ro` (CRO modules), saves, the DSP running its firmware. See the H milestones in `overview.md`.
+The second application core, `ldr:ro` (CRO modules), the GPU drawing what
+command lists ask (the `pica` pipeline), the DSP running its firmware, most
+other services. See the H milestones in `overview.md`.

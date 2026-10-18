@@ -20,6 +20,7 @@ pub mod horizon;
 pub mod ipc;
 pub mod kernel;
 pub mod loader;
+pub mod memfs;
 pub mod memory;
 pub mod result;
 pub mod service;

@@ -700,36 +700,39 @@ mod tests {
         assert_eq!(call(&mut h, 0x32, &[srv])[0], 0);
         assert_eq!(read_words(&h, buffer, 2), [0x0001_0040, 0]);
 
-        let name = [u32::from_le_bytes(*b"hid:"), u32::from_le_bytes(*b"USER")];
-        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 8, 0]);
+        let name = [u32::from_le_bytes(*b"cecd"), u32::from_le_bytes(*b":u  ")];
+        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 6, 0]);
         call(&mut h, 0x32, &[srv]);
         let reply = read_words(&h, buffer, 4);
         assert_eq!(reply[..3], [0x0005_0042, 0, 0x10]);
-        let hid = reply[3];
-        assert!(matches!(h.kernel.object(hid), Some(Object::Session { .. })));
+        let cecd = reply[3];
+        assert!(matches!(
+            h.kernel.object(cecd),
+            Some(Object::Session { .. })
+        ));
 
         // The stub answers with success and zeros, and says so once.
         for _ in 0..2 {
             write_words(&mut h, buffer, &[0x000A_0000, 0x1234]);
-            assert_eq!(call(&mut h, 0x32, &[hid])[0], 0);
+            assert_eq!(call(&mut h, 0x32, &[cecd])[0], 0);
         }
         assert_eq!(read_words(&h, buffer, 3), [0x000A_0240, 0, 0]);
-        let notes: Vec<_> = h.log.iter().filter(|l| l.contains("hid:USER")).collect();
+        let notes: Vec<_> = h.log.iter().filter(|l| l.contains("cecd:u")).collect();
         assert_eq!(notes.len(), 1, "{notes:?}");
 
         // A second handle reaches the same service.
-        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 8, 0]);
+        write_words(&mut h, buffer, &[0x0005_0100, name[0], name[1], 6, 0]);
         call(&mut h, 0x32, &[srv]);
         let again = read_words(&h, buffer, 4)[3];
-        assert_ne!(again, hid);
-        assert_eq!(h.kernel.object(again), h.kernel.object(hid));
+        assert_ne!(again, cecd);
+        assert_eq!(h.kernel.object(again), h.kernel.object(cecd));
 
         // Strict, the stub stops the process instead.
         h.strict = true;
         write_words(&mut h, buffer, &[0x000B_0000]);
-        call(&mut h, 0x32, &[hid]);
+        call(&mut h, 0x32, &[cecd]);
         let why = h.fatal.clone().unwrap();
-        assert!(why.contains("hid:USER command 0x000b"), "{why}");
+        assert!(why.contains("cecd:u command 0x000b"), "{why}");
     }
 
     #[test]
