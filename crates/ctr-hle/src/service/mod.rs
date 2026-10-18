@@ -29,6 +29,7 @@ pub mod simple;
 pub mod table;
 #[cfg(test)]
 pub mod testing;
+pub mod y2r;
 
 use crate::horizon::Horizon;
 use crate::ipc::{Reply, Request};
@@ -211,6 +212,7 @@ pub fn standard(name: &str) -> Option<Box<dyn Service>> {
         "boss:U" => Box::new(boss::Boss::default()),
         "cecd:u" => Box::new(cecd::Cecd::default()),
         "frd:u" => Box::new(frd::Frd::default()),
+        "y2r:u" => Box::new(y2r::Y2r::default()),
         "news:u" => simple::news(),
         "nim:aoc" => simple::nim_aoc(),
         "dlp:SRVR" => simple::dlp_server(),
