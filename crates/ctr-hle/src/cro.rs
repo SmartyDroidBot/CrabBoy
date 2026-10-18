@@ -19,6 +19,7 @@
 //! results there.
 
 use crate::memory::AddressSpace;
+use crate::result::ResultCode;
 use ctr_core::bus::PhysMem;
 
 /// The bytes a header takes, hashes included.
@@ -265,6 +266,835 @@ impl Module {
     }
 }
 
+/// A malformed module: RO's codes (module 75) at the permanent level,
+/// "wrong argument", with a description saying which check failed
+/// (0xD9012C22 and 0xD9012C23 are 3dbrew's; the others follow the same
+/// pattern, as other emulators report them).
+pub const fn format_error(description: u32) -> ResultCode {
+    ResultCode(0xD901_2C00 | description)
+}
+
+/// The data or bss buffer a program gives is smaller than the segment.
+pub const BUFFER_TOO_SMALL: ResultCode = ResultCode(0xE0E1_2C1F);
+const BAD_HEADER: ResultCode = format_error(0x11);
+const BAD_RELOCATION: ResultCode = format_error(0x12);
+const BAD_INDEXED_IMPORT: ResultCode = format_error(0x14);
+const BAD_INTERNAL_RELOCATION: ResultCode = format_error(0x15);
+const BAD_STATIC_ANONYMOUS: ResultCode = format_error(0x16);
+const BAD_ANONYMOUS_IMPORT: ResultCode = format_error(0x17);
+const BAD_IMPORT_MODULE: ResultCode = format_error(0x18);
+const BAD_SEGMENT: ResultCode = format_error(0x19);
+const BAD_NAMED_IMPORT: ResultCode = format_error(0x1B);
+const UNTERMINATED_STRING: ResultCode = format_error(0x0B);
+const NO_SYMBOL: ResultCode = format_error(0x10);
+const UNKNOWN_RELOCATION: ResultCode = format_error(0x22);
+const OUT_OF_RANGE: ResultCode = format_error(0x23);
+
+/// Write relocation `kind` at `target` for the symbol at `symbol` plus
+/// `addend`, as 3dbrew gives RO's code. `place` is where the word is when
+/// the program runs: `target` itself, except for data relocated in the
+/// image before the program copies it to its own buffer.
+pub fn relocate(
+    m: &mut dyn Memory,
+    target: u32,
+    kind: u8,
+    addend: u32,
+    symbol: u32,
+    place: u32,
+) -> Result<(), ResultCode> {
+    let offset = symbol.wrapping_add(addend).wrapping_sub(place);
+    let distance = place.wrapping_sub(symbol) as i32;
+    let value = match kind {
+        reloc::NONE => return Ok(()),
+        reloc::ABS32 | reloc::TARGET1 => symbol.wrapping_add(addend),
+        reloc::REL32 => offset,
+        reloc::THM_PC22 => {
+            if !(-0x40_0000 + 1..0x40_0000).contains(&distance) {
+                return Err(OUT_OF_RANGE);
+            }
+            // A BL pair to Thumb code, or a BLX pair to ARM code, whose
+            // target must then be a word away from the instruction.
+            let (offset, second) = if symbol & 1 != 0 {
+                (offset, 0xF800)
+            } else {
+                (offset.wrapping_add(offset & 2), 0xE800)
+            };
+            let high = 0xF000 | (offset >> 12 & 0x7FF);
+            let low = second | (offset >> 1 & 0x7FF);
+            low << 16 | high
+        }
+        reloc::CALL => {
+            if !(-0x200_0000 + 1..0x200_0000).contains(&distance) {
+                return Err(OUT_OF_RANGE);
+            }
+            if symbol & 1 != 0 {
+                // BLX to Thumb code: the half-word bit goes into H.
+                0xFA00_0000 | (offset & 2) << 23 | (offset >> 2 & 0xFF_FFFF)
+            } else {
+                0xEB00_0000 | (offset >> 2 & 0xFF_FFFF)
+            }
+        }
+        reloc::JUMP24 => {
+            if !(-0x200_0000 + 1..0x200_0000).contains(&distance) || symbol & 1 != 0 {
+                return Err(OUT_OF_RANGE);
+            }
+            // The condition and opcode stay.
+            m.read32(target) & 0xFF00_0000 | (offset >> 2 & 0xFF_FFFF)
+        }
+        reloc::PREL31 => addend
+            .wrapping_add(symbol & 0x7FFF_FFFF)
+            .wrapping_sub(place),
+        _ => return Err(UNKNOWN_RELOCATION),
+    };
+    m.write32(target, value);
+    Ok(())
+}
+
+/// Undo a relocation: the word is zero again, as in the file, except that a
+/// branch keeps its condition and opcode.
+pub fn unrelocate(m: &mut dyn Memory, target: u32, kind: u8) -> Result<(), ResultCode> {
+    let value = match kind {
+        reloc::NONE => return Ok(()),
+        reloc::JUMP24 => m.read32(target) & 0xFF00_0000,
+        reloc::ABS32
+        | reloc::TARGET1
+        | reloc::REL32
+        | reloc::THM_PC22
+        | reloc::CALL
+        | reloc::PREL31 => 0,
+        _ => return Err(UNKNOWN_RELOCATION),
+    };
+    m.write32(target, value);
+    Ok(())
+}
+
+/// One entry of a relocation table: target tag, type, its fifth and sixth
+/// bytes (the end of a batch and whether it is resolved, for imports; the
+/// symbol's segment, for internal relocations) and the addend.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    target: u32,
+    kind: u8,
+    byte5: u8,
+    addend: u32,
+}
+
+fn read_entry(m: &dyn Memory, at: u32) -> Entry {
+    Entry {
+        target: m.read32(at),
+        kind: m.read8(at + 4),
+        byte5: m.read8(at + 5),
+        addend: m.read32(at + 8),
+    }
+}
+
+/// Where a batch of import relocations records that it is resolved.
+const RESOLVED: u32 = 6;
+
+/// What a link step does to a batch of imports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Batch {
+    /// Point it at a symbol.
+    Resolve,
+    /// Point it at the module's "unresolved" handler again.
+    Reset,
+}
+
+impl Module {
+    fn count(self, m: &dyn Memory, table: u32) -> u32 {
+        self.get(m, table + 4)
+    }
+
+    /// The tables a module's header names, as (offset field, entry size).
+    fn tables() -> impl Iterator<Item = (u32, u32)> {
+        TABLES.into_iter()
+    }
+
+    /// The address of the function to call for an import nobody resolved,
+    /// or zero.
+    fn on_unresolved(self, m: &dyn Memory) -> u32 {
+        self.address(m, self.get(m, field::ON_UNRESOLVED))
+            .unwrap_or(0)
+    }
+
+    /// Whether a module is mapped here: it carries either magic.
+    pub fn is_loaded(self, m: &dyn Memory) -> bool {
+        matches!(self.get(m, field::MAGIC), MAGIC_CRO0 | MAGIC_FIXD)
+    }
+
+    pub fn is_fixed(self, m: &dyn Memory) -> bool {
+        self.get(m, field::MAGIC) == MAGIC_FIXD
+    }
+
+    /// The pages of its text segment, which become executable.
+    pub fn executable_pages(self, m: &dyn Memory) -> Option<(u32, u32)> {
+        (0..self.count(m, field::SEGMENTS))
+            .map(|n| self.segment(m, n))
+            .find(|&(_, size, kind)| kind == segment::TEXT && size != 0)
+            .map(|(start, size, _)| {
+                let first = start & !0xFFF;
+                let end = (start + size).next_multiple_of(0x1000);
+                (first, end - first)
+            })
+    }
+
+    /// The address a tag names in the image as loaded: the same as
+    /// `address`, except that data is still where the file had it, before
+    /// the program copies it out to its buffer.
+    fn image_address(self, m: &dyn Memory, tag: u32) -> Option<u32> {
+        let place = self.address(m, tag)?;
+        let (index, offset) = split_tag(tag);
+        Some(if self.segment(m, index).2 == segment::DATA {
+            self.get(m, field::DATA) + offset
+        } else {
+            place
+        })
+    }
+
+    // ---- rebasing ------------------------------------------------------
+
+    /// Turn the header's offsets into addresses, after checking that the
+    /// module is fresh, its tables lie in order and within `size` bytes.
+    fn rebase_header(self, m: &mut dyn Memory, size: u32) -> Result<(), ResultCode> {
+        let fresh = self.get(m, field::MAGIC) == MAGIC_CRO0
+            && self.get(m, field::NEXT) == 0
+            && self.get(m, field::PREVIOUS) == 0
+            && self.get(m, field::FILE_SIZE) <= 0x1000_0000
+            && self.get(m, field::BSS_SIZE) <= 0x1000_0000
+            && self.get(m, field::FIXED_SIZE) == 0
+            && self.get(m, field::CODE) >= HEADER_LEN;
+        let ordered = FILE_ORDER
+            .windows(2)
+            .all(|pair| self.get(m, pair[0]) <= self.get(m, pair[1]));
+        if !fresh || !ordered {
+            return Err(BAD_HEADER);
+        }
+        let name = self.get(m, field::NAME);
+        if name != 0 {
+            self.set(m, field::NAME, name + self.0);
+        }
+        for (table, _) in Module::tables() {
+            let offset = self.get(m, table);
+            if offset != 0 {
+                self.set(m, table, offset + self.0);
+            }
+        }
+        let end = self.0 + size;
+        for (table, entry) in Module::tables() {
+            let last = self.get(m, table) as u64 + self.count(m, table) as u64 * entry as u64;
+            if last > end as u64 {
+                return Err(BAD_HEADER);
+            }
+        }
+        Ok(())
+    }
+
+    /// A string table must end in a zero, if it has anything.
+    fn check_strings(self, m: &dyn Memory, table: u32) -> Result<(), ResultCode> {
+        let len = self.count(m, table);
+        if len != 0 && m.read8(self.get(m, table) + len - 1) != 0 {
+            return Err(UNTERMINATED_STRING);
+        }
+        Ok(())
+    }
+
+    /// Segments become addresses: text and read-only data where the module
+    /// lies, data and bss in the buffers the program gave. Returns where
+    /// the data lies in the image.
+    fn rebase_segments(
+        self,
+        m: &mut dyn Memory,
+        size: u32,
+        data: (u32, u32),
+        bss: (u32, u32),
+    ) -> Result<u32, ResultCode> {
+        let mut image_data = 0;
+        for n in 0..self.count(m, field::SEGMENTS) {
+            let at = self.entry(m, field::SEGMENTS, 12, n);
+            let (offset, len, kind) = self.segment(m, n);
+            let rebased = match kind {
+                segment::DATA | segment::BSS if len == 0 => continue,
+                segment::DATA if len > data.1 => return Err(BUFFER_TOO_SMALL),
+                segment::DATA => {
+                    image_data = offset;
+                    data.0
+                }
+                segment::BSS if len > bss.1 => return Err(BUFFER_TOO_SMALL),
+                segment::BSS => bss.0,
+                _ if offset == 0 => continue,
+                _ if offset > size => return Err(BAD_SEGMENT),
+                _ => offset + self.0,
+            };
+            m.write32(at, rebased);
+        }
+        Ok(image_data + self.0)
+    }
+
+    /// Add the module's address to the offsets in a table's entries:
+    /// `fields` gives each offset's place in the entry and the range it
+    /// must then fall in (start field, entry size of that table), if any.
+    fn rebase_entries(
+        self,
+        m: &mut dyn Memory,
+        table: u32,
+        entry: u32,
+        fields: &[(u32, u32, u32)],
+        error: ResultCode,
+    ) -> Result<(), ResultCode> {
+        let ranges: Vec<(u32, u32)> = fields
+            .iter()
+            .map(|&(_, within, size)| {
+                let start = self.get(m, within);
+                (start, start + self.count(m, within) * size)
+            })
+            .collect();
+        for n in 0..self.count(m, table) {
+            let at = self.entry(m, table, entry, n);
+            for (&(place, _, size), &(start, end)) in fields.iter().zip(&ranges) {
+                let offset = m.read32(at + place);
+                if offset == 0 {
+                    continue;
+                }
+                let address = offset + self.0;
+                // A string must start inside its table; a sub-table may
+                // also start at the end of its table, when it is empty.
+                let inside = if size == 1 {
+                    (start..end).contains(&address)
+                } else {
+                    (start..=end).contains(&address)
+                };
+                if !inside {
+                    return Err(error);
+                }
+                m.write32(at + place, address);
+            }
+        }
+        Ok(())
+    }
+
+    fn unrebase_entries(self, m: &mut dyn Memory, table: u32, entry: u32, places: &[u32]) {
+        for n in 0..self.count(m, table) {
+            let at = self.entry(m, table, entry, n);
+            for &place in places {
+                let address = m.read32(at + place);
+                if address != 0 {
+                    m.write32(at + place, address - self.0);
+                }
+            }
+        }
+    }
+
+    /// Every import relocation points at the "unresolved" handler, and no
+    /// batch is resolved.
+    fn reset_import_relocations(self, m: &mut dyn Memory) -> Result<(), ResultCode> {
+        let count = self.count(m, field::IMPORT_RELOCATIONS);
+        let last = self.entry(m, field::IMPORT_RELOCATIONS, 12, count.wrapping_sub(1));
+        if count != 0 && m.read8(last + 5) == 0 {
+            return Err(BAD_RELOCATION);
+        }
+        let unresolved = self.on_unresolved(m);
+        let mut batch_start = true;
+        for n in 0..count {
+            let at = self.entry(m, field::IMPORT_RELOCATIONS, 12, n);
+            let entry = read_entry(m, at);
+            let target = self.address(m, entry.target).ok_or(BAD_RELOCATION)?;
+            relocate(m, target, entry.kind, entry.addend, unresolved, target)?;
+            if batch_start {
+                m.write8(at + RESOLVED, 0);
+            }
+            batch_start = entry.byte5 != 0;
+        }
+        Ok(())
+    }
+
+    /// Apply a batch of this module's import relocations, which lies at
+    /// `batch`, for the symbol at `symbol`, and mark it resolved or not.
+    fn apply_batch(
+        self,
+        m: &mut dyn Memory,
+        batch: u32,
+        symbol: u32,
+        what: Batch,
+    ) -> Result<(), ResultCode> {
+        if symbol == 0 && what == Batch::Resolve {
+            return Err(NO_SYMBOL);
+        }
+        let mut at = batch;
+        loop {
+            let entry = read_entry(m, at);
+            let target = self.address(m, entry.target).ok_or(BAD_RELOCATION)?;
+            relocate(m, target, entry.kind, entry.addend, symbol, target)?;
+            if entry.byte5 != 0 {
+                break;
+            }
+            at += 12;
+        }
+        m.write8(batch + RESOLVED, (what == Batch::Resolve) as u8);
+        Ok(())
+    }
+
+    fn batch_resolved(m: &dyn Memory, batch: u32) -> bool {
+        m.read8(batch + RESOLVED) != 0
+    }
+
+    /// The symbols this module gives the program itself, through
+    /// relocations of the CRS's segments.
+    fn export_static_anonymous(self, m: &mut dyn Memory, crs: Module) -> Result<(), ResultCode> {
+        let start = self.get(m, field::STATIC_RELOCATIONS);
+        let end = start + self.count(m, field::STATIC_RELOCATIONS) * 12;
+        for n in 0..self.count(m, field::STATIC_ANONYMOUS) {
+            let at = self.entry(m, field::STATIC_ANONYMOUS, 8, n);
+            let batch = m.read32(at + 4) + self.0;
+            if !(start..=end).contains(&batch) {
+                return Err(BAD_STATIC_ANONYMOUS);
+            }
+            let symbol = self.address(m, m.read32(at)).unwrap_or(0);
+            crs.apply_batch(m, batch, symbol, Batch::Resolve)?;
+        }
+        Ok(())
+    }
+
+    /// Relocate the module's references to itself. Those in data are made
+    /// in the image, for where the data will be once copied.
+    fn relocate_internal(self, m: &mut dyn Memory, image_data: u32) -> Result<(), ResultCode> {
+        let segments = self.count(m, field::SEGMENTS);
+        for n in 0..self.count(m, field::INTERNAL_RELOCATIONS) {
+            let entry = read_entry(m, self.entry(m, field::INTERNAL_RELOCATIONS, 12, n));
+            let place = self
+                .address(m, entry.target)
+                .ok_or(BAD_INTERNAL_RELOCATION)?;
+            let (index, offset) = split_tag(entry.target);
+            let target = if self.segment(m, index).2 == segment::DATA {
+                image_data + offset
+            } else {
+                place
+            };
+            if u32::from(entry.byte5) >= segments {
+                return Err(BAD_INTERNAL_RELOCATION);
+            }
+            let symbol = self.segment(m, u32::from(entry.byte5)).0;
+            relocate(m, target, entry.kind, entry.addend, symbol, place)?;
+        }
+        Ok(())
+    }
+
+    /// The modules that link with every other, the program's first: the
+    /// CRS, then the chain from its `NEXT`.
+    fn auto_link(m: &dyn Memory, crs: Module) -> Vec<Module> {
+        let mut list = vec![crs];
+        let mut next = crs.get(m, field::NEXT);
+        while next != 0 && list.len() < 0x1000 {
+            list.push(Module(next));
+            next = Module(next).get(m, field::NEXT);
+        }
+        list
+    }
+
+    /// `__aeabi_atexit` comes from whichever module exports
+    /// `nnroAeabiAtexit_` (3dbrew, "CRO0").
+    fn import_atexit(self, m: &mut dyn Memory, crs: Module) -> Result<(), ResultCode> {
+        let strings = self.count(m, field::IMPORT_STRINGS);
+        for n in 0..self.count(m, field::IMPORT_NAMED) {
+            let at = self.entry(m, field::IMPORT_NAMED, 8, n);
+            if m.cstring(m.read32(at), strings) != b"__aeabi_atexit" {
+                continue;
+            }
+            let batch = m.read32(at + 4);
+            let found = Module::auto_link(m, crs)
+                .into_iter()
+                .find_map(|source| source.find_export(m, b"nnroAeabiAtexit_"));
+            if let Some(symbol) = found {
+                self.apply_batch(m, batch, symbol, Batch::Resolve)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Make a module mapped here usable: its tables become addresses, its
+    /// segments are placed (text and read-only data where it lies, data and
+    /// bss in the program's buffers), its imports point at its handler for
+    /// unresolved symbols, and its references to itself are relocated. A
+    /// CRS (`crs` is then unused) keeps its segments, which describe the
+    /// program where it already is.
+    pub fn rebase(
+        self,
+        m: &mut dyn Memory,
+        crs: Module,
+        size: u32,
+        data: (u32, u32),
+        bss: (u32, u32),
+        is_crs: bool,
+    ) -> Result<(), ResultCode> {
+        self.rebase_header(m, size)?;
+        self.check_strings(m, field::MODULE_NAME)?;
+        let image_data = if is_crs {
+            0
+        } else {
+            self.rebase_segments(m, size, data, bss)?
+        };
+        self.rebase_entries(
+            m,
+            field::EXPORT_NAMED,
+            8,
+            &[(0, field::EXPORT_STRINGS, 1)],
+            BAD_HEADER,
+        )?;
+        let nodes = self.count(m, field::EXPORT_TREE);
+        for n in 0..nodes {
+            let at = self.entry(m, field::EXPORT_TREE, 8, n);
+            let children = [m.read32(at + 2) as u16, m.read32(at + 4) as u16];
+            if children.iter().any(|&c| u32::from(c & 0x7FFF) >= nodes) {
+                return Err(BAD_HEADER);
+            }
+        }
+        self.check_strings(m, field::EXPORT_STRINGS)?;
+        self.rebase_entries(
+            m,
+            field::IMPORT_MODULES,
+            20,
+            &[
+                (0, field::IMPORT_STRINGS, 1),
+                (4, field::IMPORT_INDEXED, 8),
+                (12, field::IMPORT_ANONYMOUS, 8),
+            ],
+            BAD_IMPORT_MODULE,
+        )?;
+        self.reset_import_relocations(m)?;
+        let relocations = (4, field::IMPORT_RELOCATIONS, 12);
+        self.rebase_entries(
+            m,
+            field::IMPORT_NAMED,
+            8,
+            &[(0, field::IMPORT_STRINGS, 1), relocations],
+            BAD_NAMED_IMPORT,
+        )?;
+        self.rebase_entries(
+            m,
+            field::IMPORT_INDEXED,
+            8,
+            &[relocations],
+            BAD_INDEXED_IMPORT,
+        )?;
+        self.rebase_entries(
+            m,
+            field::IMPORT_ANONYMOUS,
+            8,
+            &[relocations],
+            BAD_ANONYMOUS_IMPORT,
+        )?;
+        self.check_strings(m, field::IMPORT_STRINGS)?;
+        if !is_crs {
+            self.export_static_anonymous(m, crs)?;
+        }
+        self.relocate_internal(m, image_data)?;
+        if !is_crs {
+            self.import_atexit(m, crs)?;
+        }
+        Ok(())
+    }
+
+    /// Undo `rebase`'s address arithmetic: the tables hold offsets again
+    /// and the module is in no list. The data segment gets back its offset
+    /// in the file.
+    pub fn unrebase(self, m: &mut dyn Memory, is_crs: bool) {
+        self.unrebase_entries(m, field::IMPORT_ANONYMOUS, 8, &[4]);
+        self.unrebase_entries(m, field::IMPORT_INDEXED, 8, &[4]);
+        self.unrebase_entries(m, field::IMPORT_NAMED, 8, &[0, 4]);
+        self.unrebase_entries(m, field::IMPORT_MODULES, 20, &[0, 4, 12]);
+        self.unrebase_entries(m, field::EXPORT_NAMED, 8, &[0]);
+        if !is_crs {
+            let image_data = self.get(m, field::DATA);
+            for n in 0..self.count(m, field::SEGMENTS) {
+                let at = self.entry(m, field::SEGMENTS, 12, n);
+                let (address, len, kind) = self.segment(m, n);
+                let offset = match kind {
+                    segment::DATA | segment::BSS if len == 0 => continue,
+                    segment::DATA => image_data.wrapping_sub(self.0),
+                    segment::BSS => 0,
+                    _ if address == 0 => continue,
+                    _ => address - self.0,
+                };
+                m.write32(at, offset);
+            }
+        }
+        self.set(m, field::NEXT, 0);
+        self.set(m, field::PREVIOUS, 0);
+        self.set(m, field::FIXED_SIZE, 0);
+        let name = self.get(m, field::NAME);
+        if name != 0 {
+            self.set(m, field::NAME, name - self.0);
+        }
+        for (table, _) in Module::tables() {
+            let address = self.get(m, table);
+            if address != 0 {
+                self.set(m, table, address - self.0);
+            }
+        }
+    }
+
+    // ---- linking -------------------------------------------------------
+
+    /// Resolve this module's named imports that are not yet, from the
+    /// auto-link modules, the first that exports each.
+    fn import_named(self, m: &mut dyn Memory, crs: Module) -> Result<(), ResultCode> {
+        let strings = self.count(m, field::IMPORT_STRINGS);
+        let sources = Module::auto_link(m, crs);
+        for n in 0..self.count(m, field::IMPORT_NAMED) {
+            let at = self.entry(m, field::IMPORT_NAMED, 8, n);
+            let batch = m.read32(at + 4);
+            if Module::batch_resolved(m, batch) {
+                continue;
+            }
+            let name = m.cstring(m.read32(at), strings);
+            if let Some(symbol) = sources.iter().find_map(|s| s.find_export(m, &name)) {
+                self.apply_batch(m, batch, symbol, Batch::Resolve)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The indexed and anonymous imports `importer` makes from `self`:
+    /// each one's batch in the importer and the symbol in `self`.
+    fn module_imports(self, m: &dyn Memory, importer: Module) -> Vec<(u32, u32)> {
+        let name = self.name(m).into_bytes();
+        let strings = importer.count(m, field::IMPORT_STRINGS);
+        let mut found = Vec::new();
+        for n in 0..importer.count(m, field::IMPORT_MODULES) {
+            let at = importer.entry(m, field::IMPORT_MODULES, 20, n);
+            if m.cstring(m.read32(at), strings) != name {
+                continue;
+            }
+            let (indexed, indexed_count) = (m.read32(at + 4), m.read32(at + 8));
+            for k in 0..indexed_count {
+                let entry = indexed + k * 8;
+                let index = m.read32(entry);
+                let export = self.entry(m, field::EXPORT_INDEXED, 4, index);
+                let symbol = self.address(m, m.read32(export)).unwrap_or(0);
+                found.push((m.read32(entry + 4), symbol));
+            }
+            let (anonymous, anonymous_count) = (m.read32(at + 12), m.read32(at + 16));
+            for k in 0..anonymous_count {
+                let entry = anonymous + k * 8;
+                let symbol = self.address(m, m.read32(entry)).unwrap_or(0);
+                found.push((m.read32(entry + 4), symbol));
+            }
+        }
+        found
+    }
+
+    /// Resolve this module's imports from the auto-link modules, then the
+    /// imports the auto-link modules make from it. `fix_data` is the
+    /// correction of `LoadCRO_New`: while loading, imports into data are
+    /// made in the image, which the program then copies, rather than in its
+    /// buffer, which the copy would overwrite.
+    pub fn link(self, m: &mut dyn Memory, crs: Module, fix_data: bool) -> Result<(), ResultCode> {
+        let moved = fix_data && self.count(m, field::SEGMENTS) > segment::DATA;
+        let buffer = self.segment(m, segment::DATA).0;
+        let at = self.entry(m, field::SEGMENTS, 12, segment::DATA);
+        if moved {
+            let image = self.get(m, field::DATA);
+            m.write32(at, image);
+        }
+        let imported = self.import_named(m, crs).and_then(|()| {
+            for source in Module::auto_link(m, crs) {
+                for (batch, symbol) in source.module_imports(m, self) {
+                    self.apply_batch(m, batch, symbol, Batch::Resolve)?;
+                }
+            }
+            Ok(())
+        });
+        if moved {
+            m.write32(at, buffer);
+        }
+        imported?;
+        for target in Module::auto_link(m, crs) {
+            self.export_named_to(m, target, Batch::Resolve)?;
+            for (batch, symbol) in self.module_imports(m, target) {
+                target.apply_batch(m, batch, symbol, Batch::Resolve)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve (or reset) the named imports of `target` that this module
+    /// exports.
+    fn export_named_to(
+        self,
+        m: &mut dyn Memory,
+        target: Module,
+        what: Batch,
+    ) -> Result<(), ResultCode> {
+        let strings = target.count(m, field::IMPORT_STRINGS);
+        let unresolved = target.on_unresolved(m);
+        for n in 0..target.count(m, field::IMPORT_NAMED) {
+            let at = target.entry(m, field::IMPORT_NAMED, 8, n);
+            let batch = m.read32(at + 4);
+            if Module::batch_resolved(m, batch) == (what == Batch::Resolve) {
+                continue;
+            }
+            let name = m.cstring(m.read32(at), strings);
+            if let Some(symbol) = self.find_export(m, &name) {
+                let symbol = if what == Batch::Resolve {
+                    symbol
+                } else {
+                    unresolved
+                };
+                target.apply_batch(m, batch, symbol, what)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Point every import of this module at its handler for unresolved
+    /// symbols again, and every import the auto-link modules make from it
+    /// at theirs.
+    pub fn unlink(self, m: &mut dyn Memory, crs: Module) -> Result<(), ResultCode> {
+        let unresolved = self.on_unresolved(m);
+        for (table, place) in [
+            (field::IMPORT_NAMED, 4),
+            (field::IMPORT_INDEXED, 4),
+            (field::IMPORT_ANONYMOUS, 4),
+        ] {
+            for n in 0..self.count(m, table) {
+                let batch = m.read32(self.entry(m, table, 8, n) + place);
+                self.apply_batch(m, batch, unresolved, Batch::Reset)?;
+            }
+        }
+        for target in Module::auto_link(m, crs) {
+            self.export_named_to(m, target, Batch::Reset)?;
+            let unresolved = target.on_unresolved(m);
+            for (batch, _) in self.module_imports(m, target) {
+                target.apply_batch(m, batch, unresolved, Batch::Reset)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Zero every relocated word, internal and imported, in the image, so
+    /// that an unfixed module returns to the bytes it was loaded from.
+    pub fn clear_relocations(self, m: &mut dyn Memory) -> Result<(), ResultCode> {
+        let mut batch_start = true;
+        for n in 0..self.count(m, field::IMPORT_RELOCATIONS) {
+            let at = self.entry(m, field::IMPORT_RELOCATIONS, 12, n);
+            let entry = read_entry(m, at);
+            let target = self.image_address(m, entry.target).ok_or(BAD_RELOCATION)?;
+            unrelocate(m, target, entry.kind)?;
+            if batch_start {
+                m.write8(at + RESOLVED, 0);
+            }
+            batch_start = entry.byte5 != 0;
+        }
+        for n in 0..self.count(m, field::INTERNAL_RELOCATIONS) {
+            let entry = read_entry(m, self.entry(m, field::INTERNAL_RELOCATIONS, 12, n));
+            let target = self
+                .image_address(m, entry.target)
+                .ok_or(BAD_INTERNAL_RELOCATION)?;
+            unrelocate(m, target, entry.kind)?;
+        }
+        Ok(())
+    }
+
+    /// The batches of imports not resolved: the names of the named ones,
+    /// and how many indexed and anonymous ones.
+    pub fn unresolved(self, m: &dyn Memory) -> (Vec<String>, u32) {
+        let strings = self.count(m, field::IMPORT_STRINGS);
+        let named = (0..self.count(m, field::IMPORT_NAMED))
+            .map(|n| self.entry(m, field::IMPORT_NAMED, 8, n))
+            .filter(|&at| !Module::batch_resolved(m, m.read32(at + 4)))
+            .map(|at| String::from_utf8_lossy(&m.cstring(m.read32(at), strings)).into_owned())
+            .collect();
+        let others = [field::IMPORT_INDEXED, field::IMPORT_ANONYMOUS]
+            .into_iter()
+            .flat_map(|table| (0..self.count(m, table)).map(move |n| (table, n)))
+            .filter(|&(table, n)| {
+                !Module::batch_resolved(m, m.read32(self.entry(m, table, 8, n) + 4))
+            })
+            .count() as u32;
+        (named, others)
+    }
+
+    // ---- the module lists ----------------------------------------------
+
+    /// Add the module at the end of the CRS's auto-link list (from the
+    /// CRS's `NEXT`) or of its other list (from its `PREVIOUS`). The head
+    /// of a list has the tail as its `PREVIOUS`.
+    pub fn register(self, m: &mut dyn Memory, crs: Module, auto_link: bool) {
+        let list = if auto_link {
+            field::NEXT
+        } else {
+            field::PREVIOUS
+        };
+        let head = crs.get(m, list);
+        if head == 0 {
+            crs.set(m, list, self.0);
+            self.set(m, field::PREVIOUS, self.0);
+        } else {
+            let tail = Module(head).get(m, field::PREVIOUS);
+            self.set(m, field::PREVIOUS, tail);
+            Module(tail).set(m, field::NEXT, self.0);
+            Module(head).set(m, field::PREVIOUS, self.0);
+        }
+        self.set(m, field::NEXT, 0);
+    }
+
+    /// Take the module out of whichever list it is in.
+    pub fn unregister(self, m: &mut dyn Memory, crs: Module) {
+        let next = self.get(m, field::NEXT);
+        let previous = self.get(m, field::PREVIOUS);
+        let list = [field::NEXT, field::PREVIOUS]
+            .into_iter()
+            .find(|&list| crs.get(m, list) == self.0);
+        if let Some(list) = list {
+            // The head: the next one heads the list and keeps the tail.
+            if next != 0 {
+                Module(next).set(m, field::PREVIOUS, previous);
+            }
+            crs.set(m, list, next);
+        } else if next != 0 {
+            Module(previous).set(m, field::NEXT, next);
+            Module(next).set(m, field::PREVIOUS, previous);
+        } else {
+            // The tail: the head learns of the new tail.
+            Module(previous).set(m, field::NEXT, 0);
+            for list in [field::NEXT, field::PREVIOUS] {
+                let head = crs.get(m, list);
+                if head != 0 && Module(head).get(m, field::PREVIOUS) == self.0 {
+                    Module(head).set(m, field::PREVIOUS, previous);
+                }
+            }
+        }
+        self.set(m, field::NEXT, 0);
+        self.set(m, field::PREVIOUS, 0);
+    }
+
+    // ---- fixing --------------------------------------------------------
+
+    /// Give up the tables the program no longer needs: at level 1 the
+    /// static and internal relocations, at 2 also the imports, at 3 also
+    /// the exports (0 gives up nothing). Their offsets then point at the
+    /// end of what is kept, the magic becomes "FIXD", and the page-rounded
+    /// size kept is returned and recorded.
+    pub fn fix(self, m: &mut dyn Memory, level: u32) -> u32 {
+        // Where each level's cut starts, in `TABLES`.
+        let barrier = [TABLES.len(), 14, 8, 4][level.min(3) as usize];
+        let code_end = self.get(m, field::CODE) + self.count(m, field::CODE);
+        let end = TABLES[2..barrier]
+            .iter()
+            .map(|&(table, size)| self.get(m, table) + self.count(m, table) * size)
+            .fold((self.0 + HEADER_LEN).max(code_end), u32::max);
+        if level != 0 {
+            self.set(m, field::MAGIC, MAGIC_FIXD);
+            for &(table, _) in &TABLES[barrier..] {
+                self.set(m, table, end);
+                self.set(m, table + 4, 0);
+            }
+        }
+        let fixed = end.next_multiple_of(0x1000) - self.0;
+        self.set(m, field::FIXED_SIZE, fixed);
+        fixed
+    }
+}
+
 /// A flat test memory, and a builder of modules for tests.
 #[cfg(test)]
 pub(crate) mod testing {
@@ -332,6 +1162,9 @@ pub(crate) mod testing {
         /// Target tag, type, the segment of the symbol, addend.
         pub internal: Vec<(u32, u8, u8, u32)>,
         pub on_unresolved: Option<u32>,
+        /// For a CRS: the program's segments as addresses, in place of
+        /// the module's own.
+        pub program: Option<[(u32, u32, u32); 4]>,
     }
 
     fn put(image: &mut [u8], at: u32, value: u32) {
@@ -620,6 +1453,7 @@ pub(crate) mod testing {
             (data_at, spec.data.len() as u32, segment::DATA),
             (0, spec.bss, segment::BSS),
         ];
+        let segments = spec.program.unwrap_or(segments);
         for (n, (offset, size, kind)) in segments.into_iter().enumerate() {
             let at = segments_at + n as u32 * 12;
             put(&mut out, at, offset);
@@ -706,5 +1540,257 @@ mod tests {
         assert_eq!(module.find_export(&m, b"delta"), None);
         assert_eq!(module.address(&m, tag(1, 0x10)), None, "past the segment");
         assert_eq!(module.address(&m, tag(5, 0)), None, "no such segment");
+    }
+
+    #[test]
+    fn relocations_encode_what_3dbrew_gives() {
+        let mut m = Flat::default();
+        let mut at = |kind, addend, symbol, place, before| {
+            m.write32(0x1000, before);
+            relocate(&mut m, 0x1000, kind, addend, symbol, place).map(|()| m.read32(0x1000))
+        };
+        let minus = |n: u32| n.wrapping_neg();
+        assert_eq!(at(reloc::ABS32, 4, 0x2000, 0x1000, 0), Ok(0x2004));
+        assert_eq!(at(reloc::REL32, 0, 0x2000, 0x1800, 0), Ok(0x800));
+        // BL from 0x1000 to 0x2000: the PC is 8 ahead.
+        assert_eq!(
+            at(reloc::CALL, minus(8), 0x2000, 0x1000, 0),
+            Ok(0xEB00_03FE)
+        );
+        // BLX to Thumb code at 0x2002.
+        assert_eq!(
+            at(reloc::CALL, minus(8), 0x2003, 0x1000, 0),
+            Ok(0xFB00_03FE)
+        );
+        assert_eq!(
+            at(reloc::JUMP24, minus(8), 0x2000, 0x1000, 0x1A00_0000),
+            Ok(0x1A00_03FE),
+            "the condition stays"
+        );
+        // A Thumb BL pair from 0x1000 to 0x2000, first half-word first.
+        assert_eq!(
+            at(reloc::THM_PC22, minus(4), 0x2001, 0x1000, 0),
+            Ok(0xFFFE_F000)
+        );
+        assert_eq!(at(reloc::PREL31, 0, 0x2000, 0x1000, 0), Ok(0x1000));
+        assert_eq!(
+            at(reloc::CALL, 0, 0x0400_0000, 0x1000, 0),
+            Err(OUT_OF_RANGE)
+        );
+        assert_eq!(at(7, 0, 0, 0, 0), Err(UNKNOWN_RELOCATION));
+    }
+
+    const CRS: Module = Module(0x0080_0000);
+    const LIB: Module = Module(0x0090_0000);
+    const USER: Module = Module(0x00A0_0000);
+    const DATA_BUFFER: u32 = 0x0800_0000;
+    const BSS_BUFFER: u32 = 0x0800_1000;
+
+    fn abs(target: u32) -> Patch {
+        Patch {
+            target,
+            kind: reloc::ABS32,
+            addend: 0,
+        }
+    }
+
+    /// The program: text at 0x100000, read-only data and data a page
+    /// apart. It exports one function, and takes one function of "Lib"
+    /// into its data.
+    fn crs() -> Spec {
+        Spec {
+            name: "|static|".into(),
+            program: Some([
+                (0x10_0000, 0x1000, segment::TEXT),
+                (0x10_1000, 0x1000, segment::RODATA),
+                (0x10_2000, 0x1000, segment::DATA),
+                (0, 0, segment::BSS),
+            ]),
+            exports: vec![("crs_func".into(), tag(0, 0x10))],
+            modules: vec![ModuleImport {
+                name: "Lib".into(),
+                anonymous: vec![(tag(0, 8), vec![abs(tag(2, 0x40))])],
+                ..Default::default()
+            }],
+            on_unresolved: Some(tag(0, 0x100)),
+            ..Spec::default()
+        }
+    }
+
+    /// A library that imports from the program, exports to others and
+    /// points at itself.
+    fn lib() -> Spec {
+        Spec {
+            name: "Lib".into(),
+            text: vec![0; 0x40],
+            rodata: vec![0; 0x10],
+            data: vec![0; 0x10],
+            bss: 0x20,
+            exports: vec![("lib_func".into(), tag(0, 8))],
+            indexed_exports: vec![tag(0, 0xC)],
+            imports: vec![
+                (
+                    "crs_func".into(),
+                    vec![
+                        Patch {
+                            addend: 4,
+                            ..abs(tag(1, 0))
+                        },
+                        abs(tag(2, 4)),
+                    ],
+                ),
+                ("missing".into(), vec![abs(tag(1, 4))]),
+            ],
+            internal: vec![
+                (tag(2, 0), reloc::ABS32, 0, 4),
+                (tag(0, 0x20), reloc::REL32, 1, 0),
+            ],
+            on_unresolved: Some(tag(0, 0x30)),
+            ..Spec::default()
+        }
+    }
+
+    /// A module that imports "Lib"'s function by name, its first indexed
+    /// export and its read-only data by position.
+    fn user() -> Spec {
+        Spec {
+            name: "User".into(),
+            text: vec![0; 0x20],
+            imports: vec![("lib_func".into(), vec![abs(tag(0, 0))])],
+            modules: vec![ModuleImport {
+                name: "Lib".into(),
+                indexed: vec![(0, vec![abs(tag(0, 4))])],
+                anonymous: vec![(tag(1, 0), vec![abs(tag(0, 8))])],
+            }],
+            on_unresolved: Some(tag(0, 0x10)),
+            ..Spec::default()
+        }
+    }
+
+    /// Map, rebase and link a module as `LoadCRO_New` does.
+    fn load(m: &mut Flat, module: Module, spec: &Spec) -> Result<(), ResultCode> {
+        let image = build(spec);
+        m.load(module.0, &image);
+        let data = (DATA_BUFFER, 0x100);
+        let bss = (BSS_BUFFER, 0x100);
+        module.rebase(m, CRS, image.len() as u32, data, bss, false)?;
+        module.link(m, CRS, true)?;
+        module.register(m, CRS, true);
+        Ok(())
+    }
+
+    fn console() -> Flat {
+        let mut m = Flat::default();
+        let image = build(&crs());
+        m.load(CRS.0, &image);
+        CRS.rebase(&mut m, CRS, image.len() as u32, (0, 0), (0, 0), true)
+            .unwrap();
+        m
+    }
+
+    #[test]
+    fn rebasing_places_segments_and_relocates_a_module_to_itself() {
+        let mut m = console();
+        // The program's import from "Lib" waits on the program's handler.
+        assert_eq!(m.read32(0x10_2040), 0x10_0100);
+
+        let image = build(&lib());
+        m.load(LIB.0, &image);
+        let size = image.len() as u32;
+        let data = (DATA_BUFFER, 0x100);
+        assert_eq!(
+            LIB.rebase(
+                &mut m,
+                CRS,
+                size,
+                (DATA_BUFFER, 8),
+                (BSS_BUFFER, 0x100),
+                false
+            ),
+            Err(BUFFER_TOO_SMALL)
+        );
+        m.load(LIB.0, &image);
+        LIB.rebase(&mut m, CRS, size, data, (BSS_BUFFER, 0x100), false)
+            .unwrap();
+        let text = LIB.0 + 0x180;
+        assert_eq!(LIB.segment(&m, 0), (text, 0x40, segment::TEXT));
+        assert_eq!(LIB.segment(&m, 2).0, DATA_BUFFER);
+        assert_eq!(LIB.segment(&m, 3).0, BSS_BUFFER);
+        assert_eq!(LIB.find_export(&m, b"lib_func"), Some(text + 8));
+        // The data is relocated in the image, which the program copies.
+        assert_eq!(m.read32(LIB.get(&m, field::DATA)), text + 4);
+        let rodata = LIB.segment(&m, 1).0;
+        assert_eq!(m.read32(text + 0x20), rodata.wrapping_sub(text + 0x20));
+        // Imports wait on the module's handler.
+        assert_eq!(m.read32(rodata), text + 0x30 + 4);
+        assert_eq!(
+            LIB.unresolved(&m),
+            (vec!["crs_func".into(), "missing".into()], 0)
+        );
+
+        // A second rebase finds the header already rebased.
+        assert_eq!(
+            LIB.rebase(&mut m, CRS, size, data, (BSS_BUFFER, 0x100), false),
+            Err(BAD_HEADER)
+        );
+    }
+
+    #[test]
+    fn modules_link_both_ways_and_unlink() {
+        let mut m = console();
+        // The user comes first: what it wants from "Lib" is not there yet.
+        load(&mut m, USER, &user()).unwrap();
+        let user_text = USER.segment(&m, 0).0;
+        assert_eq!(m.read32(user_text), user_text + 0x10);
+        assert_eq!(USER.unresolved(&m), (vec!["lib_func".into()], 2));
+
+        load(&mut m, LIB, &lib()).unwrap();
+        let text = LIB.segment(&m, 0).0;
+        let rodata = LIB.segment(&m, 1).0;
+        // Lib imported from the program: in place, and into the image's
+        // data rather than the buffer (`LoadCRO_New`).
+        assert_eq!(m.read32(rodata), 0x10_0010 + 4);
+        assert_eq!(m.read32(LIB.get(&m, field::DATA) + 4), 0x10_0010);
+        assert_eq!(m.read32(DATA_BUFFER + 4), text + 0x30);
+        assert_eq!(LIB.unresolved(&m), (vec!["missing".into()], 0));
+        // And exported to the program and to the user.
+        assert_eq!(m.read32(0x10_2040), text + 8);
+        assert_eq!(m.read32(user_text), text + 8);
+        assert_eq!(m.read32(user_text + 4), text + 0xC);
+        assert_eq!(m.read32(user_text + 8), rodata);
+        assert_eq!(USER.unresolved(&m), (vec![], 0));
+
+        // The auto-link list: the program, then the user, then Lib; the
+        // head knows the tail.
+        assert_eq!(CRS.get(&m, field::NEXT), USER.0);
+        assert_eq!(USER.get(&m, field::NEXT), LIB.0);
+        assert_eq!(USER.get(&m, field::PREVIOUS), LIB.0);
+        assert_eq!(LIB.get(&m, field::PREVIOUS), USER.0);
+
+        LIB.unlink(&mut m, CRS).unwrap();
+        assert_eq!(m.read32(user_text), user_text + 0x10);
+        assert_eq!(m.read32(user_text + 8), user_text + 0x10);
+        assert_eq!(m.read32(0x10_2040), 0x10_0100);
+        assert_eq!(m.read32(rodata), text + 0x30 + 4);
+        assert_eq!(USER.unresolved(&m), (vec!["lib_func".into()], 2));
+        LIB.link(&mut m, CRS, false).unwrap();
+        assert_eq!(USER.unresolved(&m), (vec![], 0));
+    }
+
+    #[test]
+    fn fixing_gives_up_the_tables_a_level_names() {
+        let mut m = console();
+        load(&mut m, LIB, &lib()).unwrap();
+        let size = LIB.get(&m, field::FILE_SIZE);
+        let kept = LIB.fix(&mut m, 0);
+        assert!(kept <= size && kept.is_multiple_of(0x1000), "{kept:#x}");
+        assert!(!LIB.is_fixed(&m));
+        LIB.set(&mut m, field::FIXED_SIZE, 0);
+        LIB.fix(&mut m, 3);
+        assert!(LIB.is_fixed(&m) && LIB.is_loaded(&m));
+        assert_eq!(LIB.count(&m, field::EXPORT_NAMED), 0);
+        assert_eq!(LIB.count(&m, field::IMPORT_NAMED), 0);
+        assert_eq!(LIB.find_export(&m, b"lib_func"), None);
+        assert_eq!(LIB.executable_pages(&m), Some((LIB.0, 0x1000)));
     }
 }
