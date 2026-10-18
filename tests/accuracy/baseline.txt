@@ -320,3 +320,4 @@ fastboot3ds-menu/../3ds/fastboot3ds/fastboot3DS.firm PASS
 fastboot3ds-file-browser/../3ds/fastboot3ds/fastboot3DS.firm PASS
 linux-login/../3ds/linux/firm_linux_loader.firm PASS
 open-agb-firm-browser/../3ds/open_agb_firm/open_agb_firm.firm PASS
+hbmenu/../3ds/hbmenu/boot.3dsx PASS

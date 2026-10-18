@@ -8,10 +8,14 @@
 //!          [--dump-failures DIR]
 //! ```
 //!
-//! Every ROM runs in-process (a panic counts as a crash) with a frame budget.
-//! `--ci` exits non-zero when any result differs from the baseline, in either
-//! direction, so improvements are recorded deliberately with
-//! `--update-baseline`.
+//! Every ROM runs in-process (a panic counts as a crash) with a frame budget;
+//! a ROM that is absent is skipped. `--ci` exits non-zero when any result
+//! differs from the baseline, in either direction, so improvements are
+//! recorded deliberately with `--update-baseline`. Suites marked `tracking`
+//! are reported but never compared: their ROMs are not public.
+//!
+//! The suites root defaults to `$CRAB_ROMS` when it is set, so a worktree
+//! can run the suites against the ROMs of the main checkout.
 
 use emu_core::System;
 use gb_core::{Cartridge, Gb, Model};
@@ -69,6 +73,8 @@ struct Suite {
     both_screens: bool,
     /// `ctr-frame`: files for the SD card as `path/on/card=path/under/roms`.
     sd_files: Vec<String>,
+    /// Reported, never compared with the baseline.
+    tracking: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +95,7 @@ struct Case {
     both_screens: bool,
     /// Card path and host path of each file on the SD card.
     sd_files: Vec<(String, PathBuf)>,
+    tracking: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +154,7 @@ fn load_suites(path: &Path) -> Vec<Suite> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                tracking: s.get("tracking").and_then(|v| v.as_bool()).unwrap_or(false),
             }
         })
         .collect()
@@ -337,6 +345,7 @@ fn cases(suites: &[Suite], root: &Path, filter: Option<&str>) -> Vec<Case> {
                         (card.to_string(), root.join(host))
                     })
                     .collect(),
+                tracking: s.tracking,
             });
         }
     }
@@ -374,6 +383,16 @@ fn boot(rom: &[u8], model: &str, name: &str, kind: &str) -> Option<Gb> {
 }
 
 fn run_case(case: &Case) -> Result_ {
+    // Not fetched, or not public: nothing to run.
+    if !case.path.is_file() {
+        return Result_ {
+            outcome: Outcome::Skip,
+            detail: format!("{} is absent", case.path.display()),
+        };
+    }
+    if case.kind == "ctr-hle-frame" {
+        return run_ctr_hle_frame(case);
+    }
     let rom = match std::fs::read(&case.path) {
         Ok(r) => r,
         Err(e) => {
@@ -662,11 +681,83 @@ fn run_jsmolka(rom: &[u8], frames: u64) -> Result_ {
     }
 }
 
+/// Run a 3DS console for the case's frame budget with its input script, and
+/// compare the hash of the top screen, or of both, with the pinned one.
+fn run_and_hash(system: &mut dyn System, case: &Case) -> Result_ {
+    let script = match case.input.as_deref().map(crab_cli::parse_input_script) {
+        Some(Ok(script)) => script,
+        Some(Err(e)) => {
+            return Result_ {
+                outcome: Outcome::Crash,
+                detail: e,
+            }
+        }
+        None => Vec::new(),
+    };
+    for frame in 0..case.frames {
+        for event in script.iter().filter(|e| e.frame == frame) {
+            event.apply(system);
+        }
+        system.run_frame();
+        system.take_audio();
+    }
+    let frame = if case.both_screens {
+        emu_core::Layout::of(system).compose(system, &emu_core::DMG_PALETTE)
+    } else {
+        system.frame()
+    };
+    let hash = crab_cli::fnv1a32(&frame.to_rgba(&emu_core::DMG_PALETTE));
+    let expected = case.hash.as_deref().unwrap_or("");
+    if format!("{hash:08x}") == expected {
+        Result_ {
+            outcome: Outcome::Pass,
+            detail: String::new(),
+        }
+    } else {
+        Result_ {
+            outcome: Outcome::Fail,
+            detail: format!("frame hash {hash:08x}, expected {expected}"),
+        }
+    }
+}
+
+/// A 3DS program in the high-level mode: 3DSX homebrew, read whole, or a
+/// decrypted card image or program content, read where it lies.
+fn run_ctr_hle_frame(case: &Case) -> Result_ {
+    use ctr_hle::Horizon;
+    let homebrew = case
+        .path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("3dsx"));
+    let console = if homebrew {
+        std::fs::read(&case.path)
+            .map_err(|e| e.to_string())
+            .and_then(|image| Horizon::from_3dsx(&image))
+    } else {
+        crab_systems::FileStorage::open(&case.path)
+            .map_err(|e| e.to_string())
+            .and_then(|media| Horizon::from_media(Box::new(media)))
+    };
+    let mut h = match console {
+        Ok(h) => h,
+        Err(e) => {
+            return Result_ {
+                outcome: Outcome::Crash,
+                detail: e,
+            }
+        }
+    };
+    let mut result = run_and_hash(&mut h, case);
+    if let (Outcome::Fail, Some(why)) = (result.outcome, &h.fatal) {
+        result.detail = format!("{} (stopped: {why})", result.detail);
+    }
+    result
+}
+
 /// A 3DS payload: run it for the frame budget, with an optional SD card and
 /// input script, and compare the hash of the top screen, or of both, with
 /// the pinned one.
 fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
-    use emu_core::System;
     let crash = |detail: String| Result_ {
         outcome: Outcome::Crash,
         detail,
@@ -688,6 +779,12 @@ fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
         for (card, host) in &case.sd_files {
             match std::fs::read(host) {
                 Ok(data) => files.push((card.as_str(), data)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Result_ {
+                        outcome: Outcome::Skip,
+                        detail: format!("{} is absent", host.display()),
+                    }
+                }
                 Err(e) => return crash(format!("{}: {e}", host.display())),
             }
         }
@@ -697,35 +794,7 @@ fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
             Err(e) => return crash(e.to_string()),
         }
     }
-    let script = match case.input.as_deref().map(crab_cli::parse_input_script) {
-        Some(Ok(script)) => script,
-        Some(Err(e)) => return crash(e),
-        None => Vec::new(),
-    };
-    for frame in 0..case.frames {
-        for event in script.iter().filter(|e| e.frame == frame) {
-            event.apply(&mut ctr);
-        }
-        ctr.run_frame();
-    }
-    let frame = if case.both_screens {
-        emu_core::Layout::of(&ctr).compose(&ctr, &emu_core::DMG_PALETTE)
-    } else {
-        ctr.frame()
-    };
-    let hash = crab_cli::fnv1a32(&frame.to_rgba(&emu_core::DMG_PALETTE));
-    let expected = case.hash.as_deref().unwrap_or("");
-    if format!("{hash:08x}") == expected {
-        Result_ {
-            outcome: Outcome::Pass,
-            detail: String::new(),
-        }
-    } else {
-        Result_ {
-            outcome: Outcome::Fail,
-            detail: format!("frame hash {hash:08x}, expected {expected}"),
-        }
-    }
+    run_and_hash(&mut ctr, case)
 }
 
 fn read_baseline(path: &Path) -> BTreeMap<String, Outcome> {
@@ -748,7 +817,9 @@ fn read_baseline(path: &Path) -> BTreeMap<String, Outcome> {
 
 fn main() {
     let mut suites_path = PathBuf::from("tests/accuracy/suites.toml");
-    let mut roms_root = PathBuf::from("roms/test-suites/gb");
+    let mut roms_root = std::env::var_os("CRAB_ROMS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("roms/test-suites/gb"));
     let mut baseline_path = PathBuf::from("tests/accuracy/baseline.txt");
     let mut filter: Option<String> = None;
     let mut jobs = std::thread::available_parallelism()
@@ -863,7 +934,14 @@ fn main() {
     println!("total {total_pass}/{total} passed");
 
     if let Some(path) = &markdown {
-        let mut doc = String::from("# Accuracy suite results\n\nGenerated by `cargo run --release -p crab-cli --bin accuracy -- --markdown docs/accuracy.md`.\n\n");
+        let mut doc = String::from(
+            "# Accuracy suite results\n\n\
+             Generated by `cargo run --release -p crab-cli --bin accuracy -- --markdown \
+             docs/accuracy.md`.\n\n\
+             A ROM that is absent is skipped. Suites marked `tracking` in \
+             `tests/accuracy/suites.toml` run a game that is not public where it is present \
+             and are never compared with the baseline.\n\n",
+        );
         doc.push_str(&md);
         doc.push_str("\n## Failing tests\n\n");
         for (case, r) in all.iter().zip(&results) {
@@ -886,7 +964,7 @@ fn main() {
     if update {
         let mut text =
             String::from("# accuracy baseline: <suite>/<rom> <PASS|FAIL|TIMEOUT|CRASH|SKIP>\n");
-        for (case, r) in all.iter().zip(&results) {
+        for (case, r) in all.iter().zip(&results).filter(|(case, _)| !case.tracking) {
             text.push_str(&format!(
                 "{}/{} {}\n",
                 case.suite,
@@ -905,6 +983,10 @@ fn main() {
         let mut unknown = 0;
         for (case, r) in all.iter().zip(&results) {
             let id = format!("{}/{}", case.suite, case.rel);
+            if case.tracking {
+                println!("TRACKING {id}: {} {}", r.outcome.name(), r.detail);
+                continue;
+            }
             match baseline.get(&id) {
                 None => unknown += 1,
                 Some(&b) if b == r.outcome => {}

@@ -212,3 +212,39 @@ sd_fat = true
 both_screens = true
 hash = "f7a376a2"
 roms = ["../3ds/open_agb_firm/open_agb_firm.firm"]
+
+# The high-level mode (`ctr-hle`).
+#
+# kind:
+#   ctr-hle-frame   run a 3DS program in the high-level mode for `frames`
+#                   with an optional input script (`input`, which also takes
+#                   TOUCH:X:Y@F and CPAD:X:Y@F), then compare the hash of the
+#                   top screen, or of both (`both_screens`), with `hash`. A
+#                   3DSX is read whole; a decrypted card image (.3ds/.cci) or
+#                   program content (.cxi) is read where it lies.
+#
+# A suite marked `tracking = true` is reported but never compared with the
+# baseline: its ROM is not public and is skipped where it is absent. Any
+# absent ROM is skipped (SKIP), not reported as a crash.
+
+# devkitPro's Homebrew Menu v2.4.3 (fetch_test_roms --only 3ds). The hash
+# moves as the high-level mode grows; re-pin it when a change means to.
+[[suite]]
+name = "hbmenu"
+kind = "ctr-hle-frame"
+frames = 300
+both_screens = true
+hash = "4bf94dc5"
+roms = ["../3ds/hbmenu/boot.3dsx"]
+
+# A retail game from a decrypted dump of one's own, where present: run with
+# --roms (or CRAB_ROMS) pointing at the main checkout's roms/test-suites/gb.
+# Its hash is pinned once the game reaches its title screen.
+[[suite]]
+name = "ultra-sun"
+kind = "ctr-hle-frame"
+frames = 600
+both_screens = true
+tracking = true
+hash = ""
+roms = ["../../tests/Pokemon Ultra Sun (USA) (En,Ja,Fr,De,Es,It,Zh,Ko).3ds"]
