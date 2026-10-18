@@ -214,6 +214,13 @@ frame length on the clock. VBlank comes every 4,481,136 cycles, as on the low-le
 quantum is arbitrary and pinned by the frame hashes; changing it is a timing
 change.
 
+## Diagnostics
+
+`Horizon::trace` holds flags by area (`trace.rs`: svc, ipc, gx, irq, dsp, ro,
+fs, service); code notes details of an area only when its flag is set, and
+`ctr-diag --trace=gx,irq` sets them. Every registered service hears of each
+vertical blank through `Service::vblank`.
+
 ## Not yet
 
 The second application core, `ldr:ro` (CRO modules), the GPU drawing what

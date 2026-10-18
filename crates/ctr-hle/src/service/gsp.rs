@@ -14,10 +14,9 @@ use crate::ipc::{Reply, Request};
 use crate::kernel::ObjId;
 use crate::result::{self, ResultCode};
 use crate::service::Service;
+use crate::trace;
 use ctr_core::gpu::{GpuIrq, GpuJob};
 
-/// The tag `Horizon` delivers at each vertical blank.
-pub const VBLANK: u32 = 0x100;
 const NAME: &str = "gsp::Gpu";
 /// The shared page: interrupt queues from 0, framebuffer information from
 /// 0x200 and GX command queues from 0x800, each by client.
@@ -82,6 +81,9 @@ impl Gsp {
 
     /// Put interrupt `id` in the client's queue and signal its event.
     fn relay(&self, h: &mut Horizon, id: u8) {
+        if h.trace & trace::IRQ != 0 && id != 2 && id != 3 {
+            h.note(format!("gsp::Gpu interrupt {id}"));
+        }
         let Some((_, pa)) = self.shared else {
             return;
         };
@@ -154,6 +156,9 @@ impl Gsp {
 
     /// Carry out one GX command.
     fn execute(&self, h: &mut Horizon, command: &[u32; 8]) -> ResultCode {
+        if h.trace & trace::GX != 0 {
+            h.note(format!("gsp::Gpu GX {command:08x?}"));
+        }
         match command[0] & 0xFF {
             // RequestDma(source, destination, size): the copy is done at
             // once and reported after one cycle (not measured).
@@ -421,13 +426,17 @@ impl Service for Gsp {
         }
     }
 
+    /// Each display controller sets its VBlank flag; the framebuffers the
+    /// client marked are taken up and both PDC interrupts relayed.
+    fn vblank(&mut self, h: &mut Horizon) {
+        h.gpu.vblank();
+        self.update_framebuffers(h);
+        self.relay(h, 2);
+        self.relay(h, 3);
+    }
+
     fn event(&mut self, h: &mut Horizon, tag: u32) {
         match tag {
-            VBLANK => {
-                self.update_framebuffers(h);
-                self.relay(h, 2);
-                self.relay(h, 3);
-            }
             DMA => self.relay(h, DMA as u8),
             _ => {
                 let unit = UNITS[(tag & 0xF) as usize % UNITS.len()];
@@ -441,6 +450,25 @@ impl Service for Gsp {
                 }
             }
         }
+    }
+}
+
+/// The LCD service, `gsp::Lcd` (3dbrew, "GSP Services"). Not written yet:
+/// every command is unhandled.
+pub struct Lcd;
+
+/// The LCD service as `service::standard` registers it.
+pub fn lcd() -> Box<dyn Service> {
+    Box::new(Lcd)
+}
+
+impl Service for Lcd {
+    fn name(&self) -> &str {
+        "gsp::Lcd"
+    }
+
+    fn call(&mut self, h: &mut Horizon, _object: u32, request: &Request) -> Reply {
+        h.unhandled("gsp::Lcd", request)
     }
 }
 

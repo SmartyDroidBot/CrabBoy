@@ -15,6 +15,11 @@
 //! processor, all after the last frame. `--watch` (hex, ends
 //! included, repeatable) prints the latest accesses to a register range in
 //! the order they happened.
+//!
+//! Any other image (a card image, an NCCH, a 3DSX) runs in the high-level
+//! mode, which also takes `--strict` (stop at the first unwritten service
+//! command), `--watch=ADDR` (one virtual word) and
+//! `--trace=svc,ipc,gx,irq,dsp,ro,fs,service,all` (what to log).
 
 use crab_cli::{encode_png, fnv1a32, parse_input_script};
 use ctr_core::Ctr;
@@ -74,6 +79,12 @@ fn run_hle(
     };
     let mut h = console.unwrap_or_else(|e| fail(e));
     h.strict = args.iter().any(|a| a == "--strict");
+    if let Some(names) = option("trace") {
+        for name in names.split(',') {
+            h.trace |= ctr_hle::trace::flag(name)
+                .unwrap_or_else(|| fail(format!("--trace: no area called {name}")));
+        }
+    }
     if let Some(addr) =
         option("watch").and_then(|a| u32::from_str_radix(a.trim_start_matches("0x"), 16).ok())
     {

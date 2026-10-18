@@ -1132,6 +1132,7 @@ dependencies = [
  "ctr-fs",
  "emu-core",
  "pica",
+ "teak-dsp",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@ keys.txt
 
 # Local tool settings
 .claude/settings.local.json
+.claude/worktrees/
 
 # Stuck Windows build scripts (leftover from an aborted Windows build)
 target_stuck_windows/

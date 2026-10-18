@@ -16,6 +16,7 @@ pub mod dsp;
 pub mod fs;
 pub mod gsp;
 pub mod hid;
+pub mod ldr_ro;
 
 use crate::horizon::Horizon;
 use crate::ipc::{Reply, Request};
@@ -31,6 +32,10 @@ pub trait Service {
 
     /// A clock event the service scheduled with `Horizon::schedule_service`.
     fn event(&mut self, _h: &mut Horizon, _tag: u32) {}
+
+    /// The vertical blank: every registered service hears of it, in the
+    /// order they were registered.
+    fn vblank(&mut self, _h: &mut Horizon) {}
 }
 
 /// The place a service occupies while it is answering a request.
@@ -178,6 +183,8 @@ pub fn standard(name: &str) -> Option<Box<dyn Service>> {
         "cfg" => Box::new(cfg::Cfg),
         "dsp::DSP" => Box::new(dsp::Dsp::default()),
         "gsp::Gpu" => Box::new(gsp::Gsp::default()),
+        "gsp::Lcd" => gsp::lcd(),
+        "ldr:ro" => ldr_ro::service(),
         "hid" => Box::new(hid::Hid::default()),
         _ => return None,
     })

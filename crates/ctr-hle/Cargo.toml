@@ -13,3 +13,4 @@ ctr-fs = { workspace = true }
 arm-core = { workspace = true }
 ctr-core = { workspace = true }
 pica = { workspace = true }
+teak-dsp = { workspace = true }

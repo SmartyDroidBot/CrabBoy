@@ -157,6 +157,10 @@ pub struct Horizon {
     /// A word to watch while debugging: each change is logged with the
     /// instruction and thread that made it. Costs a read per instruction.
     pub watch: Option<(u32, u32)>,
+    /// What to log, by area (`crate::trace`).
+    pub trace: u32,
+    /// Sound made since the frontend last took it.
+    pub audio: emu_core::audio::AudioBuffer,
 }
 
 impl Horizon {
@@ -257,6 +261,8 @@ impl Horizon {
             reported: BTreeSet::new(),
             strict: false,
             watch: None,
+            trace: 0,
+            audio: emu_core::audio::AudioBuffer::new(),
         };
         console.reschedule();
         Ok(console)
@@ -577,8 +583,12 @@ impl Horizon {
         while let Some((at, event)) = self.clock.pop_due() {
             match event {
                 HleEvent::VBlank => {
-                    self.gpu.vblank();
-                    self.notify_service("gsp::Gpu", service::gsp::VBLANK);
+                    for index in 0..self.services.len() {
+                        let mut service =
+                            std::mem::replace(&mut self.services[index], Box::new(Vacant));
+                        service.vblank(self);
+                        self.services[index] = service;
+                    }
                     if let Some(page) = self
                         .process
                         .space
@@ -729,8 +739,13 @@ impl System for Horizon {
         32_728
     }
 
+    fn take_audio(&mut self) -> emu_core::audio::AudioBuffer {
+        std::mem::take(&mut self.audio)
+    }
+
+    /// A card title has save data; homebrew has saves once it writes any.
     fn battery_backed(&self) -> bool {
-        false
+        self.save_size > 0 || !self.saves.is_empty()
     }
 
     /// The saved files, or nothing if the program never saved.
