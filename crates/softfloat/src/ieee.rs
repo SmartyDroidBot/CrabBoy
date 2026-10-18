@@ -667,6 +667,182 @@ impl F32 {
     pub fn to_f64(self, env: &mut Env) -> F64 {
         F64(convert(Format::SINGLE, Format::DOUBLE, self.0 as u64, env))
     }
+
+    /// `1 / sqrt(self)`, rounded once from a 63-bit root and quotient.
+    pub fn rsqrt(self, env: &mut Env) -> Self {
+        F32(rsqrt(Format::SINGLE, self.0 as u64, env) as u32)
+    }
+
+    /// `2^self`, from a 64-bit fixed-point series; rounded once.
+    pub fn exp2(self, env: &mut Env) -> Self {
+        F32(exp2(Format::SINGLE, self.0 as u64, env) as u32)
+    }
+
+    /// `log2(self)`, from 62 bits of fraction found by repeated squaring;
+    /// rounded once.
+    pub fn log2(self, env: &mut Env) -> Self {
+        F32(log2(Format::SINGLE, self.0 as u64, env) as u32)
+    }
+
+    /// The nearest value to `value / 2^frac_bits`.
+    pub fn from_fixed(value: i64, frac_bits: u32, env: &mut Env) -> Self {
+        if value == 0 {
+            return F32(0);
+        }
+        let bits = round_pack(
+            Format::SINGLE,
+            value < 0,
+            value.unsigned_abs() as u128,
+            -(frac_bits as i32),
+            false,
+            env,
+        );
+        F32(bits as u32)
+    }
+
+    /// `self * 2^frac_bits` as an integer, rounded under `round` and
+    /// saturated to the range of `i64`; a NaN gives zero. No flags.
+    pub fn to_fixed(self, frac_bits: u32, round: Round) -> i64 {
+        let a = unpack(Format::SINGLE, self.0 as u64, &mut Env::default());
+        let magnitude = match a.class {
+            Class::Nan { .. } | Class::Zero => return 0,
+            Class::Infinity => u128::MAX,
+            Class::Finite { sig, exp } => to_integer(a.sign, sig, exp + frac_bits as i32, round).0,
+        };
+        if a.sign {
+            -(magnitude.min(1 << 63) as i128) as i64
+        } else {
+            magnitude.min(i64::MAX as u128) as i64
+        }
+    }
+}
+
+/// `ln 2` with 64 fractional bits.
+const LN2: u128 = 0xB172_17F7_D1CF_79AB;
+
+fn rsqrt(fmt: Format, a: u64, env: &mut Env) -> u64 {
+    let a = unpack(fmt, a, env);
+    match a.class {
+        Class::Nan { .. } => propagate_nan(fmt, &[a], env),
+        Class::Zero => {
+            env.raise(Flags::DIV_BY_ZERO);
+            fmt.infinity(a.sign)
+        }
+        _ if a.sign => invalid(fmt, env),
+        Class::Infinity => fmt.zero(false),
+        Class::Finite { sig, exp } => {
+            // The root of a significand near 2^126 has 63 bits; its
+            // reciprocal is taken to 63 bits again.
+            let mut shift = sig.leading_zeros() - 1;
+            if (exp - shift as i32) % 2 != 0 {
+                shift -= 1;
+            }
+            let scaled = sig << shift;
+            let root = isqrt(scaled);
+            let quotient = (1u128 << 126) / root;
+            let sticky = root * root != scaled || !(1u128 << 126).is_multiple_of(root);
+            round_pack(
+                fmt,
+                false,
+                quotient,
+                -126 - (exp - shift as i32) / 2,
+                sticky,
+                env,
+            )
+        }
+    }
+}
+
+fn exp2(fmt: Format, a: u64, env: &mut Env) -> u64 {
+    let a = unpack(fmt, a, env);
+    match a.class {
+        Class::Nan { .. } => propagate_nan(fmt, &[a], env),
+        Class::Zero => round_pack(fmt, false, 1, 0, false, env),
+        Class::Infinity => {
+            if a.sign {
+                fmt.zero(false)
+            } else {
+                fmt.infinity(false)
+            }
+        }
+        Class::Finite { sig, exp } => {
+            // Past these the result is out of range of either format.
+            let width = 128 - sig.leading_zeros() as i32;
+            if exp + width > 12 {
+                return if a.sign {
+                    round_pack(fmt, false, 1, -1 << 12, false, env)
+                } else {
+                    round_pack(fmt, false, 1, 1 << 12, false, env)
+                };
+            }
+            // The argument in fixed point with 64 fractional bits; what lies
+            // below those cannot change a rounded result.
+            let mut sticky = false;
+            let magnitude = if exp + 64 >= 0 {
+                sig << (exp + 64)
+            } else {
+                shift_right_sticky(sig, (-exp - 64) as u32, &mut sticky)
+            };
+            let fixed = if a.sign {
+                -(magnitude as i128)
+            } else {
+                magnitude as i128
+            };
+            let whole = (fixed >> 64) as i32;
+            let fraction = (fixed & ((1 << 64) - 1)) as u128;
+            // 2^f = e^(f ln 2), summed until the terms vanish.
+            let t = (fraction * LN2) >> 64;
+            let mut sum = 1u128 << 64;
+            let mut term = 1u128 << 64;
+            let mut k = 1;
+            while term != 0 {
+                term = ((term * t) >> 64) / k;
+                sum += term;
+                k += 1;
+            }
+            round_pack(fmt, false, sum, whole - 64, sticky || fraction != 0, env)
+        }
+    }
+}
+
+fn log2(fmt: Format, a: u64, env: &mut Env) -> u64 {
+    let a = unpack(fmt, a, env);
+    match a.class {
+        Class::Nan { .. } => propagate_nan(fmt, &[a], env),
+        Class::Zero => {
+            env.raise(Flags::DIV_BY_ZERO);
+            fmt.infinity(true)
+        }
+        _ if a.sign => invalid(fmt, env),
+        Class::Infinity => fmt.infinity(false),
+        Class::Finite { sig, exp } => {
+            // x = m * 2^e with m in [1, 2) held with 62 fractional bits.
+            let width = 128 - sig.leading_zeros() as i32;
+            let e = exp + width - 1;
+            let mut m = if width > 63 {
+                sig >> (width - 63)
+            } else {
+                sig << (63 - width)
+            };
+            // Each squaring of m doubles its logarithm: the next bit is
+            // whether it reached two.
+            let mut fraction = 0u128;
+            for _ in 0..62 {
+                m = (m * m) >> 62;
+                fraction <<= 1;
+                if m >= 2 << 62 {
+                    m >>= 1;
+                    fraction |= 1;
+                }
+            }
+            let fixed = ((e as i128) << 62) + fraction as i128;
+            if fixed == 0 {
+                return fmt.zero(false);
+            }
+            let exact = sig.is_power_of_two();
+            round_pack(fmt, fixed < 0, fixed.unsigned_abs(), -62, !exact, env)
+        }
+    }
 }
 
 impl F64 {

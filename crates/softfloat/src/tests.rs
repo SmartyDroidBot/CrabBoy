@@ -401,3 +401,61 @@ fn narrowing_rounds_and_keeps_nan_payloads() {
         F32(0xFFC0_0001)
     );
 }
+
+/// Within one unit in the last place of the host's double-precision answer
+/// rounded to single; NaN for NaN.
+fn close(ours: F32, host: f64) -> bool {
+    let host = host as f32;
+    if host.is_nan() {
+        return ours.is_nan();
+    }
+    (ours.0 as i64 - host.to_bits() as i64).abs() <= 1
+}
+
+#[test]
+fn rsqrt_exp2_and_log2_agree_with_the_host() {
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    for _ in 0..20_000 {
+        let bits = rng.f32();
+        let x = f32::from_bits(bits) as f64;
+        let mut env = Env::default();
+        let r = F32(bits).rsqrt(&mut env);
+        assert!(close(r, 1.0 / x.sqrt()), "rsqrt {bits:08x} {:08x}", r.0);
+        let e = F32(bits).exp2(&mut env);
+        assert!(close(e, x.exp2()), "exp2 {bits:08x} {:08x}", e.0);
+        let l = F32(bits).log2(&mut env);
+        if x > 0.0 && x.is_finite() || x == 0.0 || x.is_nan() {
+            assert!(close(l, x.log2()), "log2 {bits:08x} {:08x}", l.0);
+        }
+    }
+}
+
+#[test]
+fn exact_powers_stay_exact() {
+    let mut env = Env::default();
+    let f = |v: f32| F32(v.to_bits());
+    assert_eq!(f(3.0).exp2(&mut env), f(8.0));
+    assert_eq!(f(-2.0).exp2(&mut env), f(0.25));
+    assert_eq!(f(0.0).exp2(&mut env), ONE);
+    assert_eq!(f(1024.0).log2(&mut env), f(10.0));
+    assert_eq!(f(0.125).log2(&mut env), f(-3.0));
+    assert_eq!(ONE.log2(&mut env), F32(0));
+    assert_eq!(f(16.0).rsqrt(&mut env), f(0.25));
+    assert_eq!(env.flags.0, 0);
+    assert!(f(-1.0).log2(&mut env).is_nan());
+    assert_eq!(f(f32::NEG_INFINITY).exp2(&mut env), F32(0));
+}
+
+#[test]
+fn fixed_point_conversions_round_and_saturate() {
+    let mut env = Env::default();
+    let f = |v: f32| F32(v.to_bits());
+    assert_eq!(F32::from_fixed(3 << 15, 16, &mut env), f(1.5));
+    assert_eq!(F32::from_fixed(-1, 4, &mut env), f(-0.0625));
+    assert_eq!(f(1.5).to_fixed(4, Round::Nearest), 24);
+    assert_eq!(f(-0.75).to_fixed(1, Round::Down), -2);
+    assert_eq!(f(-0.75).to_fixed(1, Round::Zero), -1);
+    assert_eq!(f(1e30).to_fixed(16, Round::Zero), i64::MAX);
+    assert_eq!(f(f32::NEG_INFINITY).to_fixed(0, Round::Zero), i64::MIN);
+    assert_eq!(F32(0x7FC0_0000).to_fixed(8, Round::Zero), 0);
+}
