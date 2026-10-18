@@ -201,7 +201,7 @@ impl Module {
     /// Where entry `index` of the table at `field` lies, once the header
     /// holds addresses.
     fn entry(self, m: &dyn Memory, field: u32, size: u32, index: u32) -> u32 {
-        self.get(m, field) + index * size
+        self.get(m, field).wrapping_add(index.wrapping_mul(size))
     }
 
     /// The module's name, from its module name table.
@@ -388,6 +388,9 @@ fn read_entry(m: &dyn Memory, at: u32) -> Entry {
     }
 }
 
+/// The most relocations a batch is followed through.
+const MAX_BATCH: u32 = 0x1_0000;
+
 /// Where a batch of import relocations records that it is resolved.
 const RESOLVED: u32 = 6;
 
@@ -433,7 +436,7 @@ impl Module {
             .find(|&(_, size, kind)| kind == segment::TEXT && size != 0)
             .map(|(start, size, _)| {
                 let first = start & !0xFFF;
-                let end = (start + size).next_multiple_of(0x1000);
+                let end = start.wrapping_add(size).next_multiple_of(0x1000);
                 (first, end - first)
             })
     }
@@ -445,7 +448,7 @@ impl Module {
         let place = self.address(m, tag)?;
         let (index, offset) = split_tag(tag);
         Some(if self.segment(m, index).2 == segment::DATA {
-            self.get(m, field::DATA) + offset
+            self.get(m, field::DATA).wrapping_add(offset)
         } else {
             place
         })
@@ -471,18 +474,18 @@ impl Module {
         }
         let name = self.get(m, field::NAME);
         if name != 0 {
-            self.set(m, field::NAME, name + self.0);
+            self.set(m, field::NAME, name.wrapping_add(self.0));
         }
         for (table, _) in Module::tables() {
             let offset = self.get(m, table);
             if offset != 0 {
-                self.set(m, table, offset + self.0);
+                self.set(m, table, offset.wrapping_add(self.0));
             }
         }
-        let end = self.0 + size;
+        let end = self.0 as u64 + size as u64;
         for (table, entry) in Module::tables() {
             let last = self.get(m, table) as u64 + self.count(m, table) as u64 * entry as u64;
-            if last > end as u64 {
+            if last > end {
                 return Err(BAD_HEADER);
             }
         }
@@ -492,7 +495,7 @@ impl Module {
     /// A string table must end in a zero, if it has anything.
     fn check_strings(self, m: &dyn Memory, table: u32) -> Result<(), ResultCode> {
         let len = self.count(m, table);
-        if len != 0 && m.read8(self.get(m, table) + len - 1) != 0 {
+        if len != 0 && m.read8(self.get(m, table).wrapping_add(len - 1)) != 0 {
             return Err(UNTERMINATED_STRING);
         }
         Ok(())
@@ -523,11 +526,11 @@ impl Module {
                 segment::BSS => bss.0,
                 _ if offset == 0 => continue,
                 _ if offset > size => return Err(BAD_SEGMENT),
-                _ => offset + self.0,
+                _ => offset.wrapping_add(self.0),
             };
             m.write32(at, rebased);
         }
-        Ok(image_data + self.0)
+        Ok(image_data.wrapping_add(self.0))
     }
 
     /// Add the module's address to the offsets in a table's entries:
@@ -545,7 +548,10 @@ impl Module {
             .iter()
             .map(|&(_, within, size)| {
                 let start = self.get(m, within);
-                (start, start + self.count(m, within) * size)
+                (
+                    start,
+                    start.wrapping_add(self.count(m, within).wrapping_mul(size)),
+                )
             })
             .collect();
         for n in 0..self.count(m, table) {
@@ -555,7 +561,7 @@ impl Module {
                 if offset == 0 {
                     continue;
                 }
-                let address = offset + self.0;
+                let address = offset.wrapping_add(self.0);
                 // A string must start inside its table; a sub-table may
                 // also start at the end of its table, when it is empty.
                 let inside = if size == 1 {
@@ -578,7 +584,7 @@ impl Module {
             for &place in places {
                 let address = m.read32(at + place);
                 if address != 0 {
-                    m.write32(at + place, address - self.0);
+                    m.write32(at + place, address.wrapping_sub(self.0));
                 }
             }
         }
@@ -619,32 +625,35 @@ impl Module {
         if symbol == 0 && what == Batch::Resolve {
             return Err(NO_SYMBOL);
         }
-        let mut at = batch;
-        loop {
-            let entry = read_entry(m, at);
+        // A batch ends with an entry that says so; one that runs on past any
+        // table is malformed.
+        for n in 0..=MAX_BATCH {
+            if n == MAX_BATCH {
+                return Err(BAD_RELOCATION);
+            }
+            let entry = read_entry(m, batch.wrapping_add(n * 12));
             let target = self.address(m, entry.target).ok_or(BAD_RELOCATION)?;
             relocate(m, target, entry.kind, entry.addend, symbol, target)?;
             if entry.byte5 != 0 {
                 break;
             }
-            at += 12;
         }
-        m.write8(batch + RESOLVED, (what == Batch::Resolve) as u8);
+        m.write8(batch.wrapping_add(RESOLVED), (what == Batch::Resolve) as u8);
         Ok(())
     }
 
     fn batch_resolved(m: &dyn Memory, batch: u32) -> bool {
-        m.read8(batch + RESOLVED) != 0
+        m.read8(batch.wrapping_add(RESOLVED)) != 0
     }
 
     /// The symbols this module gives the program itself, through
     /// relocations of the CRS's segments.
     fn export_static_anonymous(self, m: &mut dyn Memory, crs: Module) -> Result<(), ResultCode> {
         let start = self.get(m, field::STATIC_RELOCATIONS);
-        let end = start + self.count(m, field::STATIC_RELOCATIONS) * 12;
+        let end = start.wrapping_add(self.count(m, field::STATIC_RELOCATIONS).wrapping_mul(12));
         for n in 0..self.count(m, field::STATIC_ANONYMOUS) {
             let at = self.entry(m, field::STATIC_ANONYMOUS, 8, n);
-            let batch = m.read32(at + 4) + self.0;
+            let batch = m.read32(at + 4).wrapping_add(self.0);
             if !(start..=end).contains(&batch) {
                 return Err(BAD_STATIC_ANONYMOUS);
             }
@@ -665,7 +674,7 @@ impl Module {
                 .ok_or(BAD_INTERNAL_RELOCATION)?;
             let (index, offset) = split_tag(entry.target);
             let target = if self.segment(m, index).2 == segment::DATA {
-                image_data + offset
+                image_data.wrapping_add(offset)
             } else {
                 place
             };
@@ -812,7 +821,7 @@ impl Module {
                     segment::DATA => image_data.wrapping_sub(self.0),
                     segment::BSS => 0,
                     _ if address == 0 => continue,
-                    _ => address - self.0,
+                    _ => address.wrapping_sub(self.0),
                 };
                 m.write32(at, offset);
             }
@@ -822,12 +831,12 @@ impl Module {
         self.set(m, field::FIXED_SIZE, 0);
         let name = self.get(m, field::NAME);
         if name != 0 {
-            self.set(m, field::NAME, name - self.0);
+            self.set(m, field::NAME, name.wrapping_sub(self.0));
         }
         for (table, _) in Module::tables() {
             let address = self.get(m, table);
             if address != 0 {
-                self.set(m, table, address - self.0);
+                self.set(m, table, address.wrapping_sub(self.0));
             }
         }
     }
@@ -1077,10 +1086,15 @@ impl Module {
     pub fn fix(self, m: &mut dyn Memory, level: u32) -> u32 {
         // Where each level's cut starts, in `TABLES`.
         let barrier = [TABLES.len(), 14, 8, 4][level.min(3) as usize];
-        let code_end = self.get(m, field::CODE) + self.count(m, field::CODE);
+        let code_end = self
+            .get(m, field::CODE)
+            .wrapping_add(self.count(m, field::CODE));
         let end = TABLES[2..barrier]
             .iter()
-            .map(|&(table, size)| self.get(m, table) + self.count(m, table) * size)
+            .map(|&(table, size)| {
+                self.get(m, table)
+                    .wrapping_add(self.count(m, table).wrapping_mul(size))
+            })
             .fold((self.0 + HEADER_LEN).max(code_end), u32::max);
         if level != 0 {
             self.set(m, field::MAGIC, MAGIC_FIXD);
@@ -1089,7 +1103,7 @@ impl Module {
                 self.set(m, table + 4, 0);
             }
         }
-        let fixed = end.next_multiple_of(0x1000) - self.0;
+        let fixed = end.next_multiple_of(0x1000).wrapping_sub(self.0);
         self.set(m, field::FIXED_SIZE, fixed);
         fixed
     }
