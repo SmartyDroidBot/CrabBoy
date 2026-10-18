@@ -13,10 +13,9 @@
 //! and float uniforms arrive as three words of 24-bit floats or four of
 //! single precision, last component first.
 
-use crate::framebuffer::Framebuffer;
-use crate::geometry::{Assembler, ScreenVertex, Setup, Topology};
+use crate::geometry::{Assembler, Setup, Topology};
 use crate::memory::Memory;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Stages};
 use crate::raster::Raster;
 use crate::regs::{self as reg, sh};
 use crate::shader::{from_float24, Program, Uniforms, Unit, Vec4, ZERO};
@@ -162,6 +161,15 @@ pub struct Gpu {
     /// The three vertex slots the geometry shader emits into.
     gs_vertices: [OutputVertex; 3],
     pub stats: Stats,
+    /// The decoded fixed-function settings of the current draws.
+    state: Option<Box<DrawState>>,
+}
+
+/// The registers of the stages after the shaders, decoded.
+struct DrawState {
+    setup: Setup,
+    raster: Raster,
+    stages: Stages,
 }
 
 impl Default for Gpu {
@@ -179,6 +187,7 @@ impl Default for Gpu {
             assembler: Assembler::default(),
             gs_inputs: Vec::with_capacity(16),
             gs_vertices: [blank; 3],
+            state: None,
             stats: Stats::default(),
         }
     }
@@ -208,6 +217,19 @@ impl Gpu {
             .fold(0u32, |bits, byte| bits | 0xFF << (byte * 8));
         *slot = *slot & !bits | value & bits;
         let value = *slot;
+        let keeps_state = matches!(
+            id,
+            reg::FIXEDATTRIB_DATA0..=reg::FIXEDATTRIB_DATA2
+                | reg::DRAWARRAYS
+                | reg::DRAWELEMENTS
+                | reg::START_DRAW_FUNC0
+                | reg::VTX_FUNC
+                | reg::RESTART_PRIMITIVE
+                | reg::GSH..=0x2DF
+        );
+        if !keeps_state {
+            self.state = None;
+        }
         match id {
             reg::DRAWARRAYS => self.draw(false, mem),
             reg::DRAWELEMENTS => self.draw(true, mem),
@@ -336,25 +358,27 @@ impl Gpu {
         }
     }
 
-    /// Clip, project and cull a triangle, and rasterise what is left.
+    /// Clip, project and cull a triangle, and rasterise what is left. The
+    /// registers are decoded once for as long as none of them changes.
     fn triangle(&mut self, triangle: [OutputVertex; 3], mem: &mut dyn Memory) {
-        let setup = Setup::new(&self.regs);
+        let state = self.state.get_or_insert_with(|| {
+            Box::new(DrawState {
+                setup: Setup::new(&self.regs),
+                raster: Raster::new(&self.regs),
+                stages: Stages::new(&self.regs),
+            })
+        });
         let mut screen = Vec::with_capacity(4);
-        setup.triangle(triangle, &mut |t| screen.push(t));
+        state.setup.triangle(triangle, &mut |t| screen.push(t));
         for t in screen {
-            self.rasterize(t, mem);
+            let mut pipeline = Pipeline {
+                stages: &state.stages,
+                mem,
+                written: 0,
+            };
+            self.stats.triangles += 1;
+            self.stats.fragments += state.raster.triangle(&t, &mut pipeline);
         }
-    }
-
-    fn rasterize(&mut self, triangle: [ScreenVertex; 3], mem: &mut dyn Memory) {
-        let framebuffer = Framebuffer::new(&self.regs);
-        let mut pipeline = Pipeline {
-            framebuffer: &framebuffer,
-            mem,
-            written: 0,
-        };
-        self.stats.triangles += 1;
-        self.stats.fragments += Raster::new(&self.regs).triangle(&triangle, &mut pipeline);
     }
 
     /// Carry out a command list.

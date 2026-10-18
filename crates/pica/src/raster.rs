@@ -26,6 +26,9 @@ pub struct Fragment {
     pub depth: u32,
     /// The varyings, as `geometry::varying` orders them.
     pub varyings: [i32; varying::COUNT],
+    /// With texture level of detail on: how texcoord0, 1 and 2 change one
+    /// pixel right and one pixel up (du/dx, dv/dx, du/dy, dv/dy).
+    pub footprint: [[i32; 4]; 3],
 }
 
 /// Whatever takes the fragments: the texture, combiner and output stages.
@@ -44,6 +47,7 @@ pub struct Raster {
     /// 1: only even x; 2: even x and odd y.
     pixel_mask: u32,
     w_buffer: bool,
+    lod: bool,
 }
 
 impl Raster {
@@ -67,6 +71,7 @@ impl Raster {
             },
             pixel_mask: r(reg::RASTER_PIXEL_MASK) >> 8 & 3,
             w_buffer: r(reg::DEPTHMAP_MODE) & 1 == 0,
+            lod: r(reg::TEXUNIT_LOD_ENABLE) & 1 != 0,
         }
     }
 
@@ -107,7 +112,11 @@ impl Raster {
                 let Some(edges) = setup.covers(centre) else {
                     continue;
                 };
-                sink.fragment(&setup.fragment(x as u32, y as u32, edges, self.w_buffer));
+                let mut fragment = setup.fragment(x as u32, y as u32, edges, self.w_buffer);
+                if self.lod {
+                    fragment.footprint = setup.footprint(centre, &fragment);
+                }
+                sink.fragment(&fragment);
                 count += 1;
             }
         }
@@ -176,6 +185,25 @@ impl Triangle {
         (0..3).all(|i| e[i] - self.bias[i] >= 0).then_some(e)
     }
 
+    /// The texture coordinates' change to the samples one pixel right and
+    /// one pixel up, interpolated as if they were inside.
+    fn footprint(&self, (cx, cy): (i64, i64), here: &Fragment) -> [[i32; 4]; 3] {
+        let one = 1 << SUBPIXEL_BITS;
+        let at = |p: (i64, i64)| {
+            let e = [self.edge(0, p), self.edge(1, p), self.edge(2, p)];
+            self.fragment(0, 0, e, false).varyings
+        };
+        let (right, up) = (at((cx + one, cy)), at((cx, cy + one)));
+        [varying::TEXCOORD0, varying::TEXCOORD1, varying::TEXCOORD2].map(|k| {
+            [
+                right[k].wrapping_sub(here.varyings[k]),
+                right[k + 1].wrapping_sub(here.varyings[k + 1]),
+                up[k].wrapping_sub(here.varyings[k]),
+                up[k + 1].wrapping_sub(here.varyings[k + 1]),
+            ]
+        })
+    }
+
     fn fragment(&self, x: u32, y: u32, e: [i64; 3], w_buffer: bool) -> Fragment {
         // Perspective-correct weights: e_i / w_i, normalised.
         let p = [0, 1, 2].map(|i| e[i] as i128 * self.q[i] as i128);
@@ -212,6 +240,7 @@ impl Triangle {
             y,
             depth,
             varyings,
+            footprint: [[0; 4]; 3],
         }
     }
 }

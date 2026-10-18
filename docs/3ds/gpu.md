@@ -228,6 +228,26 @@ it, level 0 with the magnification filter (the minimum level still holds).
 Unit 0's projection mode divides u and v by texcoord0.w. Cube maps, shadow
 textures and the procedural unit 3 sample as transparent black.
 
+## Texture combiners (`pica::tev`)
+
+Six stages (0xC0-0xDC and 0xF0-0xFC), each choosing three sources per
+colour and alpha (the vertex colour, the two fragment lighting colours,
+textures 0-3, the combiner buffer, the stage constant, the previous stage;
+others are zero, as is "previous" in stage 0), an operand for each (the
+colour or one channel, or one minus it), a combine mode and a scale (1, 2
+or 4, then clamped). Modes, on 8-bit values with products divided by 255
+and truncated: replace, modulate, add (clamped), add signed (a + b − 128,
+clamped), interpolate (a·c + b·(1 − c)), subtract (clamped at zero), dot3
+RGB and RGBA (Σ ((2a − 255)(2b − 255) + 128) / 256 per channel, clamped, on
+all three colour channels and for RGBA also alpha: Citra's formula, which
+hardware results bounded), multiply-add and add-multiply.
+
+The combiner buffer starts as `TEXENV_BUFFER_COLOR`; bits 8-11 and 12-15 of
+`TEXENV_UPDATE_BUFFER` make stages 0-3 store their colour and alpha in it,
+and a stage reads what was stored up to two stages before it (the delay
+Citra has from hardware tests). Unit 2 reads texcoord1 when bit 13 of
+`TEXUNIT_CONFIG` is set. The last stage's output goes to the output merger.
+
 ## Not started
 
-Texture combiners and fragment lighting.
+Fragment lighting and fog.
