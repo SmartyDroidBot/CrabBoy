@@ -107,7 +107,47 @@ The vertex shader gets attribute `i` in the input register its permutation
 mask (0x2BD) takes the semantics of `SH_OUTMAP_Ok` (0x50 + k), for
 `SH_OUTMAP_TOTAL` of them; semantics nothing maps read as 1.0.
 
+## Primitive assembly and clipping (`pica::geometry`)
+
+`PRIMITIVE_CONFIG` bits 8-9 choose triangles, a strip, a fan or geometry
+primitives (a list unless a geometry shader emits them). A strip keeps its
+winding by replacing its two kept vertices in turn, so its triangles are
+(0, 1, 2), (2, 1, 3), (2, 3, 4)...; a fan keeps its first vertex. Every draw,
+and a write to `RESTART_PRIMITIVE`, starts afresh; immediate-mode vertices
+continue the primitive until then.
+
+With `GEOSTAGE_CONFIG` mode 2 the vertex shader's enabled outputs, in order,
+fill the geometry shader's input buffer; when it holds
+`GSH_INPUTBUFFER_CONFIG + 1` vectors the geometry shader runs on them
+(through its own permutation). Each `EMIT` stores the outputs, mapped by the
+geometry shader's output mask, in the slot `SETEMIT` named; an emit that
+ends a primitive draws slots 0, 1, 2, or 1, 0, 2 for the other winding.
+
+Flat shading (0x58) gives the whole triangle its third vertex's colour.
+Triangles are clipped in clip space (single precision) against w ≥ 2^-16,
+-w ≤ x ≤ w, -w ≤ y ≤ w, -w ≤ z ≤ 0 and, when `FRAGOP_CLIP` is on, the user
+plane, interpolating every attribute where an edge crosses. The result is a
+fan. Window coordinates are (x/w + 1) times the half width plus the viewport
+corner (`VIEWPORT_XY`, signed 10 bits), likewise for y, with y up. The depth
+map is `scale * z / w + offset` with `DEPTHMAP_TRANSFORM_ENABLE`, else
+`-z / w`. Face culling (0x40) on the window-space winding: mode 1 drops
+counter-clockwise triangles, mode 2 clockwise ones; zero-area triangles are
+dropped.
+
+## Fixed point
+
+The rasteriser and everything after it work in integers. The scheme fixes
+the frame hashes, so changing it changes them.
+
+- Window x and y: 4 fractional (subpixel) bits, to nearest.
+- Depth (the depth map's output): 24 fractional bits, to nearest, unclamped
+  until it is tested.
+- Varyings (colour, the three texture coordinates and texcoord0.w, the
+  normal quaternion and the view vector): 16 fractional bits, to nearest,
+  saturated to 32 bits; colours are first clamped to [0, 1].
+- `1/w` stays a float until a triangle is set up.
+
 ## Not started
 
-Primitive assembly, clipping, the rasteriser, texture units and combiners,
-fragment lighting, the framebuffer and the geometry stage.
+The rasteriser, texture units and combiners, fragment lighting and the
+framebuffer.

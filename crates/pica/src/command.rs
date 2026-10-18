@@ -13,10 +13,13 @@
 //! and float uniforms arrive as three words of 24-bit floats or four of
 //! single precision, last component first.
 
+use crate::geometry::{Assembler, ScreenVertex, Setup, Topology};
 use crate::memory::Memory;
 use crate::regs::{self as reg, sh};
 use crate::shader::{from_float24, Program, Uniforms, Unit, Vec4, ZERO};
-use crate::vertex::{attribute_from_words, shader_inputs, Attributes, Loader, OutputVertex};
+use crate::vertex::{
+    attribute_from_words, semantic, shader_inputs, Attributes, Loader, OutputVertex,
+};
 use softfloat::F32;
 
 pub const REGISTERS: usize = reg::COUNT;
@@ -150,11 +153,19 @@ pub struct Gpu {
     fixed_words: Vec<u32>,
     /// The attributes of the immediate-mode vertex being sent.
     immediate: Vec<Vec4>,
+    assembler: Assembler,
+    /// Vertex shader outputs waiting for the geometry shader.
+    gs_inputs: Vec<Vec4>,
+    /// The three vertex slots the geometry shader emits into.
+    gs_vertices: [OutputVertex; 3],
     pub stats: Stats,
 }
 
 impl Default for Gpu {
     fn default() -> Self {
+        let blank = OutputVertex {
+            attrs: [ZERO; semantic::COUNT],
+        };
         Gpu {
             regs: [0; REGISTERS],
             geometry: ShaderSetup::default(),
@@ -162,6 +173,9 @@ impl Default for Gpu {
             fixed: [[ZERO; 4]; 12],
             fixed_words: Vec::with_capacity(3),
             immediate: Vec::with_capacity(16),
+            assembler: Assembler::default(),
+            gs_inputs: Vec::with_capacity(16),
+            gs_vertices: [blank; 3],
             stats: Stats::default(),
         }
     }
@@ -194,6 +208,7 @@ impl Gpu {
         match id {
             reg::DRAWARRAYS => self.draw(false, mem),
             reg::DRAWELEMENTS => self.draw(true, mem),
+            reg::RESTART_PRIMITIVE => self.assembler.restart(),
             reg::FIXEDATTRIB_INDEX => {
                 self.fixed_words.clear();
                 self.immediate.clear();
@@ -242,6 +257,7 @@ impl Gpu {
         let regs = self.regs;
         let loader = Loader::new(&regs);
         let count = loader.attribute_count();
+        self.assembler.restart();
         for n in 0..regs[reg::NUMVERTICES as usize] {
             let index = loader.index(n, indexed, mem);
             let attributes = loader.load(index, &self.fixed, mem);
@@ -250,8 +266,9 @@ impl Gpu {
         }
     }
 
-    /// Run the vertex shader on one vertex's attributes.
-    pub fn shade(&self, attributes: &[Vec4], count: usize) -> OutputVertex {
+    /// Run the vertex shader on one vertex's attributes: its output
+    /// registers.
+    pub fn shade(&self, attributes: &[Vec4], count: usize) -> [Vec4; 16] {
         let mut unit = Unit {
             inputs: shader_inputs(&self.regs, reg::VSH, attributes, count),
             ..Unit::default()
@@ -261,14 +278,74 @@ impl Gpu {
             &self.vertex.uniforms,
             self.vertex.entry,
         );
-        let mask = self.regs[(reg::VSH + sh::OUTMAP_MASK) as usize];
-        OutputVertex::from_outputs(&self.regs, mask, &unit.outputs)
+        unit.outputs
     }
 
-    /// A shaded vertex enters primitive assembly.
-    fn submit(&mut self, vertex: OutputVertex, mem: &mut dyn Memory) {
-        let _ = (vertex, mem);
+    fn reg(&self, id: u32) -> u32 {
+        self.regs[id as usize]
+    }
+
+    /// A shaded vertex enters primitive assembly, or with a geometry shader
+    /// in use (`GEOSTAGE_CONFIG` mode 2) that shader's input buffer: the
+    /// enabled outputs in order, until it holds as many as the shader takes.
+    fn submit(&mut self, outputs: [Vec4; 16], mem: &mut dyn Memory) {
         self.stats.vertices += 1;
+        let mask = self.reg(reg::VSH + sh::OUTMAP_MASK);
+        if self.reg(reg::GEOSTAGE_CONFIG) & 3 == 2 {
+            let enabled = (0..16).filter(|r| mask >> r & 1 != 0);
+            self.gs_inputs.extend(enabled.map(|r| outputs[r]));
+            let needed = (self.reg(reg::GSH + sh::INPUTBUFFER_CONFIG) & 0xF) as usize + 1;
+            if self.gs_inputs.len() >= needed {
+                self.run_geometry_shader(needed, mem);
+                self.gs_inputs.clear();
+            }
+            return;
+        }
+        let vertex = OutputVertex::from_outputs(&self.regs, mask, &outputs);
+        let topology = Topology::from_register(self.reg(reg::PRIMITIVE_CONFIG));
+        if let Some(triangle) = self.assembler.push(topology, vertex) {
+            self.triangle(triangle, mem);
+        }
+    }
+
+    /// Run the geometry shader on its input buffer. Each `EMIT` stores a
+    /// vertex in the slot `SETEMIT` chose; one that also ends a primitive
+    /// draws the three slots, the first two swapped for the other winding.
+    fn run_geometry_shader(&mut self, count: usize, mem: &mut dyn Memory) {
+        let mut unit = Unit {
+            inputs: shader_inputs(&self.regs, reg::GSH, &self.gs_inputs, count),
+            ..Unit::default()
+        };
+        unit.run(
+            &self.geometry.program,
+            &self.geometry.uniforms,
+            self.geometry.entry,
+        );
+        let mask = self.reg(reg::GSH + sh::OUTMAP_MASK);
+        for (emit, outputs) in std::mem::take(&mut unit.emitted) {
+            let vertex = OutputVertex::from_outputs(&self.regs, mask, &outputs);
+            self.gs_vertices[(emit.vertex as usize).min(2)] = vertex;
+            if emit.primitive {
+                let [a, b, c] = self.gs_vertices;
+                let triangle = if emit.winding { [b, a, c] } else { [a, b, c] };
+                self.triangle(triangle, mem);
+            }
+        }
+    }
+
+    /// Clip, project and cull a triangle, and rasterise what is left.
+    fn triangle(&mut self, triangle: [OutputVertex; 3], mem: &mut dyn Memory) {
+        let setup = Setup::new(&self.regs);
+        let mut screen = Vec::with_capacity(4);
+        setup.triangle(triangle, &mut |t| screen.push(t));
+        for t in screen {
+            self.rasterize(t, mem);
+        }
+    }
+
+    fn rasterize(&mut self, triangle: [ScreenVertex; 3], mem: &mut dyn Memory) {
+        let _ = (triangle, mem);
+        self.stats.triangles += 1;
     }
 
     /// Carry out a command list.
@@ -492,7 +569,8 @@ mod tests {
 
         let loader = Loader::new(&gpu.regs);
         let attributes = loader.load(2, &gpu.fixed, &mem);
-        let vertex = gpu.shade(&attributes, 2);
+        let outputs = gpu.shade(&attributes, 2);
+        let vertex = OutputVertex::from_outputs(&gpu.regs, 0b11, &outputs);
         let f = |v: f32| F32(v.to_bits());
         assert_eq!(
             vertex.position(),
@@ -525,6 +603,95 @@ mod tests {
         }
         assert_eq!(gpu.stats.vertices, 2);
         assert_eq!(gpu.fixed[3][0], crate::shader::ONE);
+    }
+
+    /// `v` in the 24-bit float format (truncated; zero for zero).
+    fn f24(v: f32) -> u32 {
+        let bits = v.to_bits();
+        if bits & 0x7FFF_FFFF == 0 {
+            return 0;
+        }
+        let exponent = (bits >> 23 & 0xFF) + 63 - 127;
+        (bits >> 31) << 23 | exponent << 16 | (bits >> 7 & 0xFFFF)
+    }
+
+    /// Send one immediate-mode attribute.
+    fn send(gpu: &mut Gpu, v: [f32; 4], mem: &mut dyn Memory) {
+        let [x, y, z, w] = v.map(f24);
+        for word in [
+            w << 8 | z >> 16,
+            (z & 0xFFFF) << 16 | y >> 8,
+            (y & 0xFF) << 24 | x,
+        ] {
+            gpu.write_register(reg::FIXEDATTRIB_DATA0, word, 0xF, mem);
+        }
+    }
+
+    /// The pass-through shader, a 240x400 viewport and immediate mode with
+    /// two attributes a vertex.
+    fn immediate_setup(gpu: &mut Gpu, mem: &mut dyn Memory) {
+        passthrough(gpu);
+        gpu.write_register(reg::VIEWPORT_WIDTH, f24(120.0), 0xF, mem);
+        gpu.write_register(reg::VIEWPORT_HEIGHT, f24(200.0), 0xF, mem);
+        gpu.write_register(reg::VSH_NUM_ATTR, 1, 0xF, mem);
+        gpu.write_register(reg::FIXEDATTRIB_INDEX, 0xF, 0xF, mem);
+    }
+
+    #[test]
+    fn a_strip_of_four_vertices_is_two_triangles() {
+        let mut gpu = Gpu::new();
+        let m = &mut VecMemory::default();
+        immediate_setup(&mut gpu, m);
+        gpu.write_register(reg::PRIMITIVE_CONFIG, 1 << 8, 0xF, m);
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            send(&mut gpu, [x, y, -0.5, 1.0], m);
+            send(&mut gpu, [1.0, 0.0, 0.0, 1.0], m);
+        }
+        assert_eq!((gpu.stats.vertices, gpu.stats.triangles), (4, 2));
+        // A restart drops the strip so far.
+        gpu.write_register(reg::RESTART_PRIMITIVE, 1, 0xF, m);
+        send(&mut gpu, [0.0, 0.0, -0.5, 1.0], m);
+        send(&mut gpu, [1.0; 4], m);
+        assert_eq!(gpu.stats.triangles, 2);
+    }
+
+    #[test]
+    fn a_geometry_shader_emits_triangles_from_its_inputs() {
+        let mut gpu = Gpu::new();
+        let m = &mut VecMemory::default();
+        immediate_setup(&mut gpu, m);
+        gpu.write_register(reg::GEOSTAGE_CONFIG, 2, 0xF, m);
+        // Three vertices of one output (the position) per invocation.
+        gpu.write_register(reg::VSH + sh::OUTMAP_MASK, 1, 0xF, m);
+        gpu.write_register(reg::GSH + sh::INPUTBUFFER_CONFIG, 2, 0xF, m);
+        gpu.write_register(reg::GSH + sh::ATTRIBUTES_PERMUTATION_LOW, 0x210, 0xF, m);
+        gpu.write_register(reg::GSH + sh::OUTMAP_MASK, 1, 0xF, m);
+        let mov = |src: u32| 0x13 << 26 | src << 12;
+        let setemit = |vertex: u32, primitive: u32| 0x2B << 26 | vertex << 24 | primitive << 23;
+        let emit = 0x2A << 26;
+        let code = [
+            setemit(0, 0),
+            mov(0),
+            emit,
+            setemit(1, 0),
+            mov(1),
+            emit,
+            setemit(2, 1),
+            mov(2),
+            emit,
+            0x22 << 26,
+        ];
+        gpu.write_register(reg::GSH + sh::CODETRANSFER_INDEX, 0, 0xF, m);
+        for word in code {
+            gpu.write_register(reg::GSH + sh::CODETRANSFER_DATA0, word, 0xF, m);
+        }
+        gpu.write_register(reg::GSH + sh::OPDESCS_INDEX, 0, 0xF, m);
+        gpu.write_register(reg::GSH + sh::OPDESCS_DATA0, 0x1B << 5 | 0xF, 0xF, m);
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)] {
+            send(&mut gpu, [x, y, -0.5, 1.0], m);
+            send(&mut gpu, [1.0; 4], m);
+        }
+        assert_eq!((gpu.stats.vertices, gpu.stats.triangles), (3, 1));
     }
 
     #[test]
