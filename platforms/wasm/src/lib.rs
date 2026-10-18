@@ -39,7 +39,20 @@ pub mod bindings {
         "A,B,Select,Start,Right,Left,Up,Down,R,L,X,Y,ZL,ZR".to_string()
     }
 
-    /// Identify a ROM from its header: `"gb"`, `"gbc"`, `"gba"` or `""`.
+    /// The file extensions of every image this build opens, comma-separated
+    /// with their dots (`.gb,.gbc,...`), for a file input's `accept`.
+    #[wasm_bindgen]
+    pub fn extensions() -> String {
+        crab_systems::Kind::ALL
+            .iter()
+            .flat_map(|kind| kind.extensions())
+            .map(|e| format!(".{e}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Identify a ROM from its header: `"gb"`, `"gbc"`, `"gba"`, `"3ds"` (in
+    /// a build with the 3DS core) or `""`.
     #[wasm_bindgen]
     pub fn detect(rom: &[u8]) -> String {
         crab_systems::detect(rom)
@@ -59,22 +72,23 @@ pub mod bindings {
     #[wasm_bindgen]
     impl Emulator {
         /// Create an emulator from ROM bytes, detecting the console from
-        /// the header. GBA ROMs boot with high-level BIOS emulation.
+        /// the header. GBA ROMs boot with high-level BIOS emulation. The
+        /// bytes are copied into the module once and kept there: a 3DS card
+        /// image is held in memory whole (up to 1 GiB in the browser).
         #[wasm_bindgen(constructor)]
-        pub fn new(rom: &[u8]) -> Result<Emulator, JsValue> {
+        pub fn new(rom: Vec<u8>) -> Result<Emulator, JsValue> {
             Self::build(rom, None, false)
         }
 
         /// Create an emulator that boots a GBA ROM through a real 16 KB
         /// BIOS image (`cold` runs the logo intro). Ignored for Game Boy ROMs.
-        pub fn with_bios(rom: &[u8], bios: &[u8], cold: bool) -> Result<Emulator, JsValue> {
+        pub fn with_bios(rom: Vec<u8>, bios: &[u8], cold: bool) -> Result<Emulator, JsValue> {
             Self::build(rom, Some(bios.to_vec()), cold)
         }
 
-        fn build(rom: &[u8], gba_bios: Option<Vec<u8>>, cold: bool) -> Result<Emulator, JsValue> {
+        fn build(rom: Vec<u8>, gba_bios: Option<Vec<u8>>, cold: bool) -> Result<Emulator, JsValue> {
             let opts = crab_systems::LoadOptions { gba_bios, cold };
-            let sys =
-                crab_systems::load_with(rom.to_vec(), &opts).map_err(|e| JsValue::from_str(&e))?;
+            let sys = crab_systems::load_with(rom, &opts).map_err(|e| JsValue::from_str(&e))?;
             let layout = Layout::of(sys.as_ref());
             let mut emu = Emulator {
                 sys,
@@ -91,7 +105,7 @@ pub mod bindings {
                 .write_rgba(&DMG_PALETTE, &mut self.rgba);
         }
 
-        /// Console identifier: `"gb"`, `"gbc"` or `"gba"`.
+        /// Console identifier: `"gb"`, `"gbc"`, `"gba"` or `"3ds"`.
         pub fn name(&self) -> String {
             self.sys.name().to_string()
         }
@@ -174,6 +188,12 @@ pub mod bindings {
             self.sys.set_touch(point);
         }
 
+        /// Hold the stylus at a point of the touch screen itself (the 3DS's
+        /// bottom screen, 320x240), as input scripts give it.
+        pub fn set_touch_screen(&mut self, x: u16, y: u16) {
+            self.sys.set_touch(Some((x, y)));
+        }
+
         pub fn clear_touch(&mut self) {
             self.sys.set_touch(None);
         }
@@ -183,7 +203,9 @@ pub mod bindings {
             self.sys.set_axis(Axis::CirclePad, x, y);
         }
 
-        /// Reset to power-on state, keeping the cartridge.
+        /// Reset to power-on state, keeping the cartridge. The 3DS's
+        /// high-level mode has no reset of its own: the page loads the
+        /// image again instead.
         pub fn reset(&mut self) {
             self.sys.reset();
             self.render();

@@ -2,7 +2,7 @@
 // `Emulator` binding. No bundler; serve this directory over HTTP after
 // generating `pkg/` (see README.md).
 
-import init, { Emulator, button_names, detect } from "./pkg/crab_wasm.js";
+import init, { Emulator, button_names, detect, extensions } from "./pkg/crab_wasm.js";
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
@@ -20,6 +20,10 @@ const muteBtn = $("mute-btn");
 const shoulders = $("shoulders");
 
 const wasm = await init();
+romInput.accept = extensions();
+// The browser holds an image in memory whole; streaming it from the file
+// with Blob.slice in a worker is still to come.
+const MAX_IMAGE = 1 << 30;
 const BUTTON_INDEX = Object.fromEntries(
   button_names()
     .split(",")
@@ -37,7 +41,14 @@ const KEYMAP = {
   Backspace: "Select",
   KeyA: "L",
   KeyS: "R",
+  KeyC: "X",
+  KeyV: "Y",
+  KeyQ: "ZL",
+  KeyW: "ZR",
 };
+
+// The 3DS circle pad on I/J/K/L, at full deflection.
+const CIRCLE_KEYS = { KeyI: [0, 1], KeyK: [0, -1], KeyJ: [-1, 0], KeyL: [1, 0] };
 
 // Standard gamepad mapping (https://w3c.github.io/gamepad/#remapping).
 const GAMEPAD_BUTTONS = {
@@ -57,8 +68,13 @@ const GAMEPAD_BUTTONS = {
   15: "Right",
 };
 
+// The 3DS has a button for every face and shoulder of the standard pad.
+const GAMEPAD_BUTTONS_3DS = { ...GAMEPAD_BUTTONS, 2: "Y", 3: "X", 6: "ZL", 7: "ZR" };
+
 const state = {
   emu: null,
+  kind: "",
+  romFile: null,
   romKey: null,
   title: "",
   paused: false,
@@ -71,6 +87,8 @@ const state = {
   fpsTime: 0,
   held: new Set(),
   gamepadHeld: new Set(),
+  circleKeys: new Set(),
+  gamepadCircle: false,
   saveTimer: null,
 };
 
@@ -334,10 +352,14 @@ function updateStatus() {
 // ROM loading.
 
 async function loadRom(file) {
+  if (file.size > MAX_IMAGE) {
+    setStatus(`${file.name} is larger than 1 GiB, which the browser cannot hold; use the desktop build`);
+    return;
+  }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const kind = detect(bytes);
   if (!kind) {
-    setStatus(`${file.name} is not a Game Boy, Game Boy Color or GBA ROM`);
+    setStatus(`${file.name} is not an image of a console this build runs`);
     return;
   }
   await flushSave();
@@ -350,6 +372,8 @@ async function loadRom(file) {
   }
   if (state.emu) state.emu.free();
   state.emu = emu;
+  state.kind = kind;
+  state.romFile = file;
   state.title = emu.title();
   state.romKey = await romKeyFor(bytes);
   state.paused = false;
@@ -360,14 +384,21 @@ async function loadRom(file) {
   state.fpsFrames = 0;
   releaseAll();
 
-  if (emu.battery_backed()) {
+  // A 3DS program's saves include its SD card, which homebrew writes to
+  // without asking for save data.
+  if (emu.battery_backed() || kind === "3ds") {
     const sav = await dbGet(`${state.romKey}:sav`);
     if (sav) emu.load_data(sav);
     const rtc = await dbGet(`${state.romKey}:rtc`);
     if (rtc) emu.load_rtc(rtc);
   }
 
-  shoulders.classList.toggle("hidden", kind !== "gba");
+  shoulders.classList.toggle("hidden", kind !== "gba" && kind !== "3ds");
+  for (const el of document.querySelectorAll(".ctr-only")) {
+    el.classList.toggle("hidden", kind !== "3ds");
+  }
+  // A finger on the touch screen must not scroll the page.
+  canvas.style.touchAction = kind === "3ds" ? "none" : "";
   dropHint.classList.add("hidden");
   for (const b of [pauseBtn, resetBtn, ffBtn, saveBtn, loadBtn, muteBtn]) b.disabled = false;
   pauseBtn.textContent = "Pause";
@@ -396,6 +427,34 @@ function releaseAll() {
   for (const name of Object.keys(BUTTON_INDEX)) setButton(name, false);
   state.held.clear();
   state.gamepadHeld.clear();
+  state.circleKeys.clear();
+  if (state.emu) {
+    state.emu.set_circle_pad(0, 0);
+    state.emu.clear_touch();
+  }
+}
+
+function updateCircleKeys() {
+  if (!state.emu) return;
+  let x = 0;
+  let y = 0;
+  for (const code of state.circleKeys) {
+    x += CIRCLE_KEYS[code][0];
+    y += CIRCLE_KEYS[code][1];
+  }
+  state.emu.set_circle_pad(Math.sign(x) * 32767, Math.sign(y) * 32767);
+}
+
+// The pointer held on the canvas is the stylus; the emulator maps the
+// framebuffer pixel to the touch screen and lifts it elsewhere.
+function touchAt(e) {
+  const { emu } = state;
+  if (!emu) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor(((e.clientX - rect.left) * canvas.width) / rect.width);
+  const y = Math.floor(((e.clientY - rect.top) * canvas.height) / rect.height);
+  if (x < 0 || y < 0) emu.clear_touch();
+  else emu.set_touch(x, y);
 }
 
 function togglePause() {
@@ -420,8 +479,14 @@ function setFastForward(on) {
   updateStatus();
 }
 
-function resetEmu() {
+async function resetEmu() {
   if (!state.emu) return;
+  if (state.kind === "3ds" && state.romFile) {
+    // The high-level mode has no reset: start the program afresh.
+    await loadRom(state.romFile);
+    setStatus("Reset");
+    return;
+  }
   state.emu.reset();
   clearAudio();
   draw();
@@ -454,6 +519,12 @@ async function quickLoad() {
 
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;
+  if (CIRCLE_KEYS[e.code]) {
+    e.preventDefault();
+    state.circleKeys.add(e.code);
+    updateCircleKeys();
+    return;
+  }
   const name = KEYMAP[e.code];
   if (name) {
     e.preventDefault();
@@ -484,6 +555,11 @@ window.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("keyup", (e) => {
+  if (CIRCLE_KEYS[e.code]) {
+    state.circleKeys.delete(e.code);
+    updateCircleKeys();
+    return;
+  }
   const name = KEYMAP[e.code];
   if (name) {
     e.preventDefault();
@@ -494,6 +570,19 @@ window.addEventListener("keyup", (e) => {
 });
 
 window.addEventListener("blur", releaseAll);
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (state.kind !== "3ds") return;
+  e.preventDefault();
+  canvas.setPointerCapture?.(e.pointerId);
+  touchAt(e);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (state.kind === "3ds" && e.buttons) touchAt(e);
+});
+for (const ev of ["pointerup", "pointercancel"]) {
+  canvas.addEventListener(ev, () => state.emu && state.emu.clear_touch());
+}
 
 for (const el of document.querySelectorAll(".key[data-btn]")) {
   const name = el.dataset.btn;
@@ -519,15 +608,28 @@ function pollGamepad() {
   const pad = Array.from(pads).find((p) => p && p.connected);
   if (!pad) return;
   const now = new Set();
+  const ctr = state.kind === "3ds";
+  const map = ctr ? GAMEPAD_BUTTONS_3DS : GAMEPAD_BUTTONS;
   pad.buttons.forEach((b, i) => {
-    const name = GAMEPAD_BUTTONS[i];
+    const name = map[i];
     if (name && (b.pressed || b.value > 0.5)) now.add(name);
   });
   const [x, y] = pad.axes;
-  if (x < -0.5) now.add("Left");
-  if (x > 0.5) now.add("Right");
-  if (y < -0.5) now.add("Up");
-  if (y > 0.5) now.add("Down");
+  if (ctr) {
+    // The left stick is the circle pad (its y axis points down).
+    const dead = (v) => (Math.abs(v) < 0.15 ? 0 : v);
+    const cx = Math.round(dead(x) * 32767);
+    const cy = Math.round(-dead(y) * 32767);
+    if (cx || cy || state.gamepadCircle) {
+      state.emu.set_circle_pad(cx, cy);
+      state.gamepadCircle = cx !== 0 || cy !== 0;
+    }
+  } else {
+    if (x < -0.5) now.add("Left");
+    if (x > 0.5) now.add("Right");
+    if (y < -0.5) now.add("Up");
+    if (y > 0.5) now.add("Down");
+  }
   for (const name of now) if (!state.gamepadHeld.has(name)) setButton(name, true);
   for (const name of state.gamepadHeld) if (!now.has(name)) setButton(name, false);
   state.gamepadHeld = now;

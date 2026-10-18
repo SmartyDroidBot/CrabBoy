@@ -33,7 +33,8 @@
     <div class="screen-wrap" id="screen-wrap">
       <canvas id="screen" width="240" height="160"></canvas>
       <div class="drop-hint" id="drop-hint">
-        Drop a .gb, .gbc or .gba file here or use <b>Load ROM</b>
+        Drop a .gb, .gbc or .gba file here (or, in a build with the 3DS core,
+        a decrypted .3ds/.cci/.cxi image or a .3dsx) or use <b>Load ROM</b>
       </div>
     </div>
 
@@ -42,6 +43,8 @@
     <section class="pad" id="pad" aria-label="On-screen controls">
       <div class="shoulders" id="shoulders">
         <button class="key wide" data-btn="L">L</button>
+        <button class="key wide ctr-only hidden" data-btn="ZL">ZL</button>
+        <button class="key wide ctr-only hidden" data-btn="ZR">ZR</button>
         <button class="key wide" data-btn="R">R</button>
       </div>
       <div class="pad-row">
@@ -52,6 +55,8 @@
           <button class="key down" data-btn="Down" aria-label="Down">&#9660;</button>
         </div>
         <div class="face">
+          <button class="key round ctr-only hidden" data-btn="Y">Y</button>
+          <button class="key round ctr-only hidden" data-btn="X">X</button>
           <button class="key round" data-btn="B">B</button>
           <button class="key round" data-btn="A">A</button>
         </div>
@@ -68,7 +73,11 @@
         <tr><td>Arrows</td><td>D-pad</td></tr>
         <tr><td>Z / X</td><td>A / B</td></tr>
         <tr><td>Enter / Backspace</td><td>Start / Select</td></tr>
-        <tr><td>A / S</td><td>L / R (GBA)</td></tr>
+        <tr><td>A / S</td><td>L / R</td></tr>
+        <tr><td>C / V</td><td>X / Y (3DS)</td></tr>
+        <tr><td>Q / W</td><td>ZL / ZR (3DS)</td></tr>
+        <tr><td>I / J / K / L</td><td>Circle pad (3DS)</td></tr>
+        <tr><td>Pointer</td><td>Touch screen (3DS, bottom screen)</td></tr>
         <tr><td>P</td><td>Pause</td></tr>
         <tr><td>R</td><td>Reset</td></tr>
         <tr><td>F</td><td>Fast-forward (hold)</td></tr>
