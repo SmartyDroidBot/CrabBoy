@@ -18,8 +18,15 @@
 //!
 //! Any other image (a card image, an NCCH, a 3DSX) runs in the high-level
 //! mode, which also takes `--strict` (stop at the first unwritten service
-//! command), `--watch=ADDR` (one virtual word) and
-//! `--trace=svc,ipc,gx,irq,dsp,ro,fs,service,all` (what to log).
+//! command), `--watch=ADDR` (one virtual word),
+//! `--trace=svc,ipc,gx,irq,dsp,ro,fs,service,all` (what to log),
+//! `--sav=FILE` (the program's saves, read before the run and written after
+//! it if the program saved) and `--dump-every` (with `--dump`, also write
+//! `PREFIX-fNNNNN-top.png` and `-bottom.png` at every report).
+//!
+//! The input script is the grammar of `crab run --input`, which also holds
+//! the stylus (`TOUCH:X:Y@F`, `!TOUCH@F`) and moves the circle pad
+//! (`CPAD:X:Y@F`, `!CPAD@F`).
 
 use crab_cli::{encode_png, fnv1a32, parse_input_script};
 use ctr_core::Ctr;
@@ -49,6 +56,22 @@ fn collect(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
                 .collect();
             out.push((name.join("/"), data));
         }
+    }
+}
+
+/// Write both screens of `system` as `PREFIX-top.png` and
+/// `PREFIX-bottom.png`.
+fn dump_screens(system: &dyn System, prefix: &str) {
+    for (index, name) in ["top", "bottom"].iter().enumerate() {
+        let frame = system.frame_at(index);
+        let png = encode_png(
+            frame.width as u32,
+            frame.height as u32,
+            &frame.to_rgba(&DMG_PALETTE),
+        );
+        let file = format!("{prefix}-{name}.png");
+        std::fs::write(&file, png).unwrap_or_else(|e| fail(format!("{file}: {e}")));
+        println!("wrote {file}");
     }
 }
 
@@ -91,15 +114,23 @@ fn run_hle(
         let now = h.process.space.read32(&h.mem, addr).unwrap_or(0);
         h.watch = Some((addr, now));
     }
+    let sav = option("sav");
+    if let Some(sav) = &sav {
+        match std::fs::read(sav) {
+            Ok(data) => {
+                h.load_data(&data);
+                println!("read {} bytes of saves from {sav}", data.len());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => fail(format!("{sav}: {e}")),
+        }
+    }
+    let dump_every = args.iter().any(|a| a == "--dump-every");
     println!("{}", h.info());
     let started = std::time::Instant::now();
     for frame in 0..frames {
         for event in script.iter().filter(|e| e.frame == frame) {
-            if event.pressed {
-                h.press(event.button);
-            } else {
-                h.release(event.button);
-            }
+            event.apply(&mut h);
         }
         h.run_frame();
         for line in h.log.drain(..) {
@@ -131,6 +162,9 @@ fn run_hle(
                 h.kernel.threads.len(),
                 started.elapsed().as_secs_f64()
             );
+            if let (true, Some(prefix)) = (dump_every, option("dump")) {
+                dump_screens(&h, &format!("{prefix}-f{:05}", frame + 1));
+            }
         }
         if !h.running() {
             break;
@@ -181,16 +215,15 @@ fn run_hle(
         }
     }
     if let Some(prefix) = option("dump") {
-        for (index, name) in ["top", "bottom"].iter().enumerate() {
-            let frame = h.frame_at(index);
-            let png = encode_png(
-                frame.width as u32,
-                frame.height as u32,
-                &frame.to_rgba(&DMG_PALETTE),
-            );
-            let file = format!("{prefix}-{name}.png");
-            std::fs::write(&file, png).unwrap_or_else(|e| fail(format!("{file}: {e}")));
-            println!("wrote {file}");
+        dump_screens(&h, &prefix);
+    }
+    if let Some(sav) = &sav {
+        if h.battery_backed() {
+            let data = h.save_data();
+            if !data.is_empty() {
+                std::fs::write(sav, &data).unwrap_or_else(|e| fail(format!("{sav}: {e}")));
+                println!("wrote {} bytes of saves to {sav}", data.len());
+            }
         }
     }
 }
@@ -254,11 +287,7 @@ fn main() {
 
     for frame in 0..frames {
         for event in script.iter().filter(|e| e.frame == frame) {
-            if event.pressed {
-                ctr.press(event.button);
-            } else {
-                ctr.release(event.button);
-            }
+            event.apply(&mut ctr);
         }
         ctr.run_frame();
         if (frame + 1) % every == 0 || frame + 1 == frames {
@@ -372,16 +401,6 @@ fn main() {
     }
 
     if let Some(prefix) = option("dump") {
-        for (index, name) in ["top", "bottom"].iter().enumerate() {
-            let frame = ctr.frame_at(index);
-            let png = encode_png(
-                frame.width as u32,
-                frame.height as u32,
-                &frame.to_rgba(&DMG_PALETTE),
-            );
-            let file = format!("{prefix}-{name}.png");
-            std::fs::write(&file, png).unwrap_or_else(|e| fail(format!("{file}: {e}")));
-            println!("wrote {file}");
-        }
+        dump_screens(&ctr, &prefix);
     }
 }

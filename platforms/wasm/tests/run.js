@@ -53,7 +53,9 @@ const BUTTONS = button_names()
   .split(",")
   .map((n) => n.toUpperCase());
 
-// `START@400,!START@410` (also `;` separators and `RELEASE START@410`).
+// `START@400,!START@410` (also `;` separators and `RELEASE START@410`), and
+// on the 3DS `TOUCH:X:Y@F` / `!TOUCH@F` and `CPAD:X:Y@F` / `!CPAD@F`, as
+// `crab run --input` takes them. Each event is a function of the emulator.
 function parseScript(spec) {
   const out = [];
   for (const raw of spec.split(/[;,]/)) {
@@ -71,10 +73,22 @@ function parseScript(spec) {
       pressed = false;
       name = name.slice("RELEASE".length);
     }
-    const index = BUTTONS.indexOf(name.trim().toUpperCase());
-    if (index < 0) throw new Error(`unknown button ${JSON.stringify(name)}`);
-    out.push({ frame, index, pressed });
+    const [kind, ...point] = name.trim().split(":");
+    const upper = kind.toUpperCase();
+    const [x, y] = point.map((v) => parseInt(v.trim(), 10));
+    let apply;
+    if (upper === "TOUCH") {
+      apply = pressed ? (emu) => emu.set_touch_screen(x, y) : (emu) => emu.clear_touch();
+    } else if (upper === "CPAD") {
+      apply = pressed ? (emu) => emu.set_circle_pad(x, y) : (emu) => emu.set_circle_pad(0, 0);
+    } else {
+      const index = BUTTONS.indexOf(upper);
+      if (index < 0 || point.length) throw new Error(`unknown button ${JSON.stringify(name)}`);
+      apply = (emu) => emu.set_button(index, pressed);
+    }
+    out.push({ frame, apply });
   }
+  // Stable: events of one frame keep their script order.
   out.sort((a, b) => a.frame - b.frame);
   return out;
 }
@@ -93,7 +107,7 @@ const script = parseScript(input);
 let next = 0;
 for (let f = 0; f < frames; f++) {
   while (next < script.length && script[next].frame <= f) {
-    emu.set_button(script[next].index, script[next].pressed);
+    script[next].apply(emu);
     next++;
   }
   emu.run_frame();

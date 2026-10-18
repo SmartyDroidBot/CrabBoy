@@ -704,11 +704,7 @@ fn run_ctr_frame(firm: Vec<u8>, case: &Case) -> Result_ {
     };
     for frame in 0..case.frames {
         for event in script.iter().filter(|e| e.frame == frame) {
-            if event.pressed {
-                ctr.press(event.button);
-            } else {
-                ctr.release(event.button);
-            }
+            event.apply(&mut ctr);
         }
         ctr.run_frame();
     }

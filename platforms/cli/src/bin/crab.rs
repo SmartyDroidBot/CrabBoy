@@ -16,13 +16,16 @@ usage:
 
 options for run:
   --frames N        frames to emulate (default 600)
-  --input SPEC      scripted input, e.g. START@400,!START@410
+  --input SPEC      scripted input, e.g. START@400,!START@410; on the 3DS
+                    also TOUCH:X:Y@F / !TOUCH@F (the touch screen) and
+                    CPAD:X:Y@F / !CPAD@F (the circle pad, -32767..=32767)
   --dump PATH       write the frame reached at --dump-frame (or the last frame)
                     as .png or .ppm
   --dump-frame N    frame to dump (frames completed; default: --frames)
   --wav PATH        write all audio produced as a 16-bit stereo WAV
   --hash            print the FNV-1a-32 hash of the final RGBA frame
   --sav PATH        battery save to load before and write after the run
+                    (a 3DS program's whole save store)
   --bios PATH       GBA BIOS image (16 KB); default is high-level emulation
   --cold            with --bios, run the cold-boot logo intro";
 
@@ -181,12 +184,7 @@ fn cmd_run(args: RunArgs) {
     for frame in 0..args.frames {
         maybe_dump(system.as_ref(), frame, &mut dumped);
         while next_event < args.input.len() && args.input[next_event].frame <= frame {
-            let ev = args.input[next_event];
-            if ev.pressed {
-                system.press(ev.button);
-            } else {
-                system.release(ev.button);
-            }
+            args.input[next_event].apply(system.as_mut());
             next_event += 1;
         }
         system.run_frame();

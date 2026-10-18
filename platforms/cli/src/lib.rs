@@ -1,7 +1,7 @@
 //! Shared helpers for the headless CrabBoy binaries: frame hashing, image
 //! and WAV encoders, and the scripted-input grammar.
 
-use emu_core::Button;
+use emu_core::{Axis, Button, System};
 
 /// FNV-1a 32-bit hash. The wasm smoke test (`platforms/wasm/tests/run.js`)
 /// implements the same function so frame hashes compare across targets.
@@ -27,22 +27,49 @@ pub fn parse_button(name: &str) -> Option<Button> {
         "RIGHT" => Button::Right,
         "L" => Button::L,
         "R" => Button::R,
+        "X" => Button::X,
+        "Y" => Button::Y,
+        "ZL" => Button::ZL,
+        "ZR" => Button::ZR,
         _ => return None,
     })
 }
 
-/// One scripted input event: at `frame` (frames completed so far), press
-/// (`pressed`) or release the button.
+/// What a scripted input event does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Input {
+    /// Press (`true`) or release a button.
+    Button(Button, bool),
+    /// Hold the stylus at a point of the touch screen (the 3DS's bottom
+    /// screen, 320x240), or lift it.
+    Touch(Option<(u16, u16)>),
+    /// Move the 3DS circle pad; both axes span -32767..=32767, `y` up.
+    CirclePad(i16, i16),
+}
+
+/// One scripted input event, applied at `frame` (frames completed so far).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InputEvent {
     pub frame: u64,
-    pub button: Button,
-    pub pressed: bool,
+    pub input: Input,
+}
+
+impl InputEvent {
+    pub fn apply(&self, system: &mut dyn System) {
+        match self.input {
+            Input::Button(button, true) => system.press(button),
+            Input::Button(button, false) => system.release(button),
+            Input::Touch(point) => system.set_touch(point),
+            Input::CirclePad(x, y) => system.set_axis(Axis::CirclePad, x, y),
+        }
+    }
 }
 
 /// Parse an input script such as `START@400,!START@410` (also accepts `;`
-/// separators and the older `RELEASE START@410` spelling). Events are
-/// returned sorted by frame.
+/// separators and the older `RELEASE START@410` spelling). `TOUCH:X:Y@F`
+/// holds the stylus at a point of the touch screen and `!TOUCH@F` lifts it;
+/// `CPAD:X:Y@F` moves the circle pad and `!CPAD@F` centres it. Events are
+/// returned sorted by frame, in script order within a frame.
 pub fn parse_input_script(spec: &str) -> Result<Vec<InputEvent>, String> {
     let mut out = Vec::new();
     for item in spec
@@ -65,12 +92,38 @@ pub fn parse_input_script(spec: &str) -> Result<Vec<InputEvent>, String> {
         } else {
             (name, true)
         };
-        let button = parse_button(name).ok_or_else(|| format!("unknown button {name:?}"))?;
-        out.push(InputEvent {
-            frame,
-            button,
-            pressed,
-        });
+        let mut parts = name.trim().split(':');
+        let kind = parts.next().unwrap_or("").to_ascii_uppercase();
+        let point: Vec<&str> = parts.collect();
+        let input = match (kind.as_str(), pressed) {
+            ("TOUCH" | "CPAD", false) if point.is_empty() => {
+                if kind == "TOUCH" {
+                    Input::Touch(None)
+                } else {
+                    Input::CirclePad(0, 0)
+                }
+            }
+            ("TOUCH", true) => match point[..] {
+                [x, y] => match (x.trim().parse::<u16>(), y.trim().parse::<u16>()) {
+                    (Ok(x), Ok(y)) if x < 320 && y < 240 => Input::Touch(Some((x, y))),
+                    _ => return Err(format!("{item:?}: a touch is TOUCH:X:Y inside 320x240")),
+                },
+                _ => return Err(format!("{item:?}: a touch is TOUCH:X:Y")),
+            },
+            ("CPAD", true) => match point[..] {
+                [x, y] => match (x.trim().parse::<i16>(), y.trim().parse::<i16>()) {
+                    (Ok(x), Ok(y)) if x > i16::MIN && y > i16::MIN => Input::CirclePad(x, y),
+                    _ => return Err(format!("{item:?}: CPAD axes span -32767..=32767")),
+                },
+                _ => return Err(format!("{item:?}: the circle pad is CPAD:X:Y")),
+            },
+            _ if !point.is_empty() => return Err(format!("unknown input {name:?}")),
+            _ => Input::Button(
+                parse_button(name).ok_or_else(|| format!("unknown button {name:?}"))?,
+                pressed,
+            ),
+        };
+        out.push(InputEvent { frame, input });
     }
     out.sort_by_key(|e| e.frame);
     Ok(out)
@@ -186,29 +239,42 @@ mod tests {
     #[test]
     fn input_script_grammar() {
         let ev = parse_input_script("START@400, !start@410; RELEASE A@5").unwrap();
+        let at = |frame, input| InputEvent { frame, input };
         assert_eq!(
             ev,
             [
-                InputEvent {
-                    frame: 5,
-                    button: Button::A,
-                    pressed: false
-                },
-                InputEvent {
-                    frame: 400,
-                    button: Button::Start,
-                    pressed: true
-                },
-                InputEvent {
-                    frame: 410,
-                    button: Button::Start,
-                    pressed: false
-                },
+                at(5, Input::Button(Button::A, false)),
+                at(400, Input::Button(Button::Start, true)),
+                at(410, Input::Button(Button::Start, false)),
             ]
         );
         assert!(parse_input_script("START").is_err());
         assert!(parse_input_script("FOO@1").is_err());
         assert!(parse_input_script("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn input_scripts_touch_and_move_the_circle_pad() {
+        let ev = parse_input_script("TOUCH:160:120@30,!TOUCH@32,CPAD:0:-32767@40,!cpad@50,ZL@1")
+            .unwrap();
+        let inputs: Vec<Input> = ev.iter().map(|e| e.input).collect();
+        assert_eq!(
+            inputs,
+            [
+                Input::Button(Button::ZL, true),
+                Input::Touch(Some((160, 120))),
+                Input::Touch(None),
+                Input::CirclePad(0, -32767),
+                Input::CirclePad(0, 0),
+            ]
+        );
+        assert!(
+            parse_input_script("TOUCH:320:0@1").is_err(),
+            "off the screen"
+        );
+        assert!(parse_input_script("TOUCH:1@1").is_err());
+        assert!(parse_input_script("CPAD:-32768:0@1").is_err());
+        assert!(parse_input_script("A:1:2@1").is_err());
     }
 
     #[test]
