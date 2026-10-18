@@ -145,9 +145,30 @@ the frame hashes, so changing it changes them.
 - Varyings (colour, the three texture coordinates and texcoord0.w, the
   normal quaternion and the view vector): 16 fractional bits, to nearest,
   saturated to 32 bits; colours are first clamped to [0, 1].
-- `1/w` stays a float until a triangle is set up.
+- `1/w` stays a float until a triangle is set up. Then the three values are
+  put in fixed point with a shared scale that brings the largest near 2^30.
+- Coverage: edge functions in 64-bit integers, sampled at pixel centres
+  (x·16 + 8). A sample exactly on an edge counts for a top edge (horizontal,
+  interior below) or a left edge (in a counter-clockwise triangle, y up,
+  running downwards), as Citra's rasteriser has it; clockwise triangles are
+  turned around first.
+- Varyings: the weights e_i·q_i (edge function times fixed-point 1/w) are
+  normalised to 24 fractional bits, truncating, with the third weight
+  1 minus the other two so constant values come through exactly; the
+  weighted sum is rounded to nearest.
+- Depth: the edge-function-weighted sum of the vertex depths over the area,
+  truncating; with a W-buffer (`DEPTHMAP_MODE` 0) it is scaled by w
+  through the same q values. It is then clamped to 24 bits [0, 0xFFFFFF].
+
+## Rasteriser (`pica::raster`)
+
+The bounding box of a triangle, cut to the framebuffer (`FRAMEBUFFER_DIM`)
+and, with `SCISSORTEST_MODE` 3, to the inclusive scissor rectangle (window
+coordinates, as Citra has them); mode 1 drops the pixels inside the
+rectangle instead. `RASTER_PIXEL_MASK` mode 1 keeps even x, mode 2 even x and
+odd y. Each covered pixel becomes a fragment (window x and y, depth, the
+varyings) for the stages after it, which sit behind the `FragmentSink` trait.
 
 ## Not started
 
-The rasteriser, texture units and combiners, fragment lighting and the
-framebuffer.
+Texture units and combiners, fragment lighting and the framebuffer.

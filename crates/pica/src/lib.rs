@@ -13,6 +13,7 @@ pub mod command;
 pub mod geometry;
 pub mod memory;
 pub mod num;
+pub mod raster;
 pub mod regs;
 pub mod shader;
 pub mod transfer;

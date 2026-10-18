@@ -15,6 +15,7 @@
 
 use crate::geometry::{Assembler, ScreenVertex, Setup, Topology};
 use crate::memory::Memory;
+use crate::raster::{Fragment, FragmentSink, Raster};
 use crate::regs::{self as reg, sh};
 use crate::shader::{from_float24, Program, Uniforms, Unit, Vec4, ZERO};
 use crate::vertex::{
@@ -344,8 +345,13 @@ impl Gpu {
     }
 
     fn rasterize(&mut self, triangle: [ScreenVertex; 3], mem: &mut dyn Memory) {
-        let _ = (triangle, mem);
+        struct Discard;
+        impl FragmentSink for Discard {
+            fn fragment(&mut self, _: &Fragment) {}
+        }
+        let _ = mem;
         self.stats.triangles += 1;
+        self.stats.fragments += Raster::new(&self.regs).triangle(&triangle, &mut Discard);
     }
 
     /// Carry out a command list.
