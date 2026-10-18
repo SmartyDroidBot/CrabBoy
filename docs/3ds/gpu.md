@@ -10,7 +10,11 @@ named in `pica::regs` as 3dbrew names them.
 
 ## Transfer engine (`pica::transfer`)
 
-Described in `io.md`, "Transfer engine".
+Described in `io.md`, "Transfer engine". Tiling (3dbrew, "GPU/External
+Registers"): a display transfer reads its input in 8x8 tiles (the layout of
+the colour buffer, below) and writes rows, which is how a rendered frame
+reaches an LCD framebuffer; flags bit 1 reads rows and writes tiles, bit 5
+keeps both tiled. The 32x32 block mode (bit 16) is taken as 8x8.
 
 ## Shader unit (`pica::shader`)
 

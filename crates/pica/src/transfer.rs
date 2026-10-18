@@ -5,8 +5,11 @@
 //! buffer; what the hardware does with overlapping buffers is not known.
 //!
 //! Register semantics follow 3dbrew, "GPU/External Registers", section
-//! "Transfer Engine". The tiling modes (flags bits 1, 5 and 16) rearrange
-//! pixels in 8x8 or 32x32 blocks and are not modelled: data is taken as rows.
+//! "Transfer Engine". A display transfer reads 8x8-tiled pixels and writes
+//! rows by default; flags bit 1 turns that round and bit 5 keeps both
+//! tiled. The 32x32 block mode (bit 16) is not modelled and taken as 8x8.
+
+use crate::framebuffer::tiled_offset;
 
 /// A framebuffer colour format, by its three-bit register value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,6 +118,10 @@ pub struct DisplayTransfer {
     pub flip: bool,
     pub halve_width: bool,
     pub halve_height: bool,
+    /// The input is in 8x8 tiles (all but linear-to-tiled mode).
+    pub tiled_input: bool,
+    /// The output is in 8x8 tiles (linear-to-tiled and tiled-to-tiled).
+    pub tiled_output: bool,
 }
 
 impl DisplayTransfer {
@@ -135,7 +142,18 @@ impl DisplayTransfer {
             flip: flags & 1 != 0,
             halve_width: scale != 0,
             halve_height: scale == 2,
+            tiled_input: flags & 1 << 5 != 0 || flags & 1 << 1 == 0,
+            tiled_output: flags & 1 << 5 != 0 || flags & 1 << 1 != 0,
         })
+    }
+
+    /// Where pixel `(x, y)` of a picture `width` wide lies, in pixels.
+    fn offset(tiled: bool, x: usize, y: usize, width: usize) -> usize {
+        if tiled {
+            tiled_offset(x as u32, y as u32, width as u32) as usize
+        } else {
+            y * width + x
+        }
     }
 
     /// The size of the picture written, after scaling.
@@ -170,10 +188,11 @@ impl DisplayTransfer {
                 for by in 0..=dy {
                     for bx in 0..=dx {
                         let (sx, sy) = ((x << dx) + bx, (y << dy) + by);
-                        let at = (sy * self.input_width + sx) * src_bytes;
                         if sx >= self.input_width {
                             continue;
                         }
+                        let at =
+                            Self::offset(self.tiled_input, sx, sy, self.input_width) * src_bytes;
                         if let Some(p) = input.get(at..at + src_bytes) {
                             let c = self.input_format.decode(p);
                             for (s, c) in sum.iter_mut().zip(c) {
@@ -187,7 +206,7 @@ impl DisplayTransfer {
                     continue;
                 }
                 let colour = sum.map(|s| (s / count) as u8);
-                let at = (out_y * width + x) * dst_bytes;
+                let at = Self::offset(self.tiled_output, x, out_y, width) * dst_bytes;
                 if let Some(p) = output.get_mut(at..at + dst_bytes) {
                     self.output_format.encode(colour, p);
                 }
@@ -341,6 +360,29 @@ mod tests {
         let mut output = [0u8; 8];
         t.run(&input, &mut output);
         assert_eq!((output[3], output[7]), (15, 35));
+    }
+
+    #[test]
+    fn tiles_are_unswizzled_by_default_and_swizzled_with_bit_1() {
+        // An 8x16 RGBA8 picture whose pixels hold their own linear index.
+        let dims = 16 << 16 | 8;
+        let tiled = DisplayTransfer::from_registers(dims, dims, 0).unwrap();
+        let mut input = vec![0u8; 8 * 16 * 4];
+        for y in 0..16 {
+            for x in 0..8 {
+                let at = tiled_offset(x, y, 8) as usize * 4;
+                input[at + 3] = (y * 8 + x) as u8;
+            }
+        }
+        let mut output = vec![0u8; input.len()];
+        tiled.run(&input, &mut output);
+        let reds: Vec<u8> = output.chunks(4).map(|p| p[3]).collect();
+        assert_eq!(reds, (0..128).collect::<Vec<u8>>());
+
+        let linear = DisplayTransfer::from_registers(dims, dims, 1 << 1).unwrap();
+        let mut back = vec![0u8; input.len()];
+        linear.run(&output, &mut back);
+        assert_eq!(back, input);
     }
 
     #[test]
