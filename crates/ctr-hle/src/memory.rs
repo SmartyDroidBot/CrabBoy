@@ -65,6 +65,12 @@ pub enum MemState {
     Private = 5,
     Shared = 6,
     Continuous = 7,
+    /// Memory mapped somewhere else as well, by the process (`Alias`) or
+    /// by a privileged module such as RO, which locks the original.
+    Aliased = 8,
+    Alias = 9,
+    AliasCode = 10,
+    Locked = 11,
 }
 
 impl MemState {
@@ -75,6 +81,10 @@ impl MemState {
             4 => MemState::Code,
             6 => MemState::Shared,
             7 => MemState::Continuous,
+            8 => MemState::Aliased,
+            9 => MemState::Alias,
+            10 => MemState::AliasCode,
+            11 => MemState::Locked,
             0 => MemState::Free,
             _ => MemState::Private,
         }
@@ -267,6 +277,77 @@ impl AddressSpace {
                 *entry = Entry::default();
             }
         }
+    }
+
+    /// What the page at `va` is: its physical page, permissions and state,
+    /// if it is mapped.
+    fn page(&self, va: u32) -> Option<(u32, Perm, MemState)> {
+        let entry = *self.pages.get((va / PAGE) as usize)?;
+        let (perm, state) = entry.kind();
+        (entry.0 & Entry::PRESENT != 0).then_some((entry.0 & !(PAGE - 1), perm, state))
+    }
+
+    /// Whether every page of the range is mapped, with exactly these
+    /// permissions and state.
+    pub fn is_all(&self, va: u32, len: u32, perm: Perm, state: MemState) -> bool {
+        (0..len.div_ceil(PAGE)).all(|n| {
+            self.page(va.wrapping_add(n * PAGE))
+                .is_some_and(|(_, p, s)| p == perm && s == state)
+        })
+    }
+
+    /// Map `len` bytes of the process's own private memory at `source` a
+    /// second time, at `target`, where nothing is mapped: what
+    /// `ControlProcessMemory` (privileged, as RO maps modules: the target
+    /// holds code and the source is locked away) and `ControlMemory` MAP
+    /// (the source stays usable) do. False, and nothing changed, if the
+    /// source is not all read/write private memory or the target is used.
+    pub fn alias(
+        &mut self,
+        target: u32,
+        source: u32,
+        len: u32,
+        perm: Perm,
+        privileged: bool,
+    ) -> bool {
+        let pages = len.div_ceil(PAGE);
+        let free = (0..pages).all(|n| self.page(target.wrapping_add(n * PAGE)).is_none());
+        if !free || !self.is_all(source, len, Perm::RW, MemState::Private) {
+            return false;
+        }
+        let (source_perm, source_state, target_state) = if privileged {
+            (Perm::NONE, MemState::Locked, MemState::AliasCode)
+        } else {
+            (Perm::RW, MemState::Aliased, MemState::Alias)
+        };
+        for n in 0..pages {
+            let (pa, _, _) = self.page(source + n * PAGE).expect("checked above");
+            self.map_as(target + n * PAGE, pa, PAGE, perm, target_state);
+            self.map_as(source + n * PAGE, pa, PAGE, source_perm, source_state);
+        }
+        true
+    }
+
+    /// Undo `alias` for `len` bytes: the target is unmapped and the source
+    /// is ordinary read/write memory again. False, and nothing changed, if
+    /// the two do not map the same pages.
+    pub fn unalias(&mut self, target: u32, source: u32, len: u32) -> bool {
+        let pages = len.div_ceil(PAGE);
+        let same = (0..pages).all(|n| {
+            match (self.page(target + n * PAGE), self.page(source + n * PAGE)) {
+                (Some((a, _, _)), Some((b, _, _))) => a == b,
+                _ => false,
+            }
+        });
+        if !same {
+            return false;
+        }
+        for n in 0..pages {
+            let (pa, _, _) = self.page(source + n * PAGE).expect("checked above");
+            self.unmap(target + n * PAGE, PAGE);
+            self.map(source + n * PAGE, pa, PAGE, Perm::RW);
+        }
+        true
     }
 
     /// Allocate `len` bytes of ordinary memory and map them at `va`.
@@ -537,6 +618,36 @@ mod tests {
             (0, CODE_BASE, MemState::Free)
         );
         assert_eq!(space.query(VRAM_VADDR).state, MemState::Static);
+    }
+
+    #[test]
+    fn an_alias_maps_the_same_pages_and_locks_the_original() {
+        let mut mem = PhysMem::new();
+        let mut space = AddressSpace::new(64 << 20);
+        space.allocate(HEAP_BASE, 0x2000, Perm::RW);
+        space.write32(&mut mem, HEAP_BASE + 0x1004, 0x1234);
+        let target = 0x0090_0000;
+        assert!(space.alias(target, HEAP_BASE, 0x2000, Perm::R, true));
+        assert_eq!(space.read32(&mem, target + 0x1004), Some(0x1234));
+        assert_eq!(space.query(target).state, MemState::AliasCode);
+        assert_eq!(space.resolve(HEAP_BASE, Perm::R), None, "locked");
+        assert!(space.is_all(HEAP_BASE, 0x2000, Perm::NONE, MemState::Locked));
+        assert!(
+            !space.alias(0x00A0_0000, HEAP_BASE, 0x1000, Perm::R, true),
+            "a locked page cannot be mapped again"
+        );
+        assert!(
+            !space.unalias(target, HEAP_BASE + 0x1000, 0x1000),
+            "not the same pages"
+        );
+
+        // The tail goes back first, as RO gives back what a module does
+        // not keep, then the rest.
+        assert!(space.unalias(target + 0x1000, HEAP_BASE + 0x1000, 0x1000));
+        assert_eq!(space.v2p(target + 0x1000), None);
+        assert!(space.unalias(target, HEAP_BASE, 0x1000));
+        assert!(space.is_all(HEAP_BASE, 0x2000, Perm::RW, MemState::Private));
+        assert_eq!(space.read32(&mem, HEAP_BASE + 0x1004), Some(0x1234));
     }
 
     #[test]
