@@ -10,9 +10,11 @@
 //! So far: the transfer engine, the shader unit and the command processor.
 
 pub mod command;
+pub mod framebuffer;
 pub mod geometry;
 pub mod memory;
 pub mod num;
+pub mod pipeline;
 pub mod raster;
 pub mod regs;
 pub mod shader;

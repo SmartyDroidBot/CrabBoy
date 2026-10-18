@@ -13,9 +13,11 @@
 //! and float uniforms arrive as three words of 24-bit floats or four of
 //! single precision, last component first.
 
+use crate::framebuffer::Framebuffer;
 use crate::geometry::{Assembler, ScreenVertex, Setup, Topology};
 use crate::memory::Memory;
-use crate::raster::{Fragment, FragmentSink, Raster};
+use crate::pipeline::Pipeline;
+use crate::raster::Raster;
 use crate::regs::{self as reg, sh};
 use crate::shader::{from_float24, Program, Uniforms, Unit, Vec4, ZERO};
 use crate::vertex::{
@@ -345,13 +347,14 @@ impl Gpu {
     }
 
     fn rasterize(&mut self, triangle: [ScreenVertex; 3], mem: &mut dyn Memory) {
-        struct Discard;
-        impl FragmentSink for Discard {
-            fn fragment(&mut self, _: &Fragment) {}
-        }
-        let _ = mem;
+        let framebuffer = Framebuffer::new(&self.regs);
+        let mut pipeline = Pipeline {
+            framebuffer: &framebuffer,
+            mem,
+            written: 0,
+        };
         self.stats.triangles += 1;
-        self.stats.fragments += Raster::new(&self.regs).triangle(&triangle, &mut Discard);
+        self.stats.fragments += Raster::new(&self.regs).triangle(&triangle, &mut pipeline);
     }
 
     /// Carry out a command list.
@@ -659,6 +662,33 @@ mod tests {
         send(&mut gpu, [0.0, 0.0, -0.5, 1.0], m);
         send(&mut gpu, [1.0; 4], m);
         assert_eq!(gpu.stats.triangles, 2);
+    }
+
+    #[test]
+    fn a_full_screen_quad_fills_the_colour_buffer() {
+        let mut gpu = Gpu::new();
+        let mut mem = VecMemory::new(0x1800_0000, 0x1000);
+        let m = &mut mem;
+        immediate_setup(&mut gpu, m);
+        gpu.write_register(reg::VIEWPORT_WIDTH, f24(4.0), 0xF, m);
+        gpu.write_register(reg::VIEWPORT_HEIGHT, f24(4.0), 0xF, m);
+        gpu.write_register(reg::FRAMEBUFFER_DIM, 7 << 12 | 8, 0xF, m);
+        gpu.write_register(reg::COLORBUFFER_LOC, 0x1800_0000 >> 3, 0xF, m);
+        gpu.write_register(reg::COLORBUFFER_WRITE, 0xF, 0xF, m);
+        gpu.write_register(reg::DEPTH_COLOR_MASK, 0xF << 8, 0xF, m);
+        gpu.write_register(reg::COLOR_OPERATION, 1 << 8, 0xF, m);
+        gpu.write_register(reg::BLEND_FUNC, 1 << 16 | 1 << 24, 0xF, m);
+        gpu.write_register(reg::PRIMITIVE_CONFIG, 1 << 8, 0xF, m);
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            send(&mut gpu, [x, y, -0.5, 1.0], m);
+            send(&mut gpu, [1.0, 0.5, 0.0, 1.0], m);
+        }
+        assert_eq!(gpu.stats.fragments, 64);
+        // RGBA8 is stored alpha, blue, green, red.
+        for pixel in mem.bytes[..256].chunks(4) {
+            assert_eq!(pixel, [255, 0, 128, 255]);
+        }
+        assert_eq!(mem.bytes[256], 0);
     }
 
     #[test]

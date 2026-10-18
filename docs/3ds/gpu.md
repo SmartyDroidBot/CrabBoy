@@ -169,6 +169,33 @@ rectangle instead. `RASTER_PIXEL_MASK` mode 1 keeps even x, mode 2 even x and
 odd y. Each covered pixel becomes a fragment (window x and y, depth, the
 varyings) for the stages after it, which sit behind the `FragmentSink` trait.
 
+## Output merger (`pica::framebuffer`)
+
+The colour buffer (`COLORBUFFER_LOC`, formats RGBA8, RGB8, RGB5A1, RGB565
+and RGBA4 stored as the display controller reads them) and the depth buffer
+(`DEPTHBUFFER_LOC`; 16 bits, 24 bits, or 24 bits with the stencil in the
+fourth byte) are `FRAMEBUFFER_DIM` pixels in 8x8 tiles, Z order inside a
+tile (x in the even bits), the tiles in rows. Window row y is memory row
+height − 1 − y (Citra: "laid out from bottom to top"). Bit 24 of the
+dimension register, the 32x32 block mode (0x11B) and early depth are not
+modelled.
+
+In order: the alpha test (0x104) on the fragment's alpha; the stencil test
+(0x105, only with a D24S8 buffer) comparing reference & mask with stored &
+mask, and its fail operation; the depth test (0x107, 24-bit depth shifted
+right 8 for a 16-bit buffer; disabled, it passes but depth is still written)
+with the z-fail operation; then the z-pass operation, the depth write, and
+the colour: blending (`COLOR_OPERATION` bit 8) or a logic operation (0x102),
+through the channel write mask. Stencil writes go through the buffer mask.
+`COLORBUFFER_READ/WRITE` and `DEPTHBUFFER_READ/WRITE` gate each access: a
+test without read access passes (and compares with zero for stencil), a
+blend without it reads zeros. Blending is integer: (s·f_s ± d·f_d) / 255,
+truncated and clamped; minimum and maximum ignore the factors; equations 5-7
+add. The "source alpha saturate" factor is min(A_s, 1 − A_d) for colour and
+one for alpha. Gas and shadow modes are not modelled.
+
+Interpolated colour channels become 8 bits as (c·255 + 2^15) >> 16.
+
 ## Not started
 
-Texture units and combiners, fragment lighting and the framebuffer.
+Texture units and combiners, and fragment lighting.
