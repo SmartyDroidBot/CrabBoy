@@ -13,33 +13,12 @@
 //! and float uniforms arrive as three words of 24-bit floats or four of
 //! single precision, last component first.
 
+use crate::memory::Memory;
+use crate::regs::{self as reg, sh};
 use crate::shader::{from_float24, Program, Uniforms, Vec4};
 use softfloat::F32;
 
-pub const REGISTERS: usize = 0x300;
-
-/// Register IDs.
-pub mod reg {
-    pub const FINALIZE: u32 = 0x010;
-    pub const CMDBUF_SIZE0: u32 = 0x238;
-    pub const CMDBUF_ADDR0: u32 = 0x23A;
-    pub const CMDBUF_JUMP0: u32 = 0x23C;
-    pub const GSH: u32 = 0x280;
-    pub const VSH: u32 = 0x2B0;
-}
-
-/// Offsets within a shader block.
-mod sh {
-    pub const BOOL: u32 = 0x00;
-    pub const INT: std::ops::RangeInclusive<u32> = 0x01..=0x04;
-    pub const ENTRY: u32 = 0x0A;
-    pub const FLOAT_INDEX: u32 = 0x10;
-    pub const FLOAT_DATA: std::ops::RangeInclusive<u32> = 0x11..=0x18;
-    pub const CODE_INDEX: u32 = 0x1B;
-    pub const CODE_DATA: std::ops::RangeInclusive<u32> = 0x1C..=0x23;
-    pub const OPDESC_INDEX: u32 = 0x25;
-    pub const OPDESC_DATA: std::ops::RangeInclusive<u32> = 0x26..=0x2D;
-}
+pub const REGISTERS: usize = reg::COUNT;
 
 /// Words of shader code and of operand descriptors a unit holds: the index
 /// registers are twelve bits wide.
@@ -82,17 +61,17 @@ impl ShaderSetup {
     /// masking.
     fn write(&mut self, offset: u32, value: u32) {
         match offset {
-            sh::BOOL => self.uniforms.boolean = value as u16,
-            o if sh::INT.contains(&o) => {
-                self.uniforms.int[(o - 1) as usize] = value.to_le_bytes();
+            sh::BOOLUNIFORM => self.uniforms.boolean = value as u16,
+            sh::INTUNIFORM_I0..=sh::INTUNIFORM_I3 => {
+                self.uniforms.int[(offset - sh::INTUNIFORM_I0) as usize] = value.to_le_bytes();
             }
-            sh::ENTRY => self.entry = value & 0xFFFF,
-            sh::FLOAT_INDEX => {
+            sh::ENTRYPOINT => self.entry = value & 0xFFFF,
+            sh::FLOATUNIFORM_INDEX => {
                 self.float_index = (value & 0xFF) as usize;
                 self.float_single = value >> 31 != 0;
                 self.float_words.clear();
             }
-            o if sh::FLOAT_DATA.contains(&o) => {
+            sh::FLOATUNIFORM_DATA0..=sh::FLOATUNIFORM_DATA7 => {
                 self.float_words.push(value);
                 let needed = if self.float_single { 4 } else { 3 };
                 if self.float_words.len() == needed {
@@ -103,15 +82,15 @@ impl ShaderSetup {
                     self.float_index += 1;
                 }
             }
-            sh::CODE_INDEX => self.code_index = (value & 0xFFF) as usize,
-            o if sh::CODE_DATA.contains(&o) => {
+            sh::CODETRANSFER_INDEX => self.code_index = (value & 0xFFF) as usize,
+            sh::CODETRANSFER_DATA0..=sh::CODETRANSFER_DATA7 => {
                 if let Some(slot) = self.program.code.get_mut(self.code_index) {
                     *slot = value;
                 }
                 self.code_index += 1;
             }
-            sh::OPDESC_INDEX => self.opdesc_index = (value & 0xFFF) as usize,
-            o if sh::OPDESC_DATA.contains(&o) => {
+            sh::OPDESCS_INDEX => self.opdesc_index = (value & 0xFFF) as usize,
+            sh::OPDESCS_DATA0..=sh::OPDESCS_DATA7 => {
                 if let Some(slot) = self.program.operands.get_mut(self.opdesc_index) {
                     *slot = value;
                 }
@@ -181,8 +160,10 @@ impl Gpu {
     }
 
     /// Write the bytes of `value` that the four-bit `mask` selects to
-    /// register `id`.
-    pub fn write_register(&mut self, id: u32, value: u32, mask: u32) {
+    /// register `id`. A write that triggers work (a draw) does it at once,
+    /// reading and writing `mem`.
+    pub fn write_register(&mut self, id: u32, value: u32, mask: u32, mem: &mut dyn Memory) {
+        let _ = mem;
         let Some(slot) = self.regs.get_mut(id as usize) else {
             return;
         };
@@ -199,7 +180,7 @@ impl Gpu {
     }
 
     /// Carry out a command list.
-    pub fn run_list(&mut self, words: &[u32]) -> ListEnd {
+    pub fn run_list(&mut self, words: &[u32], mem: &mut dyn Memory) -> ListEnd {
         let mut at = 0;
         while at + 1 < words.len() {
             let header = words[at + 1];
@@ -216,10 +197,10 @@ impl Gpu {
                     .take(extra),
             );
             for value in parameters {
-                self.write_register(id, value, mask);
+                self.write_register(id, value, mask, mem);
                 match id {
                     reg::FINALIZE => return ListEnd::Finalized,
-                    reg::CMDBUF_JUMP0 | 0x23D => {
+                    reg::CMDBUF_JUMP0 | reg::CMDBUF_JUMP1 => {
                         return ListEnd::Jump((id - reg::CMDBUF_JUMP0) as usize)
                     }
                     _ => {}
@@ -238,6 +219,7 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::VecMemory;
     use crate::shader::{Unit, ONE};
 
     fn header(id: u32, mask: u32, extra: u32, consecutive: bool) -> u32 {
@@ -248,7 +230,10 @@ mod tests {
     fn the_documented_example_writes_three_registers() {
         let mut gpu = Gpu::new();
         let list = [0xAAAA_AAAA, 0x802F_011C, 0xBBBB_BBBB, 0xCCCC_CCCC];
-        assert_eq!(gpu.run_list(&list), ListEnd::Exhausted);
+        assert_eq!(
+            gpu.run_list(&list, &mut VecMemory::default()),
+            ListEnd::Exhausted
+        );
         assert_eq!(
             gpu.regs[0x11C..0x11F],
             [0xAAAA_AAAA, 0xBBBB_BBBB, 0xCCCC_CCCC]
@@ -257,7 +242,7 @@ mod tests {
         // Without consecutive mode they all land on the first.
         let mut gpu = Gpu::new();
         let list = [0xAAAA_AAAA, 0x002F_011C, 0xBBBB_BBBB, 0xCCCC_CCCC];
-        gpu.run_list(&list);
+        gpu.run_list(&list, &mut VecMemory::default());
         assert_eq!(gpu.regs[0x11C..0x11F], [0xCCCC_CCCC, 0, 0]);
     }
 
@@ -274,7 +259,7 @@ mod tests {
             0x0000_0001,
             header(0x102, 0xF, 0, false),
         ];
-        gpu.run_list(&list);
+        gpu.run_list(&list, &mut VecMemory::default());
         assert_eq!(gpu.regs[0x100], 0x11BB_33DD);
         assert_eq!(gpu.regs[0x101], 0x0066_0088);
         assert_eq!(gpu.regs[0x102], 1);
@@ -289,7 +274,10 @@ mod tests {
             7,
             header(0x100, 0xF, 0, false),
         ];
-        assert_eq!(gpu.run_list(&list), ListEnd::Finalized);
+        assert_eq!(
+            gpu.run_list(&list, &mut VecMemory::default()),
+            ListEnd::Finalized
+        );
         assert_eq!(gpu.regs[0x100], 0, "nothing runs after FINALIZE");
 
         let list = [
@@ -300,7 +288,10 @@ mod tests {
             1,
             header(reg::CMDBUF_JUMP0 + 1, 0xF, 0, false),
         ];
-        assert_eq!(gpu.run_list(&list), ListEnd::Jump(1));
+        assert_eq!(
+            gpu.run_list(&list, &mut VecMemory::default()),
+            ListEnd::Jump(1)
+        );
         assert_eq!(gpu.command_buffer(1), (0x0010_0000, 0x40));
     }
 
@@ -314,36 +305,39 @@ mod tests {
         let (x, y, z, w) = (0x3F_0000u32, 0xBF_0000u32, 0x40_8000u32, 0x3E_0000u32);
         let list = [
             0,
-            header(reg::VSH + sh::CODE_INDEX, 0xF, 2, true),
+            header(reg::VSH + sh::CODETRANSFER_INDEX, 0xF, 2, true),
             mov,
             end,
             0,
-            header(reg::VSH + sh::OPDESC_INDEX, 0xF, 1, true),
+            header(reg::VSH + sh::OPDESCS_INDEX, 0xF, 1, true),
             plain,
             0xDEAD_BEEF, // padding
             5,
-            header(reg::VSH + sh::FLOAT_INDEX, 0xF, 3, true),
+            header(reg::VSH + sh::FLOATUNIFORM_INDEX, 0xF, 3, true),
             z << 24 | w,
             y << 16 | z >> 8,
             x << 8 | y >> 16,
             0xDEAD_BEEF, // padding
             1 << 31 | 6,
-            header(reg::VSH + sh::FLOAT_INDEX, 0xF, 4, true),
+            header(reg::VSH + sh::FLOATUNIFORM_INDEX, 0xF, 4, true),
             2.0f32.to_bits(),
             0.0f32.to_bits(),
             0.0f32.to_bits(),
             4.0f32.to_bits(),
             0x0000_0B0B,
-            header(reg::VSH + sh::BOOL, 0xF, 0, false),
+            header(reg::VSH + sh::BOOLUNIFORM, 0xF, 0, false),
             0x0403_0201,
             header(reg::VSH + 2, 0xF, 0, false),
             0,
-            header(reg::VSH + sh::ENTRY, 0xF, 0, false),
+            header(reg::VSH + sh::ENTRYPOINT, 0xF, 0, false),
             1,
             header(reg::FINALIZE, 0xF, 0, false),
         ];
         let mut gpu = Gpu::new();
-        assert_eq!(gpu.run_list(&list), ListEnd::Finalized);
+        assert_eq!(
+            gpu.run_list(&list, &mut VecMemory::default()),
+            ListEnd::Finalized
+        );
         let vertex = &gpu.vertex;
         assert_eq!(vertex.program.code[..2], [mov, end]);
         assert_eq!(vertex.uniforms.boolean, 0x0B0B);
@@ -366,10 +360,15 @@ mod tests {
     #[test]
     fn the_uniform_fifo_moves_on_to_the_next_register() {
         let mut gpu = Gpu::new();
-        gpu.write_register(reg::VSH + sh::FLOAT_INDEX, 94, 0xF);
+        gpu.write_register(
+            reg::VSH + sh::FLOATUNIFORM_INDEX,
+            94,
+            0xF,
+            &mut VecMemory::default(),
+        );
         for _ in 0..3 {
             for word in [0x3F_0000, 0, 0] {
-                gpu.write_register(reg::VSH + 0x11, word, 0xF);
+                gpu.write_register(reg::VSH + 0x11, word, 0xF, &mut VecMemory::default());
             }
         }
         // c94 and c95 are set; the third lands past the end and is dropped.

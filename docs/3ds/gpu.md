@@ -1,9 +1,12 @@
 # 3DS GPU (PICA200)
 
 What `crates/pica` models, with the source of each fact. The crate works on
-byte slices and register values and knows nothing of the machine; `ctr-core`
-connects it to the registers at 0x10400000. The memory fill units and display
-controllers are in `io.md`.
+register values and on memory through its `Memory` trait (byte ranges by
+physical address, `None` for a range that does not lie in one region) and
+knows nothing of the machine; `ctr-core` implements the trait for its
+physical memory and connects the crate to the registers at 0x10400000. The
+memory fill units and display controllers are in `io.md`. Register IDs are
+named in `pica::regs` as 3dbrew names them.
 
 ## Transfer engine (`pica::transfer`)
 

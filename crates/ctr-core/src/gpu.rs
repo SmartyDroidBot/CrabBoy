@@ -16,6 +16,18 @@ use crate::ctr::{BOTTOM_SCREEN, TOP_SCREEN};
 use crate::io::pdc::Pdc;
 use std::collections::BTreeMap;
 
+/// The GPU reaches VRAM and FCRAM, like every bus master, by physical
+/// address.
+impl pica::memory::Memory for PhysMem {
+    fn read(&self, pa: u32, len: usize) -> Option<&[u8]> {
+        self.slice(pa, len)
+    }
+
+    fn write(&mut self, pa: u32, len: usize) -> Option<&mut [u8]> {
+        self.slice_mut(pa, len)
+    }
+}
+
 /// PDC status bit of the vertical blank, in the framebuffer select register.
 pub const PDC_STATUS_VBLANK: u32 = 1 << 17;
 /// PDC control: the vertical blank interrupt is masked.
@@ -150,19 +162,19 @@ impl GpuExt {
                 })
             }
             0x1000..=0x1BFF => {
-                use pica::command::reg;
+                use pica::regs as reg;
                 let id = (offset - 0x1000) / 4;
                 let bytes = (0..4)
                     .filter(|byte| mask >> (byte * 8) & 0xFF != 0)
                     .fold(0, |bytes, byte| bytes | 1 << byte);
-                self.pica.write_register(id, value, bytes);
+                self.pica.write_register(id, value, bytes, mem);
                 match id {
                     // Written by hand, it interrupts like the end of a list.
                     reg::FINALIZE => Some(GpuJob {
                         unit: GpuIrq::P3d,
                         cost: 1,
                     }),
-                    reg::CMDBUF_JUMP0 | 0x23D => {
+                    reg::CMDBUF_JUMP0 | reg::CMDBUF_JUMP1 => {
                         self.run_commands((id - reg::CMDBUF_JUMP0) as usize, mem)
                     }
                     _ => None,
@@ -212,7 +224,7 @@ impl GpuExt {
     /// buffer. The list takes effect at once; the P3D interrupt follows after
     /// a time in proportion to its length. A list that never writes
     /// `FINALIZE` hangs the GPU, so nothing follows it.
-    fn run_commands(&mut self, mut index: usize, mem: &PhysMem) -> Option<GpuJob> {
+    fn run_commands(&mut self, mut index: usize, mem: &mut PhysMem) -> Option<GpuJob> {
         use pica::command::ListEnd;
         let mut words_run = 0u64;
         // Two buffers can jump to each other for ever.
@@ -226,7 +238,7 @@ impl GpuExt {
                 .map(|word| u32::from_le_bytes(*word))
                 .collect();
             words_run += words.len() as u64;
-            match self.pica.run_list(&words) {
+            match self.pica.run_list(&words, mem) {
                 ListEnd::Finalized => {
                     return Some(GpuJob {
                         unit: GpuIrq::P3d,
