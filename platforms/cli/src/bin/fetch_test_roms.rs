@@ -1,6 +1,7 @@
 //! Download the open-source accuracy test suites into `roms/test-suites/`
 //! (gitignored). Everything is pinned: the Game Boy bundle by release and
-//! SHA-256, the GBA tests by commit.
+//! SHA-256, the GBA tests by commit, the 3DS payloads and homebrew by
+//! release and SHA-256.
 //!
 //! ```text
 //! fetch_test_roms [--dest DIR] [--only gb|gba] [--force]
@@ -34,8 +35,8 @@ const GBA_FILES: &[&str] = &[
     "unsafe/unsafe.gba",
 ];
 
-/// A bare-metal 3DS payload from a public release, used to pin frames of the
-/// 3DS core: an archive, its SHA-256, and the FIRM inside it.
+/// A 3DS program from a public release, used to pin frames of the 3DS core:
+/// an archive, its SHA-256, and the FIRM payload or 3DSX homebrew inside it.
 struct CtrPayload {
     /// Directory under `3ds/`, and with the version the marker file's name.
     dir: &'static str,
@@ -45,7 +46,7 @@ struct CtrPayload {
     member: &'static str,
 }
 
-const CTR_PAYLOADS: [CtrPayload; 3] = [
+const CTR_PAYLOADS: [CtrPayload; 4] = [
     // GPL-2.0-or-later.
     CtrPayload {
         dir: "godmode9",
@@ -69,6 +70,16 @@ const CTR_PAYLOADS: [CtrPayload; 3] = [
         url: "https://github.com/profi200/open_agb_firm/releases/download/beta_2024-12-24/open_agb_firm_beta_20241224.7z",
         sha256: "d8105ed0ac877bac99618b2664a656f19ab7ce67a55a696e5598ceeae6fa0cd9",
         member: "open_agb_firm.firm",
+    },
+    // The Homebrew Menu (devkitPro; citro2d and citro3d draw it on the GPU),
+    // run in the high-level mode. The release carries no licence file, so it
+    // is downloaded for the tests and never committed.
+    CtrPayload {
+        dir: "hbmenu",
+        version: "v2.4.3",
+        url: "https://github.com/devkitPro/3ds-hbmenu/releases/download/v2.4.3/3ds-hbmenu-v2.4.3.zip",
+        sha256: "ed50e1085c34bbc94f995a8569a3c4a594a5964cb454acfc2b949c7f530efd4f",
+        member: "boot.3dsx",
     },
 ];
 
