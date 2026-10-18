@@ -12,7 +12,7 @@ references this file.
 ## 1. Approach
 
 - **Platform-agnostic cores.** Everything in `crates/` (`emu-core`, `gb-core`,
-  `gba-core`, `crab-systems`) must compile with no GUI, OS, or WebAssembly
+  `gba-core`, the 3DS crates, `crab-systems`) must compile with no GUI, OS, or WebAssembly
   dependencies. Frontends live only under `platforms/` (`desktop`, `cli`,
   `wasm`) and depend on `crab-systems`, never on a core directly.
 - **Everything behind a uniform interface.** Each console implements
@@ -165,7 +165,10 @@ a `<footer>`. No line may exceed **100 characters**.
 `emu-core`, `gb-core`, `gba-core`, `systems`, `cpu`, `ppu`, `timer`, `apu`,
 `joypad`, `cartridge`, `bus`, `bios`, `dma`, `eeprom`, `rtc`, `state`, `io`,
 `irq`, `save`, `gba`, `desktop`, `cli`, `wasm`, `accuracy`, `release`, `ci`,
-`docs`, `roms`, `scripts`, `git`.
+`docs`, `roms`, `scripts`, `git`,
+and for the 3DS core `ctr-core`, `arm-core`, `arm11`, `arm9`, `mmu`, `mpu`,
+`gic`, `pxi`, `pica`, `dsp`, `softfloat`, `crypto`, `fs`, `nand`, `hid`,
+`lcd`, `sched`, `gdb`, `hwtests`, `3ds`.
 
 **Subject rules:**
 - imperative, present tense: `change`, not `changed` / `changes`
