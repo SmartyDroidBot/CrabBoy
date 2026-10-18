@@ -18,5 +18,6 @@ pub mod pipeline;
 pub mod raster;
 pub mod regs;
 pub mod shader;
+pub mod texture;
 pub mod transfer;
 pub mod vertex;

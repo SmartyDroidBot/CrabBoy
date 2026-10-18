@@ -200,6 +200,34 @@ one for alpha. Gas and shadow modes are not modelled.
 
 Interpolated colour channels become 8 bits as (c·255 + 2^15) >> 16.
 
+## Texture units (`pica::texture`)
+
+Units 0-2 (registers 0x80-0x9E), each on when its `TEXUNIT_CONFIG` bit is.
+Textures are laid out like the colour buffer: 8x8 tiles in rows, Z order
+inside, upside down (texel row t is memory row height − 1 − t, as Citra has
+it). Formats: RGBA8 (A, B, G, R in memory), RGB8, RGB5A1, RGB565, RGBA4,
+IA8 (alpha in the first byte), HILO8 (as red and green), I8, A8, IA4
+(intensity in the high nibble), I4 and A4 (low nibble first), ETC1 and
+ETC1A4. An ETC1 tile is four 4x4 blocks in Z order, each a little-endian
+64-bit ETC1 block (texel (x, y) of a block is bit x·4 + y of each index
+plane), after 64 bits of 4-bit alpha in the same order for ETC1A4. Narrow
+channels widen by repeating their top bits. Mipmap levels follow each other,
+each half the size (at least one tile).
+
+Wrap modes: clamp to edge, clamp to border (the unit's border colour),
+repeat, mirrored repeat; 4-7 as 0, 1, 2, 2. Coordinates are 16-bit fixed
+point; a texel position has 8 fractional bits. Nearest takes the texel the
+position falls in; linear blends the four around position − ½ with 8-bit
+weights, rounding. With `TEXUNIT_LOD_ENABLE` the level of detail is
+log2(largest of |du/dx|·w, |dv/dx|·h, |du/dy|·w, |dv/dy|·h) with 8
+fractional bits (the fraction linear between powers of two), plus the
+signed 1.4.8 bias, clamped to the unit's level range; at or below zero the
+magnification filter samples level 0, above it the minification filter
+samples the nearest level, or blends two with the mipmap filter on. Without
+it, level 0 with the magnification filter (the minimum level still holds).
+Unit 0's projection mode divides u and v by texcoord0.w. Cube maps, shadow
+textures and the procedural unit 3 sample as transparent black.
+
 ## Not started
 
-Texture units and combiners, and fragment lighting.
+Texture combiners and fragment lighting.
