@@ -302,11 +302,30 @@ pub struct Y2r {
     busy: bool,
     finished: bool,
     transfer_end: Option<ObjId>,
+    /// The number of the conversion under way, the tag of its end.
+    conversion: u32,
+}
+
+/// How long the hardware takes. Not measured: an estimate of the block and
+/// its DMA moving a pixel every four ARM11 cycles, so a 400x240 picture
+/// takes about 1.4 ms. Changing it is a timing change.
+pub mod timing {
+    pub const CYCLES_PER_PIXEL: u64 = 4;
 }
 
 impl Y2r {
-    /// Convert the picture now and announce the end of the transfer.
+    /// Start a conversion: it ends after its cost.
     fn start(&mut self, h: &mut Horizon) {
+        self.busy = true;
+        self.finished = false;
+        self.conversion = self.conversion.wrapping_add(1);
+        let pixels = self.params.line_width as u64 * self.params.lines as u64;
+        let cost = (pixels * timing::CYCLES_PER_PIXEL).max(1);
+        h.schedule_service("y2r:u", cost, self.conversion);
+    }
+
+    /// Convert the picture and announce the end of the transfer.
+    fn convert(&mut self, h: &mut Horizon) {
         let planes = if self.params.input_format == YUV422_BATCH {
             Planes {
                 batch: self.batch.gather(h),
@@ -469,8 +488,6 @@ impl Service for Y2r {
             }
             0x25 => ok().words(&self.dithering_weights),
             0x26 => {
-                self.busy = true;
-                self.finished = false;
                 self.start(h);
                 ok()
             }
@@ -515,12 +532,22 @@ impl Service for Y2r {
             _ => h.unhandled("y2r:u", request),
         }
     }
+
+    /// The end of conversion `tag`, unless it was stopped or another one
+    /// started since.
+    fn event(&mut self, h: &mut Horizon, tag: u32) {
+        if self.busy && tag == self.conversion {
+            self.convert(h);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::testing::{connect, console, event, read_bytes, send, write_bytes, HEAP};
+    use crate::service::testing::{
+        connect, console, event, read_bytes, run_for, send, write_bytes, HEAP,
+    };
 
     fn gray(params: &Params, y: u8) -> Vec<u8> {
         let n = params.line_width as usize * params.lines as usize;
@@ -671,7 +698,15 @@ mod tests {
             &[0x0018_0102, HEAP + 0x400, 128, 32, 16, 0, 0xFFFF_8001],
         );
         assert_eq!(send(&mut h, y2r, &[0x0026_0000]), [0x0026_0040, 0]);
+        // Busy for the picture's cost, then done.
+        assert_eq!(send(&mut h, y2r, &[0x0028_0000])[2], 1);
+        assert_eq!(event(&h, end), Some(false));
+        run_for(
+            &mut h,
+            64 * timing::CYCLES_PER_PIXEL + 2 * crate::horizon::QUANTUM,
+        );
         assert_eq!(event(&h, end), Some(true));
+        assert_eq!(send(&mut h, y2r, &[0x0028_0000])[2], 0);
         assert_eq!(send(&mut h, y2r, &[0x0019_0000])[2], 1);
         // White, and the gap untouched.
         assert_eq!(read_bytes(&h, HEAP + 0x400, 2), [0xFF, 0xFF]);

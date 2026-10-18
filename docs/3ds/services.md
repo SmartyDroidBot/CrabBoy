@@ -90,6 +90,9 @@ and lines in the next, standard coefficient and alpha in the third).
 - Not done: dithering (it only changes the lowest bits of the 16-bit
   formats).
 
-StartConversion converts the whole picture, marks the planes sent and the
-output received, and signals the transfer-end event if SetTransferEndInterrupt
-enabled it.
+StartConversion makes the converter busy for the picture's cost, four
+ARM11 cycles a pixel (`y2r::timing`; an estimate, not measured: a 400x240
+picture takes about 1.4 ms). Then the whole picture is converted, the
+planes are marked sent and the output received, and the transfer-end
+event is signalled if SetTransferEndInterrupt enabled it. StopConversion
+before then cancels it.
