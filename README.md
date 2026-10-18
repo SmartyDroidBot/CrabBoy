@@ -31,11 +31,7 @@ for what each release contains and [`docs/accuracy.md`](docs/accuracy.md) for
 the current test-suite results.
 
 A **Nintendo 3DS** core is in development on the `3ds` branch (behind the
-`crab-systems/ctr` feature). Its hardware models run bare-metal software on
-the ARM9 and both ARM11 cores: GodMode9, fastboot3DS, open_agb_firm, and Linux
-to a login prompt. A high-level mode that implements the console's operating
-system, so that decrypted game images you own run without anything dumped
-from a console, is being built on top; it does not play games yet. See
+`crab-systems/ctr` feature); see [Nintendo 3DS](#nintendo-3ds) below and
 [`docs/3ds/overview.md`](docs/3ds/overview.md).
 
 ## Status
@@ -63,6 +59,53 @@ test outside `ppu/` (OAM DMA, timer, serial and interrupt timing included).
 
 Emulation is integer-only and deterministic: CI checks that x86_64, aarch64
 and wasm builds produce bit-identical frames.
+
+## Nintendo 3DS
+
+The 3DS core is built only with the `ctr` feature of a frontend (or
+`crab-systems/ctr` for the whole workspace) and lives on the `3ds` branch
+until it can play a game on every frontend.
+
+It runs in two ways, chosen from the image's header:
+
+- **High-level mode** (`crates/ctr-hle`) for games and homebrew: the
+  emulator is the console's operating system. It loads the program straight
+  into a process, answers the Horizon kernel's calls and implements the
+  system services itself, so nothing dumped from a console is needed. It
+  opens **decrypted** card images (`.3ds`, `.cci`), program contents
+  (`.cxi`) and 3DSX homebrew (`.3dsx`). CrabBoy contains no keys and never
+  decrypts anything: an encrypted image is refused with the reason. Make
+  your own decrypted dump of a game you own.
+- **Low-level machine** (`crates/ctr-core`) for FIRM payloads (`.firm`):
+  the hardware models run bare-metal software on the ARM9 and both ARM11
+  cores. GodMode9, fastboot3DS, open_agb_firm, and Linux to its login
+  prompt are pinned in the accuracy suites. Booting the console's own
+  firmware, and running games on this machine, is future work.
+
+```sh
+# Desktop: the top screen above the bottom one; the mouse is the stylus
+cargo run --release -p crab-desktop --features ctr -- "path/to/game.3ds"
+
+# Headless, with the stylus and the circle pad scripted
+cargo run --release -p crab-cli --features ctr --bin crab -- run game.3dsx \
+    --frames 600 --input "TOUCH:160:120@300,!TOUCH@305,CPAD:0:32767@400" --hash
+
+# Diagnostics: the program's log, its threads and the services it uses
+cargo run --release -p crab-cli --bin ctr-diag -- "path/to/game.3ds" 600 \
+    --every=60 --trace=svc,ipc --dump=frame
+```
+
+A card image of several gigabytes is read from disk as the game asks for
+it, never whole. The game's save data, extra data and SD card are kept in
+one `.sav` file next to the image, written when the game saves. The
+browser build holds an image in memory, so it opens images up to 1 GiB.
+
+What works today: card images and homebrew load and start their threads,
+the kernel, the file system, APT, HID, configuration and GPU command
+services answer them, and both screens show what the program puts in its
+framebuffers. Games do not reach their title screens yet; the GPU's
+drawing pipeline, the DSP, the CRO linker and many services are in
+progress. `docs/3ds/hle.md` records what the high-level mode implements.
 
 ## Download
 
@@ -113,8 +156,9 @@ ROM boots through high-level BIOS emulation unless a 16 KB `gba_bios.bin`
 is passed with `--bios` or found next to the ROM or the executable.
 
 `cargo run --release -p crab-cli --bin fetch_test_roms` downloads the
-open-source accuracy suites (c-sp game-boy-test-roms, jsmolka gba-tests)
-into `roms/test-suites/`, which is gitignored.
+open-source accuracy suites (c-sp game-boy-test-roms, jsmolka gba-tests,
+the 3DS payloads and the Homebrew Menu) into `roms/test-suites/`, which is
+gitignored; `--bin accuracy` runs them and skips any that are absent.
 
 ## Controls
 
@@ -123,7 +167,11 @@ into `roms/test-suites/`, which is gitignored.
 | Arrows | D-pad |
 | Z / X | A / B |
 | Enter / Backspace | Start / Select |
-| A / S | L / R (GBA) |
+| A / S | L / R |
+| C / V | X / Y (3DS) |
+| Q / W | ZL / ZR (3DS) |
+| I / J / K / L | Circle pad (3DS) |
+| Mouse on the bottom screen | Stylus (3DS) |
 | P / R / F | Pause / Reset / Fast-forward |
 | F1–F4, Shift+F1–F4 | Save / load state slots |
 | F5 / F9 | Quick save / quick load |
@@ -140,6 +188,15 @@ pure Rust with no C code. The remaining exceptions are host bindings:
   loaded at runtime.
 - `fetch_test_roms` (a developer tool, not shipped) uses `ureq` with
   `rustls`, whose `ring` backend contains C and assembly.
+
+## Credits
+
+- The 3DS DSP port follows [Teakra](https://github.com/wwylele/teakra) by
+  Weiyi Wang (MIT licence), the reference emulation of the Teak DSP.
+- Test suites by blargg, Gekkio (mooneye), Matt Currie (mealybug, dmg-acid2,
+  cgb-acid2), LIJI (same-suite) and jsmolka, and the 3DS programs of the
+  GodMode9, fastboot3DS, open_agb_firm, Linux for the 3DS and Homebrew
+  Menu authors; `fetch_test_roms` downloads them, none is redistributed.
 
 ## Contributing
 
@@ -168,7 +225,8 @@ commits.
   frontends can host any console behind one `Box<dyn System>`.
 - `crab_systems::detect` identifies a ROM from its header bytes and
   `crab_systems::load_with` builds the matching system, so no frontend knows
-  about individual cores.
+  about individual cores. `crab_systems::load_media` does the same for an
+  image read in pieces through `emu_core::Storage`, such as a 3DS card image.
 - `emu_core::Device` is the uniform interface for pluggable peripherals
   (PPU, timer, APU, joypad). Devices tick with an abstract `Bus` and downcast
   via `as_any_mut()` to the concrete bus.

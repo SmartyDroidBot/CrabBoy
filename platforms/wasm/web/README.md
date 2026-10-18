@@ -6,6 +6,11 @@ cores as the desktop build through WebAssembly: drop a `.gb`, `.gbc` or
 on-screen touch controls. Battery saves and a quick-save slot are kept in
 the browser's IndexedDB, keyed by the ROM contents.
 
+A build with the 3DS core (`--features ctr`, below) also opens decrypted
+3DS card images (`.3ds`, `.cci`), program contents (`.cxi`) and 3DSX
+homebrew. The browser holds the image in memory, so it takes images up to
+1 GiB; the desktop build reads larger ones from disk.
+
 Every file here is plain HTML, CSS and JavaScript (ES modules); there is no
 bundler and no npm dependency.
 
@@ -37,6 +42,8 @@ wasm-bindgen --target web --out-dir platforms/wasm/web/pkg \
   target/wasm32-unknown-unknown/release/crab_wasm.wasm
 ```
 
+Add `--features ctr` to the `cargo build` for the 3DS core.
+
 ## Run
 
 ES modules and `.wasm` fetches need an HTTP server, not `file://`:
@@ -57,14 +64,19 @@ deployed to GitHub Pages on every release.
 | Arrows            | D-pad                  |
 | Z / X             | A / B                  |
 | Enter / Backspace | Start / Select         |
-| A / S             | L / R (GBA)            |
+| A / S             | L / R                  |
+| C / V             | X / Y (3DS)            |
+| Q / W             | ZL / ZR (3DS)          |
+| I / J / K / L     | Circle pad (3DS)       |
+| Pointer           | Stylus (3DS, bottom screen) |
 | P                 | Pause                  |
 | R                 | Reset                  |
 | F (hold)          | Fast-forward           |
 | F5 / F9           | Quick save / load      |
 
-Gamepads use the browser's standard mapping. On touch devices an on-screen
-pad appears below the screen (L and R only for GBA games).
+Gamepads use the browser's standard mapping; for the 3DS the left stick is
+the circle pad. On touch devices an on-screen pad appears below the screen
+(L and R for GBA and 3DS games, X, Y, ZL and ZR for 3DS games).
 
 ## Headless test
 
@@ -77,3 +89,6 @@ wasm-bindgen --target nodejs --out-dir target/wasm-node \
 node platforms/wasm/tests/run.js path/to/game.gb --frames 560 --input START@400 --hash
 crab run path/to/game.gb --frames 560 --input START@400 --hash
 ```
+
+The scripts take the same grammar as `crab run --input`, including the 3DS
+stylus (`TOUCH:X:Y@F`, `!TOUCH@F`) and circle pad (`CPAD:X:Y@F`, `!CPAD@F`).
