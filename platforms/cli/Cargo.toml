@@ -41,7 +41,7 @@ path = "src/bin/gba_disasm.rs"
 
 [dependencies]
 emu-core = { workspace = true }
-crab-systems = { workspace = true }
+crab-systems = { workspace = true, features = ["std"] }
 gb-core = { workspace = true }
 gba-core = { workspace = true, features = ["trace"] }
 ctr-core = { workspace = true, features = ["trace"] }

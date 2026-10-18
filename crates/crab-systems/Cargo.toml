@@ -18,3 +18,6 @@ ctr-hle = { workspace = true, optional = true }
 [features]
 # The Nintendo 3DS core. Off until the core is ready to merge into `main`.
 ctr = ["dep:ctr-core", "dep:ctr-hle", "dep:ctr-fs"]
+# Opening images on the host's file system (`FileStorage`, `load_file`): the
+# desktop and command-line frontends, not the browser.
+std = []

@@ -102,11 +102,11 @@ fn parse_run_args(args: &[String]) -> RunArgs {
 }
 
 fn load_system(rom_path: &str, bios: Option<&str>, cold: bool) -> Box<dyn System> {
-    let rom = std::fs::read(rom_path).unwrap_or_else(|e| fail(format!("read {rom_path}: {e}")));
     let gba_bios =
         bios.map(|p| std::fs::read(p).unwrap_or_else(|e| fail(format!("read {p}: {e}"))));
     let opts = crab_systems::LoadOptions { gba_bios, cold };
-    crab_systems::load_with(rom, &opts).unwrap_or_else(|e| fail(format!("{rom_path}: {e}")))
+    // Read where it lies: a 3DS card image is gigabytes.
+    crab_systems::load_file(rom_path, &opts).unwrap_or_else(|e| fail(format!("{rom_path}: {e}")))
 }
 
 /// Every display of the system in one image (the 3DS has two).
@@ -120,14 +120,17 @@ fn rgba(system: &dyn System) -> (u32, u32, Vec<u8>) {
 }
 
 fn cmd_info(rom_path: &str) {
-    let data = std::fs::read(rom_path).unwrap_or_else(|e| fail(format!("read {rom_path}: {e}")));
-    let size = data.len();
-    let Some(kind) = crab_systems::detect(&data) else {
-        fail(format!(
-            "{rom_path}: not a Game Boy, Game Boy Color or Game Boy Advance ROM"
-        ));
-    };
-    let system = crab_systems::load(data).unwrap_or_else(|e| fail(format!("{rom_path}: {e}")));
+    let size = std::fs::metadata(rom_path)
+        .unwrap_or_else(|e| fail(format!("read {rom_path}: {e}")))
+        .len();
+    let kind = crab_systems::detect_file(rom_path)
+        .unwrap_or_else(|e| fail(format!("read {rom_path}: {e}")))
+        .unwrap_or_else(|| {
+            fail(format!(
+                "{rom_path}: not a Game Boy, Game Boy Color or Game Boy Advance ROM"
+            ))
+        });
+    let system = load_system(rom_path, None, false);
     let screen = system.screen();
     println!("file:     {rom_path}");
     println!("size:     {size} bytes");

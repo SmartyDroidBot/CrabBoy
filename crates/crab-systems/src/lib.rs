@@ -4,9 +4,15 @@
 //! header bytes (the file extension is never consulted) and [`load`] /
 //! [`load_with`] build the matching `Box<dyn System>`. [`load_media`] does the
 //! same for an image that is read in pieces, which is how a 3DS cartridge of
-//! several gigabytes is opened.
+//! several gigabytes is opened. With the `std` feature, [`file`] opens
+//! images on the host's file system.
 
 use emu_core::{Storage, System};
+
+#[cfg(feature = "std")]
+pub mod file;
+#[cfg(feature = "std")]
+pub use file::{detect_file, load_file, FileStorage};
 
 /// Enough of an image to identify it: the 3DS magics sit at 0x100.
 const HEADER_LEN: u64 = 0x200;
@@ -39,14 +45,30 @@ impl Kind {
 
     /// The conventional file extension.
     pub fn extension(self) -> &'static str {
+        self.extensions()[0]
+    }
+
+    /// Every file extension images of the console carry, the conventional
+    /// one first, for file pickers. Detection never looks at them.
+    pub fn extensions(self) -> &'static [&'static str] {
         match self {
-            Kind::Gb => "gb",
-            Kind::Gbc => "gbc",
-            Kind::Gba => "gba",
+            Kind::Gb => &["gb"],
+            Kind::Gbc => &["gbc"],
+            Kind::Gba => &["gba"],
+            // Card images, program contents, homebrew and firmware payloads.
             #[cfg(feature = "ctr")]
-            Kind::Ctr => "3ds",
+            Kind::Ctr => &["3ds", "cci", "cxi", "3dsx", "firm"],
         }
     }
+
+    /// The consoles this build supports.
+    pub const ALL: &'static [Kind] = &[
+        Kind::Gb,
+        Kind::Gbc,
+        Kind::Gba,
+        #[cfg(feature = "ctr")]
+        Kind::Ctr,
+    ];
 }
 
 /// Options for [`load_with`].
@@ -90,21 +112,33 @@ pub fn load(rom: Vec<u8>) -> Result<Box<dyn System>, String> {
     load_with(rom, &LoadOptions::default())
 }
 
+/// The header of a medium: enough of it to identify the image.
+fn header_of(media: &mut dyn Storage) -> Result<Vec<u8>, String> {
+    let mut header = vec![0u8; media.len().min(HEADER_LEN) as usize];
+    media.read_at(0, &mut header).map_err(|e| e.to_string())?;
+    Ok(header)
+}
+
+/// Identify the image on a medium from its header alone, as [`detect`] does
+/// for one held in memory.
+pub fn detect_media(media: &mut dyn Storage) -> Result<Option<Kind>, String> {
+    Ok(detect(&header_of(media)?))
+}
+
 /// Build the console for an image that is read where it lies. Images of the
-/// cartridge consoles, and 3DS firmware payloads, are small and are read
-/// whole; a 3DS game keeps the medium and reads it as the game asks.
+/// cartridge consoles, 3DS firmware payloads and 3DSX homebrew are small and
+/// are read whole; a 3DS game (a card image or a program content) keeps the
+/// medium and reads it as the game asks.
 pub fn load_media(
     mut media: Box<dyn Storage>,
     opts: &LoadOptions,
 ) -> Result<Box<dyn System>, String> {
-    let mut header = vec![0u8; media.len().min(HEADER_LEN) as usize];
-    media.read_at(0, &mut header).map_err(|e| e.to_string())?;
     #[cfg(feature = "ctr")]
     if matches!(
-        ctr_fs::ImageKind::detect(&header),
+        ctr_fs::ImageKind::detect(&header_of(&mut *media)?),
         Some(ctr_fs::ImageKind::Ncsd | ctr_fs::ImageKind::Ncch)
     ) {
-        return Err(HLE_PENDING.to_string());
+        return ctr_hle::Horizon::system_from_media(media);
     }
     // Anything else is small enough to hold.
     const LIMIT: u64 = 1 << 30;
@@ -118,11 +152,6 @@ pub fn load_media(
     media.read_at(0, &mut rom).map_err(|e| e.to_string())?;
     load_with(rom, opts)
 }
-
-/// Until the high-level 3DS mode can load a game image.
-#[cfg(feature = "ctr")]
-const HLE_PENDING: &str = "3DS game images need the high-level mode, which cannot load one yet; \
-                           FIRM payloads and 3DSX homebrew load";
 
 /// Build the console for `rom`.
 pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, String> {
@@ -144,10 +173,11 @@ pub fn load_with(rom: Vec<u8>, opts: &LoadOptions) -> Result<Box<dyn System>, St
             None => Ok(gba_core::Gba::system(rom)),
         },
         #[cfg(feature = "ctr")]
+        // Firmware runs on the low-level machine; games and homebrew in the
+        // high-level mode.
         Some(Kind::Ctr) => match ctr_fs::ImageKind::detect(&rom) {
             Some(ctr_fs::ImageKind::Firm) => ctr_core::Ctr::system(rom),
-            Some(ctr_fs::ImageKind::ThreeDsx) => ctr_hle::Horizon::system(rom),
-            _ => Err(HLE_PENDING.to_string()),
+            _ => ctr_hle::Horizon::system(rom),
         },
         None => Err("not a Game Boy, Game Boy Color or Game Boy Advance ROM".to_string()),
     }
@@ -206,7 +236,7 @@ mod tests {
 
     #[cfg(feature = "ctr")]
     #[test]
-    fn loads_a_3ds_firm_and_refuses_other_3ds_images() {
+    fn loads_a_3ds_firm_and_refuses_a_broken_card() {
         let firm = ctr_fs::firm::build(0, 0x0800_6000, &[(0x0800_6000, &[0; 4])]);
         assert_eq!(detect(&firm), Some(Kind::Ctr));
         let system = load(firm).unwrap();
@@ -219,21 +249,35 @@ mod tests {
         assert!(load(ncsd).is_err());
     }
 
-    /// A medium that says it is huge and counts what is read from it.
+    /// A medium that says it is `len` bytes long, holds `data` at its start
+    /// and zeros after it, and counts what is read from it.
     struct Huge {
-        header: Vec<u8>,
+        data: Vec<u8>,
+        len: u64,
         bytes_read: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl Huge {
+        fn new(data: Vec<u8>) -> (Huge, std::rc::Rc<std::cell::Cell<u64>>) {
+            let bytes_read = std::rc::Rc::new(std::cell::Cell::new(0));
+            let huge = Huge {
+                data,
+                len: 4 << 30,
+                bytes_read: bytes_read.clone(),
+            };
+            (huge, bytes_read)
+        }
     }
 
     impl Storage for Huge {
         fn len(&self) -> u64 {
-            4 << 30
+            self.len
         }
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), emu_core::StorageError> {
             self.bytes_read
                 .set(self.bytes_read.get() + buf.len() as u64);
             for (i, byte) in buf.iter_mut().enumerate() {
-                *byte = self.header.get(offset as usize + i).copied().unwrap_or(0);
+                *byte = self.data.get(offset as usize + i).copied().unwrap_or(0);
             }
             Ok(())
         }
@@ -243,15 +287,21 @@ mod tests {
     fn media_are_identified_from_their_header_alone() {
         let system = load_media(Box::new(gb_rom(0x00)), &LoadOptions::default()).unwrap();
         assert_eq!(system.name(), "gb");
+        assert_eq!(detect_media(&mut gba_rom()), Ok(Some(Kind::Gba)));
 
         // Four gigabytes of nothing known: refused after reading the header.
-        let bytes_read = std::rc::Rc::new(std::cell::Cell::new(0));
-        let huge = Huge {
-            header: vec![0; 0x200],
-            bytes_read: bytes_read.clone(),
-        };
+        let (huge, bytes_read) = Huge::new(vec![0; 0x200]);
         assert!(load_media(Box::new(huge), &LoadOptions::default()).is_err());
         assert_eq!(bytes_read.get(), HEADER_LEN);
+    }
+
+    #[test]
+    fn every_console_names_its_file_extensions() {
+        for kind in Kind::ALL {
+            assert_eq!(kind.extension(), kind.extensions()[0]);
+        }
+        #[cfg(feature = "ctr")]
+        assert!(Kind::Ctr.extensions().contains(&"3dsx"));
     }
 
     #[cfg(feature = "ctr")]
@@ -270,25 +320,124 @@ mod tests {
     }
 
     #[cfg(feature = "ctr")]
+    fn put32(image: &mut [u8], at: usize, value: u32) {
+        image[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// A decrypted card image whose program is `code` at 0x100000, with
+    /// `save_size` bytes of save data and a RomFS of `romfs_len` zeros.
+    #[cfg(feature = "ctr")]
+    fn card(code: &[u8], save_size: u32, romfs_len: usize) -> Vec<u8> {
+        let mut image = vec![0u8; 0x200];
+        image[0x100..0x104].copy_from_slice(b"NCSD");
+        // Partition 0 from media unit 1 (0x200).
+        put32(&mut image, 0x120, 1);
+
+        let mut ncch = vec![0u8; 0x200];
+        ncch[0x100..0x104].copy_from_slice(b"NCCH");
+        ncch[0x150..0x15A].copy_from_slice(b"CTR-P-TEST");
+        // Extended header length; flags[7] bit 2: no encryption.
+        put32(&mut ncch, 0x180, 0x400);
+        ncch[0x18F] = 4;
+        let mut exheader = vec![0u8; 0x400];
+        exheader[..4].copy_from_slice(b"test");
+        let pages = code.len().div_ceil(0x1000) as u32;
+        for (at, addr, pages, size) in [
+            (0x10, 0x10_0000, pages, code.len() as u32),
+            (0x20, 0x10_0000 + pages * 0x1000, 0, 0),
+            (0x30, 0x10_0000 + pages * 0x1000, 0, 0),
+        ] {
+            put32(&mut exheader, at, addr);
+            put32(&mut exheader, at + 4, pages);
+            put32(&mut exheader, at + 8, size);
+        }
+        put32(&mut exheader, 0x1C, 0x1000);
+        put32(&mut exheader, 0x1C0, save_size);
+        exheader[0x20F] = 0x30;
+
+        let mut exefs = vec![0u8; 0x200];
+        exefs[..5].copy_from_slice(b".code");
+        let mut program = code.to_vec();
+        program.resize(pages as usize * 0x1000, 0);
+        put32(&mut exefs, 12, program.len() as u32);
+        exefs.extend_from_slice(&program);
+
+        let mut ivfc = vec![0u8; 0x1000];
+        ivfc[..4].copy_from_slice(b"IVFC");
+        put32(&mut ivfc, 0x08, 0x20);
+        put32(&mut ivfc, 0x44, romfs_len as u32);
+        put32(&mut ivfc, 0x4C, 12);
+        ivfc.resize((0x1000 + romfs_len).div_ceil(0x200) * 0x200, 0);
+
+        let exefs_unit = 3u32;
+        put32(&mut ncch, 0x1A0, exefs_unit);
+        put32(&mut ncch, 0x1A4, exefs.len() as u32 / 0x200);
+        let romfs_unit = exefs_unit + exefs.len() as u32 / 0x200;
+        put32(&mut ncch, 0x1B0, romfs_unit);
+        put32(&mut ncch, 0x1B4, ivfc.len() as u32 / 0x200);
+        ncch.extend_from_slice(&exheader);
+        ncch.extend_from_slice(&exefs);
+        ncch.extend_from_slice(&ivfc);
+        put32(&mut image, 0x124, ncch.len() as u32 / 0x200);
+        image.extend_from_slice(&ncch);
+        image
+    }
+
+    /// `svc 0x03`: the program exits at once.
+    #[cfg(feature = "ctr")]
+    const EXIT: [u8; 4] = 0xEF00_0003u32.to_le_bytes();
+
+    #[cfg(feature = "ctr")]
     #[test]
-    fn a_cartridge_image_is_not_read_whole() {
-        let mut header = vec![0u8; 0x200];
-        header[0x100..0x104].copy_from_slice(b"NCSD");
-        let bytes_read = std::rc::Rc::new(std::cell::Cell::new(0));
-        let huge = Huge {
-            header,
-            bytes_read: bytes_read.clone(),
-        };
-        // Not startable yet, but recognised, and without reading the image.
-        let error = load_media(Box::new(huge), &LoadOptions::default())
-            .err()
-            .unwrap();
-        assert!(error.contains("high-level"), "{error}");
-        assert_eq!(bytes_read.get(), HEADER_LEN);
+    fn a_card_image_is_read_where_it_lies() {
+        // Sixteen megabytes of RomFS in an image that says it is 4 GB.
+        let (huge, bytes_read) = Huge::new(card(&EXIT, 0, 16 << 20));
+        let mut system = load_media(Box::new(huge), &LoadOptions::default()).unwrap();
+        assert_eq!(system.name(), "3ds");
+        assert!(system.info().contains("CTR-P-TEST"), "{}", system.info());
+        assert!(!system.battery_backed(), "no save data in the exheader");
+        assert!(
+            bytes_read.get() < 64 << 10,
+            "read {} bytes to start the game",
+            bytes_read.get()
+        );
+        system.run_frame();
+
+        // The same image held in memory, as the browser has it.
+        let system = load(card(&EXIT, 0, 0x200)).unwrap();
+        assert_eq!(system.name(), "3ds");
 
         let firm = ctr_fs::firm::build(0, 0x0800_6000, &[(0x0800_6000, &[0; 4])]);
         let system = load_media(Box::new(firm), &LoadOptions::default()).unwrap();
         assert_eq!(system.name(), "3ds");
+    }
+
+    /// What a frontend does with a battery-backed 3DS title: it writes
+    /// `save_data` to a file and hands it back with `load_data` on the next
+    /// start.
+    #[cfg(feature = "ctr")]
+    #[test]
+    fn the_saves_of_a_card_title_survive_a_restart() {
+        let image = card(&EXIT, 0x8000, 0x200);
+        let mut first = load(image.clone()).unwrap();
+        assert!(first.battery_backed(), "the exheader asks for save data");
+        assert!(first.save_data().is_empty(), "nothing saved yet");
+
+        // What the game's fs:USER calls leave behind.
+        let mut store = ctr_hle::memfs::Store::default();
+        store.format("save", ctr_hle::memfs::Format::default());
+        store.create_file("save", "/main", 5).unwrap();
+        store.write("save", "/main", 0, b"crabs").unwrap();
+        first.load_data(&store.encode());
+        let written = first.save_data();
+        assert_eq!(written, store.encode());
+
+        let mut second = load(image).unwrap();
+        second.load_data(&written);
+        assert_eq!(second.save_data(), written);
+        // Garbage is ignored, not loaded.
+        second.load_data(b"not a save");
+        assert_eq!(second.save_data(), written);
     }
 
     #[test]
