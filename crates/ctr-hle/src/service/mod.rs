@@ -17,6 +17,11 @@ pub mod fs;
 pub mod gsp;
 pub mod hid;
 pub mod ldr_ro;
+pub mod ndm;
+pub mod simple;
+pub mod table;
+#[cfg(test)]
+pub mod testing;
 
 use crate::horizon::Horizon;
 use crate::ipc::{Reply, Request};
@@ -170,6 +175,7 @@ pub fn canonical(name: &str) -> &str {
         "APT:A" | "APT:S" | "APT:U" => "APT",
         "cfg:u" | "cfg:s" | "cfg:i" => "cfg",
         "hid:USER" | "hid:SPVR" => "hid",
+        "qtm:u" | "qtm:s" | "qtm:sp" => "qtm",
         other => other,
     }
 }
@@ -186,6 +192,16 @@ pub fn standard(name: &str) -> Option<Box<dyn Service>> {
         "gsp::Lcd" => gsp::lcd(),
         "ldr:ro" => ldr_ro::service(),
         "hid" => Box::new(hid::Hid::default()),
+        "ndm:u" => Box::new(ndm::Ndm::default()),
+        "news:u" => simple::news(),
+        "nim:aoc" => simple::nim_aoc(),
+        "dlp:SRVR" => simple::dlp_server(),
+        "dlp:FKCL" => simple::dlp_fake_client(),
+        "qtm" => simple::qtm(),
+        "pxi:dev" => simple::pxi_dev(),
+        "$hioFIO" => simple::host_io("$hioFIO"),
+        "$hostio0" => simple::host_io("$hostio0"),
+        "$hostio1" => simple::host_io("$hostio1"),
         _ => return None,
     })
 }
