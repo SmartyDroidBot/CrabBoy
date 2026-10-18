@@ -80,7 +80,34 @@ precision, the target index advancing after each register; past `c95` they
 are dropped. Boolean and integer uniforms and the entry point are plain
 registers. Every other register only holds its value so far.
 
+## Vertex loader (`pica::vertex`)
+
+From 3dbrew, "GPU/Internal Registers" (geometry pipeline) and "GPU/Programming
+Guide". Writing `DRAWARRAYS` (0x22E) or `DRAWELEMENTS` (0x22F) draws
+`NUMVERTICES` vertices at once. Arrays count from `VERTEX_OFFSET`; elements
+read unsigned bytes or shorts (bit 31 of `INDEXBUFFER_CONFIG`) at an offset
+from the base address, which is `ATTRIBBUFFERS_LOC & 0x1FFFFFFE` times eight.
+
+Each of the twelve attribute buffers lists, in order, the attributes a vertex
+holds there and paddings of 4 to 16 bytes (component values 12 to 15, placed
+on a word boundary); each attribute starts on a multiple of its element size,
+and vertices are `stride` bytes apart. Elements are signed or unsigned bytes,
+shorts or floats, converted exactly; elements an attribute lacks are 0, 0, 0
+and 1. An attribute no buffer names keeps its fixed value.
+
+`FIXEDATTRIB_DATA0..2` take three words per value, whichever of the three is
+written: w in the high 24 bits of the first, then z, y, and x in the low 24
+bits of the third (as citro3d packs them; the layout is the mirror of the
+float uniforms'). With index 0xF they are immediate-mode attributes, and a
+vertex is drawn as soon as `VSH_NUM_ATTR + 1` have arrived; writing the index
+starts over.
+
+The vertex shader gets attribute `i` in the input register its permutation
+(0x2BB, 0x2BC) names. Of its outputs, the `k`th one enabled in the output
+mask (0x2BD) takes the semantics of `SH_OUTMAP_Ok` (0x50 + k), for
+`SH_OUTMAP_TOTAL` of them; semantics nothing maps read as 1.0.
+
 ## Not started
 
-Vertex loading, primitive assembly, clipping, the rasteriser, texture units
-and combiners, fragment lighting, the framebuffer and the geometry stage.
+Primitive assembly, clipping, the rasteriser, texture units and combiners,
+fragment lighting, the framebuffer and the geometry stage.

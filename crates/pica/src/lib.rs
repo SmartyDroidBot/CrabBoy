@@ -14,3 +14,4 @@ pub mod memory;
 pub mod regs;
 pub mod shader;
 pub mod transfer;
+pub mod vertex;

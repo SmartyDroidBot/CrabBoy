@@ -15,7 +15,8 @@
 
 use crate::memory::Memory;
 use crate::regs::{self as reg, sh};
-use crate::shader::{from_float24, Program, Uniforms, Vec4};
+use crate::shader::{from_float24, Program, Uniforms, Unit, Vec4, ZERO};
+use crate::vertex::{attribute_from_words, shader_inputs, Attributes, Loader, OutputVertex};
 use softfloat::F32;
 
 pub const REGISTERS: usize = reg::COUNT;
@@ -131,10 +132,25 @@ pub enum ListEnd {
     Jump(usize),
 }
 
+/// Work the pipeline has done, for cost models and diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Stats {
+    pub vertices: u64,
+    pub triangles: u64,
+    pub fragments: u64,
+}
+
 pub struct Gpu {
     pub regs: [u32; REGISTERS],
     pub geometry: ShaderSetup,
     pub vertex: ShaderSetup,
+    /// The fixed attribute values.
+    pub fixed: Attributes,
+    /// Words written to `FIXEDATTRIB_DATA0..2` since the last whole value.
+    fixed_words: Vec<u32>,
+    /// The attributes of the immediate-mode vertex being sent.
+    immediate: Vec<Vec4>,
+    pub stats: Stats,
 }
 
 impl Default for Gpu {
@@ -143,6 +159,10 @@ impl Default for Gpu {
             regs: [0; REGISTERS],
             geometry: ShaderSetup::default(),
             vertex: ShaderSetup::default(),
+            fixed: [[ZERO; 4]; 12],
+            fixed_words: Vec::with_capacity(3),
+            immediate: Vec::with_capacity(16),
+            stats: Stats::default(),
         }
     }
 }
@@ -163,7 +183,6 @@ impl Gpu {
     /// register `id`. A write that triggers work (a draw) does it at once,
     /// reading and writing `mem`.
     pub fn write_register(&mut self, id: u32, value: u32, mask: u32, mem: &mut dyn Memory) {
-        let _ = mem;
         let Some(slot) = self.regs.get_mut(id as usize) else {
             return;
         };
@@ -173,10 +192,83 @@ impl Gpu {
         *slot = *slot & !bits | value & bits;
         let value = *slot;
         match id {
+            reg::DRAWARRAYS => self.draw(false, mem),
+            reg::DRAWELEMENTS => self.draw(true, mem),
+            reg::FIXEDATTRIB_INDEX => {
+                self.fixed_words.clear();
+                self.immediate.clear();
+            }
+            reg::FIXEDATTRIB_DATA0..=reg::FIXEDATTRIB_DATA2 => {
+                self.fixed_words.push(value);
+                if self.fixed_words.len() == 3 {
+                    let words = [
+                        self.fixed_words[0],
+                        self.fixed_words[1],
+                        self.fixed_words[2],
+                    ];
+                    self.fixed_words.clear();
+                    self.fixed_attribute(attribute_from_words(words), mem);
+                }
+            }
             reg::GSH..=0x2AF => self.geometry.write(id - reg::GSH, value),
             reg::VSH..=0x2DF => self.vertex.write(id - reg::VSH, value),
             _ => {}
         }
+    }
+
+    /// A whole value from `FIXEDATTRIB_DATA0..2`: a fixed attribute, or with
+    /// index 0xF the next attribute of an immediate-mode vertex, which is
+    /// drawn once it has all `VSH_NUM_ATTR` attributes.
+    fn fixed_attribute(&mut self, value: Vec4, mem: &mut dyn Memory) {
+        let index = (self.regs[reg::FIXEDATTRIB_INDEX as usize] & 0xF) as usize;
+        if index != 0xF {
+            if let Some(slot) = self.fixed.get_mut(index) {
+                *slot = value;
+            }
+            return;
+        }
+        self.immediate.push(value);
+        let count = (self.regs[reg::VSH_NUM_ATTR as usize] & 0xF) as usize + 1;
+        if self.immediate.len() >= count {
+            let vertex = self.shade(&self.immediate, count);
+            self.immediate.clear();
+            self.submit(vertex, mem);
+        }
+    }
+
+    /// `DRAWARRAYS` or `DRAWELEMENTS`: `NUMVERTICES` vertices through the
+    /// vertex shader and on to the primitive assembler.
+    fn draw(&mut self, indexed: bool, mem: &mut dyn Memory) {
+        let regs = self.regs;
+        let loader = Loader::new(&regs);
+        let count = loader.attribute_count();
+        for n in 0..regs[reg::NUMVERTICES as usize] {
+            let index = loader.index(n, indexed, mem);
+            let attributes = loader.load(index, &self.fixed, mem);
+            let vertex = self.shade(&attributes, count);
+            self.submit(vertex, mem);
+        }
+    }
+
+    /// Run the vertex shader on one vertex's attributes.
+    pub fn shade(&self, attributes: &[Vec4], count: usize) -> OutputVertex {
+        let mut unit = Unit {
+            inputs: shader_inputs(&self.regs, reg::VSH, attributes, count),
+            ..Unit::default()
+        };
+        unit.run(
+            &self.vertex.program,
+            &self.vertex.uniforms,
+            self.vertex.entry,
+        );
+        let mask = self.regs[(reg::VSH + sh::OUTMAP_MASK) as usize];
+        OutputVertex::from_outputs(&self.regs, mask, &unit.outputs)
+    }
+
+    /// A shaded vertex enters primitive assembly.
+    fn submit(&mut self, vertex: OutputVertex, mem: &mut dyn Memory) {
+        let _ = (vertex, mem);
+        self.stats.vertices += 1;
     }
 
     /// Carry out a command list.
@@ -355,6 +447,84 @@ mod tests {
             gpu.geometry.uniforms.boolean, 0,
             "the geometry block is separate"
         );
+    }
+
+    /// A vertex shader `mov o0, v0 ; mov o1, v1 ; end`, o0 the position and
+    /// o1 the colour, reading attribute 0 into v0 and 1 into v1.
+    fn passthrough(gpu: &mut Gpu) {
+        let mem = &mut VecMemory::default();
+        let mov = |dst: u32, src: u32| 0x13 << 26 | dst << 21 | src << 12;
+        let code = [mov(0, 0), mov(1, 1), 0x22 << 26];
+        gpu.write_register(reg::VSH + sh::CODETRANSFER_INDEX, 0, 0xF, mem);
+        for word in code {
+            gpu.write_register(reg::VSH + sh::CODETRANSFER_DATA0, word, 0xF, mem);
+        }
+        gpu.write_register(reg::VSH + sh::OPDESCS_INDEX, 0, 0xF, mem);
+        gpu.write_register(reg::VSH + sh::OPDESCS_DATA0, 0x1B << 5 | 0xF, 0xF, mem);
+        gpu.write_register(reg::VSH + sh::ATTRIBUTES_PERMUTATION_LOW, 0x10, 0xF, mem);
+        gpu.write_register(reg::VSH + sh::OUTMAP_MASK, 0b11, 0xF, mem);
+        gpu.write_register(reg::SH_OUTMAP_TOTAL, 2, 0xF, mem);
+        gpu.write_register(reg::SH_OUTMAP_O0, 0x0302_0100, 0xF, mem);
+        gpu.write_register(reg::SH_OUTMAP_O0 + 1, 0x0B0A_0908, 0xF, mem);
+    }
+
+    #[test]
+    fn a_draw_shades_each_vertex_of_its_buffers() {
+        let mut gpu = Gpu::new();
+        passthrough(&mut gpu);
+        let mut mem = VecMemory::new(0x1800_0000, 0x100);
+        // Three vertices of two unsigned-byte pairs each, four bytes apart.
+        for (n, bytes) in [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+            .iter()
+            .enumerate()
+        {
+            mem.bytes[n * 4..n * 4 + 4].copy_from_slice(bytes);
+        }
+        let m = &mut mem;
+        gpu.write_register(reg::ATTRIBBUFFERS_LOC, 0x1800_0000 >> 3, 0xF, m);
+        gpu.write_register(reg::ATTRIBBUFFERS_FORMAT_LOW, 0x55, 0xF, m);
+        gpu.write_register(reg::ATTRIBBUFFERS_FORMAT_HIGH, 1 << 28, 0xF, m);
+        gpu.write_register(reg::ATTRIBBUFFER0_OFFSET + 1, 0x10, 0xF, m);
+        gpu.write_register(reg::ATTRIBBUFFER0_OFFSET + 2, 2 << 28 | 4 << 16, 0xF, m);
+        gpu.write_register(reg::NUMVERTICES, 3, 0xF, m);
+        gpu.write_register(reg::DRAWARRAYS, 1, 0xF, m);
+        assert_eq!(gpu.stats.vertices, 3);
+
+        let loader = Loader::new(&gpu.regs);
+        let attributes = loader.load(2, &gpu.fixed, &mem);
+        let vertex = gpu.shade(&attributes, 2);
+        let f = |v: f32| F32(v.to_bits());
+        assert_eq!(
+            vertex.position(),
+            [f(9.0), f(10.0), ZERO, crate::shader::ONE]
+        );
+        assert_eq!(vertex.attrs[8..10], [f(11.0), f(12.0)]);
+    }
+
+    #[test]
+    fn immediate_mode_draws_a_vertex_per_whole_set_of_attributes() {
+        let mut gpu = Gpu::new();
+        passthrough(&mut gpu);
+        let m = &mut VecMemory::default();
+        gpu.write_register(reg::VSH_NUM_ATTR, 1, 0xF, m);
+        gpu.write_register(reg::FIXEDATTRIB_INDEX, 0xF, 0xF, m);
+        for _ in 0..5 {
+            for word in [0x3E00_0040, 0x8000_BF00, 0x003F_0000] {
+                gpu.write_register(reg::FIXEDATTRIB_DATA0, word, 0xF, m);
+            }
+        }
+        assert_eq!(gpu.stats.vertices, 2, "the fifth attribute waits");
+
+        // A fixed attribute is stored, not drawn.
+        gpu.write_register(reg::FIXEDATTRIB_INDEX, 3, 0xF, m);
+        for (n, word) in [0x3E00_0040, 0x8000_BF00, 0x003F_0000]
+            .into_iter()
+            .enumerate()
+        {
+            gpu.write_register(reg::FIXEDATTRIB_DATA0 + n as u32, word, 0xF, m);
+        }
+        assert_eq!(gpu.stats.vertices, 2);
+        assert_eq!(gpu.fixed[3][0], crate::shader::ONE);
     }
 
     #[test]
