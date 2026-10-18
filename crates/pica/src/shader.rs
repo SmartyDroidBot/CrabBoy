@@ -6,11 +6,9 @@
 //! there is no negative zero, subnormals are zero, and zero times anything
 //! but NaN is zero. The hardware works in its 24-bit format (one sign bit,
 //! seven exponent bits, sixteen mantissa bits); what that does to rounding
-//! is not modelled, as no measurements of it are published.
-//!
-//! Not implemented: `EX2`, `LG2` and `LITP`, which need an exponential and a
-//! logarithm in integer arithmetic. They leave their destination alone and
-//! are counted in [`Unit::unimplemented`].
+//! is not modelled, as no measurements of it are published. `EX2` and `LG2`
+//! are `softfloat`'s correctly rounded (to within one rounding) exponential
+//! and logarithm; the hardware's are likely coarser.
 
 use softfloat::{Env, F32};
 use std::cmp::Ordering;
@@ -95,9 +93,19 @@ fn reciprocal_root(value: F32) -> F32 {
     if is_zero(value) {
         return INFINITY;
     }
-    let mut env = Env::default();
-    tidy(ONE.div(value.sqrt(&mut env), &mut env))
+    tidy(value.rsqrt(&mut Env::default()))
 }
+
+fn exp2(value: F32) -> F32 {
+    tidy(value.exp2(&mut Env::default()))
+}
+
+fn log2(value: F32) -> F32 {
+    tidy(value.log2(&mut Env::default()))
+}
+
+/// The largest magnitude `LITP` passes in y: 127.99609375.
+const LITP_LIMIT: F32 = F32(0x42FF_FE00);
 
 /// The instructions and operand descriptors loaded into a shader unit.
 #[derive(Clone, Default)]
@@ -145,8 +153,6 @@ pub struct Unit {
     pub emit: Emit,
     /// `EMIT` instructions executed, each with the state it saw.
     pub emitted: Vec<(Emit, [Vec4; 16])>,
-    /// `EX2`, `LG2` and `LITP` instructions skipped.
-    pub unimplemented: u32,
 }
 
 impl Default for Unit {
@@ -160,7 +166,6 @@ impl Default for Unit {
             cmp: [false; 2],
             emit: Emit::default(),
             emitted: Vec::new(),
-            unimplemented: 0,
         }
     }
 }
@@ -425,9 +430,23 @@ impl Unit {
                         // The first source with its w taken as one.
                         0x03 | 0x18 => Some([add(dot(3), s2[3]); 4]),
                         0x04 | 0x19 => Some([ONE, mul(s1[1], s2[1]), s1[2], s2[3]]),
-                        0x05..=0x07 => {
-                            self.unimplemented += 1;
-                            None
+                        0x05 => Some([exp2(s1[0]); 4]),
+                        0x06 => Some([log2(s1[0]); 4]),
+                        0x07 => {
+                            // Clamped for a later EX2 and LG2; the flags say
+                            // whether x and w are not negative.
+                            let positive = |v: F32| !less(v, ZERO) && !v.is_nan();
+                            let max0 = |v: F32| if less(ZERO, v) { v } else { ZERO };
+                            let y = s1[1];
+                            let y = if less(LITP_LIMIT, y) {
+                                LITP_LIMIT
+                            } else if less(y, negate(LITP_LIMIT)) {
+                                negate(LITP_LIMIT)
+                            } else {
+                                y
+                            };
+                            self.cmp = [positive(s1[0]), positive(s1[3])];
+                            Some([max0(s1[0]), y, ZERO, max0(s1[3])])
                         }
                         0x08 => Some(std::array::from_fn(|i| mul(s1[i], s2[i]))),
                         0x09 | 0x1A => Some(std::array::from_fn(|i| {
@@ -663,6 +682,37 @@ mod tests {
             Stop::End
         );
         assert_eq!(unit.outputs[0], vec([11.0, 19.0, 29.0, 1.0]));
+    }
+
+    #[test]
+    fn ex2_lg2_and_litp_compute_a_specular_power() {
+        // litp r0, v0 ; lg2 r1, r0.x ; mul r1, r1, r0.y ; ex2 o0, r1
+        // with v0 = (4, 300, 7, -1): 4^127.996 overflows, so use x = 0.5.
+        let code = [
+            op(0x07, 0x10, 0, 0, 0),
+            op(0x06, 0x11, 0x10, 0, 0),
+            op(0x08, 0x11, 0x11, 0x10, 1),
+            op(0x05, 0, 0x11, 0, 0),
+            END,
+        ];
+        let y_of_second = PLAIN & !(0xFF << 14) | 0x55 << 14;
+        let mut unit = Unit::default();
+        unit.inputs[0] = vec([0.5, 3.0, 7.0, -1.0]);
+        run(
+            &code,
+            &[PLAIN, y_of_second],
+            &Uniforms::default(),
+            &mut unit,
+        );
+        assert_eq!(unit.temps[0], vec([0.5, 3.0, 0.0, 0.0]));
+        assert_eq!(unit.cmp, [true, false]);
+        assert_eq!(unit.temps[1], vec([-3.0; 4]));
+        assert_eq!(unit.outputs[0], vec([0.125; 4]));
+
+        unit.inputs[0] = vec([-2.0, 300.0, 0.0, 1.0]);
+        run(&code[..1], &[PLAIN], &Uniforms::default(), &mut unit);
+        assert_eq!(unit.temps[0], vec([0.0, 128.0 - 1.0 / 256.0, 0.0, 1.0]));
+        assert_eq!(unit.cmp, [false, true]);
     }
 
     #[test]

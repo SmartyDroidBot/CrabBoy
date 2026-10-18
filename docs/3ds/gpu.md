@@ -44,9 +44,10 @@ Open:
   bits). Arithmetic here is single precision with those special cases; how
   the narrower format rounds has not been measured by anyone, so results can
   differ in their low bits.
-- `EX2`, `LG2` and `LITP` are not implemented (they need an exponential and a
-  logarithm in integer arithmetic). They leave their destination unchanged
-  and are counted.
+- `EX2` and `LG2` use `softfloat`'s `exp2` and `log2`, rounded once; the
+  hardware's precision is not measured and is likely lower. `LITP` follows
+  3dbrew: (max(x, 0), y clamped to ±127.99609375, 0, max(w, 0)), with the
+  comparison flags set to x ≥ 0 and w ≥ 0.
 - The depth of the hardware's call, if and loop stacks is not modelled; the
   interpreter stops at 32 nested blocks or a million instructions.
 - No payload drives the GPU yet. Bare-metal GPU test programs that
