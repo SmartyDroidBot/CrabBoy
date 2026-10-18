@@ -5,6 +5,7 @@
 
 pub mod fat;
 pub mod firm;
+pub mod ncch;
 pub mod threedsx;
 
 pub use firm::{CopyMethod, Firm, FirmError, Section};
